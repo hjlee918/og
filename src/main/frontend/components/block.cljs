@@ -61,6 +61,7 @@
             [frontend.util.f27-ref-overview :as f27]
             [frontend.util.f27-crystal :as f27c]
             [frontend.util.f27-context :as f27ctx]
+            [frontend.util.f27-children :as f27ch]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -2662,8 +2663,189 @@
          (when-not (string/blank? text)
            (inline-text config format text))])]]))
 
+(defn- f27-children-fn
+  "Immediate children of one block, in OG's canonical outline order.
+
+  Deliberately NOT `db/get-block-children` (which pulls the whole subtree) and
+  NOT `db/get-block-immediate-children`, whose `sort-by-left` runs with
+  `:check? true` and ASSERTS when two siblings share a `:block/left` — a
+  malformed outline would crash the panel rather than degrade.
+
+  This reads the same two things that function reads and hands both to the pure
+  planner: the raw sibling set, and OG's left-order walk of it. The planner
+  compares them, so a broken `left` chain loses the ORDER (disclosed) instead of
+  silently losing siblings.
+
+  A block that cannot be resolved is reported as missing, which the planner
+  keeps distinct from both a failed query and a childless block. Read-only: an
+  entity lookup and a pure sort; nothing here writes."
+  [repo]
+  (fn [uuid]
+    (if-let [parent (db/entity repo [:block/uuid uuid])]
+      (let [raw (vec (:block/_parent parent))]
+        {:raw raw
+         :ordered (vec (db/sort-by-left raw parent {:check? false}))})
+      {:missing? true})))
+
+(rum/defc f27-descendant-line < rum/static
+  "One descendant row: its own expansion control, then its text.
+
+  Rendered through the same read-only inline renderer as the ancestor lines, so
+  headings, tasks, emphasis, Korean and emoji keep their meaning and no editing
+  handler, id or save path is created."
+  [config row open? on-toggle]
+  (let [{:keys [entity depth descend has-children?]} row
+        content (f27ch/node-label entity)
+        format (or (:block/format entity) :markdown)
+        {:keys [heading marker text]} (f27ctx/split-block-prefix content)]
+    [:div.f27-desc-line {:class (str "depth-" (min depth 5)
+                                    (when heading " is-heading"))}
+     ;; The control appears only when it can actually do something. Every other
+     ;; case is explained by a marker with a title, never a dead affordance.
+     (cond
+       (= descend :cycle)
+       [:span.f27-desc-mark.is-stop {:title (t :f27/children-cycle)} "↻"]
+
+       (= descend :depth)
+       [:span.f27-desc-mark.is-stop {:title (t :f27/children-depth f27ch/max-depth)} "⋯"]
+
+       (= descend :budget)
+       [:span.f27-desc-mark.is-stop {:title (t :f27/children-budget f27ch/max-visible)} "⋯"]
+
+       (and (= descend :ok) has-children?)
+       [:a.f27-desc-toggle
+        {:on-click (fn [e] (util/stop e) (on-toggle))
+         :title (if open? (t :f27/children-hide) (t :f27/children-show))}
+        (if open? "▾" "▸")]
+
+       :else [:span.f27-desc-mark "·"])
+     [:span.f27-desc-body
+      (if (nil? content)
+        [:span.f27-ctx-unavailable (t :f27/context-unavailable-line)]
+        [:<>
+         (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
+         (when marker [:span.f27-ctx-badge.is-task marker])
+         (when-not (string/blank? text)
+           (inline-text config format text))])]]))
+
+(rum/defc f27-descendant-notes < rum/static
+  "Whatever one node has to say about its own children, beneath its row."
+  [info depth]
+  (let [{:keys [summary remaining unordered]} info]
+    [:div.f27-desc-notes {:class (str "depth-" (min (inc (or depth 0)) 5))}
+     (case summary
+       :error [:div.f27-ctx-note.f27-ctx-error (t :f27/children-error)]
+       :unavailable [:div.f27-ctx-note.f27-ctx-error (t :f27/children-unavailable)]
+       nil)
+     ;; Order and completeness are separate claims. Losing the order does not
+     ;; mean losing children, and the reader is told which happened.
+     (when (false? (:ordered? info))
+       [:div.f27-ctx-note.f27-ctx-error (t :f27/children-unordered unordered)])
+     (when (and (= summary :partial) (pos? (or remaining 0)))
+       [:div.f27-ctx-note (t :f27/children-remaining remaining)])]))
+
+(rum/defc f27-row-descendants < rum/reactive
+  "Children of THIS referencing block, and progressively deeper descendants.
+
+  These are the children of the block that REFERENCES the target, on its own
+  source page — not children of the canonical target elsewhere. The heading says
+  so, because the two are easy to confuse in a panel opened from the target.
+
+  All expansion state lives in ONE atom per row instance, keyed by path, so:
+    * rendering is a pure function of that state — nothing is mutated on render;
+    * the visible-node safeguard can be counted exactly across all open
+      branches, rather than guessed per node;
+    * each row and each repeated appearance of a block owns its own state.
+
+  It is TRANSIENT: nothing here touches OG's own saved `collapsed::` property,
+  so collapsing a branch in this panel cannot change what the graph stores."
+  [config repo uuid' *open? *desc]
+  ;; rum/react, not deref: the expansion atoms are owned by the parent row, so
+  ;; this component must SUBSCRIBE to them. Merely dereferencing them under
+  ;; rum/static left it comparing identical atom identities and skipping the
+  ;; re-render, so opening a branch changed nothing on screen.
+  (let [desc (rum/react *desc)
+        open? (rum/react *open?)
+        plan (f27ch/build-plan (f27-children-fn repo) uuid' desc)
+        root-info (get-in plan [:info []])
+        {:keys [rows]} plan
+        ;; Capacity, not merely "the walk was cut short": a plan that fills the
+        ;; safeguard exactly still has no room for another row, so continuation
+        ;; must be withheld there too.
+        full? (f27ch/plan-at-capacity? plan)
+        hiding? (f27ch/plan-hiding-anything? plan)
+        summary (:summary root-info)
+        toggle-path! (fn [path]
+                       (swap! *desc update :open
+                              (fn [o] (if (contains? o path) (disj o path) (conj o path)))))
+        show-more! (fn [path]
+                     (swap! *desc update :limits
+                            (fn [m] (assoc m path (f27ch/continue-limit
+                                                   (get m path f27ch/default-batch))))))]
+    [:div.f27-desc
+     ;; The toggle appears only when there is something to reveal. A block with
+     ;; no children says nothing at all rather than offering an empty control.
+     (cond
+       (= summary :error)
+       [:div.f27-ctx-note.f27-ctx-error (t :f27/children-error)]
+
+       (= summary :unavailable)
+       [:div.f27-ctx-note.f27-ctx-error (t :f27/children-unavailable)]
+
+       (= summary :none) nil
+
+       :else
+       [:<>
+        [:a.f27-desc-toggle-all
+         {:on-click (fn [e] (util/stop e) (swap! *open? not))}
+         (if open?
+           (t :f27/children-hide-all)
+           (t :f27/children-show-all (:total root-info)))]
+        (when open?
+          [:div.f27-desc-body-wrap
+           [:div.f27-desc-head (t :f27/children-of-this-block)]
+           ;; A keyed wrapper element, NOT rum/with-key: with-key clones a React
+           ;; element, and handing it a raw hiccup vector fails at render time.
+           (for [row rows
+                 :let [path (:path row)
+                       info (get-in plan [:info path])]]
+             [:div.f27-desc-item {:key (str "d-" (string/join ">" (map str path)))}
+              (f27-descendant-line config row (:open? row)
+                                   (fn [] (toggle-path! path)))
+              (when (:open? row) (f27-descendant-notes info (:depth row)))])
+           (f27-descendant-notes root-info 0)
+           ;; Continuation for the referencing block's own children.
+           (when (f27ch/can-continue? root-info full?)
+             [:a.f27-desc-more
+              {:on-click (fn [e] (util/stop e) (show-more! []))}
+              (t :f27/children-more)])
+           ;; Continuation for each OPEN node that has more children, offered
+           ;; only where it can actually progress.
+           (for [row rows
+                 :let [path (:path row)
+                       info (get-in plan [:info path])]
+                 :when (and (:open? row) (f27ch/can-continue? info full?))]
+             [:a.f27-desc-more
+              {:key (str "m-" (string/join ">" (map str path)))
+               :class (str "is-nested depth-" (min (inc (:depth row)) 5))
+               :on-click (fn [e] (util/stop e) (show-more! path))}
+              (t :f27/children-more)])
+           (when hiding?
+             [:div.f27-ctx-note.f27-ctx-capped
+              (t :f27/children-budget f27ch/max-visible)])
+           ;; At any safeguard the reader is sent to the source instead of being
+           ;; offered a control that cannot progress.
+           (when (or hiding? (some #(not= :ok (:descend %)) rows))
+             [:a.f27-desc-source
+              {:on-click (fn [e]
+                           (util/stop e)
+                           (route-handler/redirect-to-page! (str uuid')))}
+              (t :f27/children-open-source)])])])]))
+
 (rum/defcs f27-row-context < rum/static
   (rum/local f27ctx/default-batch ::limit)
+  (rum/local false ::kids-open?)
+  (rum/local {:open #{} :limits {}} ::desc)
   "Expanded ancestor context for ONE incoming-reference row.
 
   Ancestors are walked in BOUNDED BATCHES with explicit continuation, rather
@@ -2719,7 +2901,10 @@
              {:on-click (fn [e]
                           (util/stop e)
                           (reset! *limit (+ depth f27ctx/default-batch)))}
-             (t :f27/context-load-more)])]))]))
+             (t :f27/context-load-more)])
+          ;; Descendants of THIS referencing block.
+          (f27-row-descendants config repo uuid'
+                               (::kids-open? state) (::desc state))]))]))
 
 (rum/defcs f27-ref-overview-row < rum/static
   (rum/local false ::ctx-open?)

@@ -942,3 +942,36 @@ html.is-mac {
 .f27-ctx-note.f27-ctx-error { color: var(--ls-warning-text-color, var(--ls-secondary-text-color)); }
 .f27-ctx-load-more { display: inline-block; margin-top: 0.3rem; color: var(--ls-link-text-color);
   cursor: pointer; font-size: 0.85em; }
+
+/* F27 slice 4 — expandable descendants. Display-only; transient state only. */
+.f27-desc { margin-top: 0.4rem; }
+.f27-desc-toggle-all { color: var(--ls-link-text-color); cursor: pointer; font-size: 0.85em; }
+.f27-desc-body-wrap {
+  margin-top: 0.3rem; padding: 0.3rem 0.4rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  border-radius: 4px;
+}
+.f27-desc-head {
+  color: var(--ls-secondary-text-color); font-size: 0.85em;
+  margin-bottom: 0.25rem; font-style: italic;
+}
+.f27-desc-line { display: flex; gap: 0.3rem; align-items: baseline; }
+/* Indent conveys hierarchy on screen only; nothing on disk is reindented. */
+.f27-desc-line.depth-1, .f27-desc-notes.depth-1, .f27-desc-more.depth-1 { margin-left: 0; }
+.f27-desc-line.depth-2, .f27-desc-notes.depth-2, .f27-desc-more.depth-2 { margin-left: 1rem; }
+.f27-desc-line.depth-3, .f27-desc-notes.depth-3, .f27-desc-more.depth-3 { margin-left: 2rem; }
+.f27-desc-line.depth-4, .f27-desc-notes.depth-4, .f27-desc-more.depth-4 { margin-left: 3rem; }
+.f27-desc-line.depth-5, .f27-desc-notes.depth-5, .f27-desc-more.depth-5 { margin-left: 4rem; }
+.f27-desc-line.is-heading .f27-desc-body { font-weight: 600; }
+.f27-desc-toggle {
+  flex: 0 0 auto; cursor: pointer; color: var(--ls-link-text-color);
+  width: 1em; text-align: center; user-select: none;
+}
+.f27-desc-mark { flex: 0 0 auto; color: var(--ls-secondary-text-color); width: 1em; text-align: center; }
+.f27-desc-mark.is-stop { cursor: help; }
+.f27-desc-body { min-width: 0; }
+.f27-desc-notes { margin: 0.1rem 0; }
+.f27-desc-more { display: inline-block; margin-top: 0.2rem; margin-right: 0.75rem;
+  color: var(--ls-link-text-color); cursor: pointer; font-size: 0.85em; }
+.f27-desc-source { display: inline-block; margin-top: 0.3rem;
+  color: var(--ls-link-text-color); cursor: pointer; font-size: 0.85em; }
