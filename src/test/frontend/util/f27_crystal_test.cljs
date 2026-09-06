@@ -96,6 +96,24 @@
     (is (= "짧은 글" (f27c/preview-text "짧은 글" 60)))
     (is (nil? (f27c/preview-text nil 10)))))
 
+(deftest preview-label-shows-words-not-identifiers
+  (testing "a block reference in a marked block does not fill the chip"
+    (let [out (f27c/preview-label
+               "Two protected hours each morning matched ((7f270000-0000-4000-8000-000000000001)) almost exactly. #핵심"
+               60)]
+      (is (not (re-find #"7f270000" out)) "no identifier is shown")
+      (is (re-find #"Two protected hours each morning matched" out)
+          "the words the reader recognises survive")))
+  (testing "a page reference keeps its page name and a link keeps its text"
+    (is (= "see Deep Work" (f27c/preview-label "see [[Deep Work]]" 60)))
+    (is (= "see the chapter" (f27c/preview-label "see [the chapter](http://example.com)" 60))))
+  (testing "truncation is still the Unicode-safe one, applied after reduction"
+    (let [out (f27c/preview-label "집중력 실험 결과 훨씬 긴 한국어 문장 🌟 계속" 8)]
+      (is (= 9 (count (vec out))) "8 codepoints plus the ellipsis")
+      (is (re-find #"…$" out))))
+  (testing "non-strings stay safe"
+    (is (nil? (f27c/preview-label nil 60)))))
+
 (deftest select-previews-accounts-for-every-match
   (testing "under the cap everything is shown"
     (let [ms [{:uuid "a"} {:uuid "b"}]

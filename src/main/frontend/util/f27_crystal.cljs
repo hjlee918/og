@@ -20,7 +20,8 @@
   marks the BLOCK that carries a tag, not the individual word the user may have
   had in mind. Slice 2 therefore previews the tagged block. It does not guess
   which word inside the block was intended."
-  (:require [clojure.string :as string]))
+  (:require [clojure.string :as string]
+            [frontend.util.f27-inbound :as f27in]))
 
 (def ^:const max-previews
   "Maximum Crystal previews rendered per incoming-reference row."
@@ -159,6 +160,21 @@
       (if (and (int? max-len) (pos? max-len) (> (count segs) max-len))
         (str (string/join (subvec segs 0 max-len)) "…")
         flat))))
+
+(defn preview-label
+  "The text a Crystal preview chip actually shows.
+
+  A Crystal is often marked on a block that itself contains a reference, and a
+  block reference's raw text is `((uuid))` — 38 characters of identifier that
+  fill a 60-character chip and name nothing. `preview-text` alone therefore
+  produced chips like `\"Two protected hours each morning matched ((7f270000-…\"`.
+
+  Inline reference markup is reduced to what a person reads first, using the
+  same reduction every other compact F27 label uses, and only then truncated.
+  This affects the chip's label, its tooltip and its accessible name. The block
+  itself is never altered."
+  [content max-len]
+  (preview-text (f27in/plain-label content) max-len))
 
 (defn select-previews
   "Choose which Crystal matches to show for one incoming-reference row.

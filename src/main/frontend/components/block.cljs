@@ -2467,6 +2467,9 @@
                      (when (f27c/block-tagged? crystal-tag inline props)
                        {:uuid (:block/uuid b)
                         :content (:block/content b)
+                        ;; Carried so the chip can drop the block's built-in
+                        ;; properties the same way the block itself does.
+                        :format (:block/format b)
                         :self? (= (:block/uuid b) uuid')}))))
            vec))))
 
@@ -2567,7 +2570,11 @@
 
 (rum/defc f27-crystal-preview < rum/static
   [m]
-  (let [label (f27c/preview-text (:content m) 60)]
+  (let [raw (:content m)
+        ;; Built-in properties out (a marked block that is referred to carries a
+        ;; persisted `id::`), then inline reference markup reduced to what a
+        ;; person reads. Falls back to the raw text if cleaning leaves nothing.
+        label (f27c/preview-label (or (f27-display-content (:format m) raw) raw) 60)]
     [:button.f27-crystal-chip.f27-btn
      (f27-btn (fn []
                 ;; Navigate through OG's existing block route; no new mechanism.
