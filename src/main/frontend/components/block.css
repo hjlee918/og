@@ -967,6 +967,59 @@ html.is-mac {
   flex: 0 0 auto; cursor: pointer; color: var(--ls-link-text-color);
   width: 1em; text-align: center; user-select: none;
 }
+
+/* F27 correction batch — every in-panel action is a NATIVE BUTTON, so it is
+   reachable by Tab and activated by Enter and Space, with a focus ring that is
+   actually visible. `f27-btn` only strips the default chrome; each control
+   keeps its own colour and size from the rules above. */
+
+.f27-btn {
+  background: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  font: inherit;
+  text-align: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  color: var(--ls-link-text-color);
+}
+
+.f27-btn:focus-visible {
+  outline: 2px solid var(--ls-link-text-color);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* Older engines without :focus-visible still get a ring rather than nothing. */
+
+.f27-btn:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.f27-desc-toggle.f27-btn {
+  width: 1em;
+}
+
+.f27-desc-retry {
+  display: inline-block;
+  margin-top: 0.2rem;
+  margin-right: 0.75rem;
+  font-size: 0.85em;
+  text-decoration: underline;
+}
+
+/* A probe whose answer is unknown must not read like an ordinary leaf. */
+
+.f27-desc-mark.is-unknown {
+  color: var(--ls-warning-text-color, var(--ls-secondary-text-color));
+  font-weight: 600;
+}
+
+.f27-desc-more.is-nested {
+  font-size: 0.8em;
+  opacity: 0.95;
+}
 .f27-desc-mark { flex: 0 0 auto; color: var(--ls-secondary-text-color); width: 1em; text-align: center; }
 .f27-desc-mark.is-stop { cursor: help; }
 .f27-desc-body { min-width: 0; }

@@ -349,3 +349,281 @@
       (is (false? (:more? (get-in p [:info []]))))
       (is (false? (f27ch/plan-hiding-anything? p))
           "the limit was reached, but nothing is being withheld"))))
+
+;; --- correction batch: honest probes on COLLAPSED rows -----------------------
+;;
+;; Slice 4 kept only `:has-children?` from each rendered node's probe, so a probe
+;; that threw or resolved nothing produced exactly the row an ordinary leaf
+;; produces. The failure could not be reached at all: the control that would have
+;; revealed it is the one the failure suppressed. These tests exercise the
+;; COLLAPSED path, which the existing deep-error tests miss by pre-opening the
+;; failing node.
+
+(defn- failing-probe-fn
+  "Children of `root` list fine; probing `bad`'s own children throws."
+  [root kids bad]
+  (fn [uuid]
+    (cond
+      (= uuid bad) (throw (js/Error. "probe failed"))
+      (= uuid root) (let [cs (mapv blk kids)] {:raw cs :ordered cs})
+      :else {:raw [] :ordered []})))
+
+(deftest a-collapsed-childs-failed-probe-is-visible-without-opening-anything
+  (let [p (plan (failing-probe-fn "a" ["good" "bad" "also-good"] "bad") "a" #{} {})
+        by-key (into {} (map (juxt (comp :block/uuid :entity) identity) (:rows p)))
+        bad (get by-key "bad")]
+    (is (= 3 (count (:rows p))) "the failing sibling is still rendered")
+    (is (= :error (:probe bad))
+        "the probe outcome reaches the visible row, with no control to open first")
+    (is (false? (:has-children? bad))
+        "and is not asserted to have children, because that is exactly what is unknown")
+    (is (nil? (:child-count bad)) "an unknown count is nil, not zero")
+    (is (not= (:probe bad) (:probe (get by-key "good")))
+        "a failed probe and a genuine leaf are no longer the same row")
+    (testing "healthy siblings are unaffected"
+      (is (= :none (:probe (get by-key "good"))))
+      (is (= :none (:probe (get by-key "also-good"))))
+      (is (= 0 (:child-count (get by-key "good"))))
+      (is (= :ok (get-in p [:info [] :summary])) "the level itself is still healthy"))
+    (testing "no expansion control is offered for a node whose children are unknown"
+      (is (false? (f27ch/can-expand? bad))))))
+
+(deftest a-collapsed-child-that-is-missing-is-not-a-leaf-either
+  (let [f (fn [uuid]
+            (cond
+              (= uuid "gone") {:missing? true}
+              (= uuid "a") (let [cs (mapv blk ["here" "gone"])] {:raw cs :ordered cs})
+              :else {:raw [] :ordered []}))
+        p (plan f "a" #{} {})
+        by-key (into {} (map (juxt (comp :block/uuid :entity) identity) (:rows p)))]
+    (is (= :unavailable (:probe (get by-key "gone")))
+        "a node that cannot be resolved is distinct from one with no children")
+    (is (= :none (:probe (get by-key "here"))))
+    (is (false? (f27ch/can-expand? (get by-key "gone"))))))
+
+(deftest probe-state-keeps-every-outcome-distinct
+  (is (= :error (f27ch/probe-state {:error? true :total 0})))
+  (is (= :unavailable (f27ch/probe-state {:missing? true :total 0})))
+  (is (= :none (f27ch/probe-state {:total 0})))
+  (is (= :ok (f27ch/probe-state {:total 3})))
+  (is (= :unknown (f27ch/probe-state nil)) "a node that was never probed says so")
+  (is (= :error (f27ch/probe-state {:error? true :missing? true :total 4}))
+      "a failure to ask outranks anything the failed call appeared to return"))
+
+(deftest a-cycle-row-is-marked-rather-than-probed
+  (let [asked (atom [])
+        p (plan (counting-fn {"a" ["a"]} asked) "a" #{} {})]
+    (is (= ["a"] @asked) "the cyclic child is not probed; its descent is refused by identity")
+    (is (= :unknown (:probe (first (:rows p))))
+        "so its probe state is unknown, not a claim that it has no children")
+    (is (= :cycle (:descend (first (:rows p)))) "and the row already says why")))
+
+(deftest a-failed-probe-retry-is-bounded
+  (is (true? (f27ch/probe-retry-allowed? nil)))
+  (is (true? (f27ch/probe-retry-allowed? 0)))
+  (is (true? (f27ch/probe-retry-allowed? (dec f27ch/max-probe-retries))))
+  (is (false? (f27ch/probe-retry-allowed? f27ch/max-probe-retries))
+      "the offer stops rather than becoming an endless button")
+  (is (false? (f27ch/probe-retry-allowed? (inc f27ch/max-probe-retries))))
+  (is (true? (f27ch/probe-retry-allowed? -5)) "a nonsense count degrades to the first attempt"))
+
+(deftest a-transient-probe-failure-clears-on-the-next-plan
+  (testing "a retry is a fresh plan, so a read that recovers is shown as recovered"
+    (let [n (atom 0)
+          f (fn [uuid]
+              (cond
+                (= uuid "a") (let [cs (mapv blk ["flaky"])] {:raw cs :ordered cs})
+                (= uuid "flaky") (if (zero? @n)
+                                   (do (swap! n inc) (throw (js/Error. "transient")))
+                                   (let [cs (mapv blk ["kid"])] {:raw cs :ordered cs}))
+                :else {:raw [] :ordered []}))]
+      (is (= :error (:probe (first (:rows (plan f "a" #{} {}))))))
+      (let [again (first (:rows (plan f "a" #{} {})))]
+        (is (= :ok (:probe again)))
+        (is (true? (f27ch/can-expand? again)) "and the control appears once it can progress")))))
+
+;; --- correction batch: capacity applies to EVERY growth control --------------
+
+(deftest the-last-row-that-fits-cannot-carry-an-expansion-control
+  (testing "exactly max-visible immediate children, the last of which has a child"
+    (let [kids (mapv #(str "k" %) (range f27ch/max-visible))
+          f (tree->fn (assoc (zipmap kids (repeat []))
+                             "a" kids
+                             (last kids) ["grandchild"]))
+          p (plan f "a" #{} {[] f27ch/max-visible})
+          last-row (last (:rows p))
+          info (get-in p [:info []])]
+      (is (= f27ch/max-visible (:visible p)) "all of them are visible")
+      (is (= f27ch/max-visible (:shown-count info)))
+      (is (= 0 (:remaining info)))
+      (is (= :budget (:descend last-row))
+          "the last row that fits leaves no room for a child, so it cannot be opened")
+      (is (false? (f27ch/can-expand? last-row))
+          "and carries no expansion control — clicking it could add nothing")
+      (is (= :ok (:probe last-row)) "its child is still known to exist")
+      (is (= 1 (:child-count last-row)))
+      (is (= 1 (f27ch/plan-withheld-behind-rows p)))
+      (is (true? (f27ch/plan-hiding-anything? p))
+          "so the limit is stated instead of the grandchild silently vanishing")))
+  (testing "the row before it still expands — capacity is not withdrawn early"
+    (let [kids (mapv #(str "k" %) (range f27ch/max-visible))
+          f (tree->fn (assoc (zipmap kids (repeat []))
+                             "a" kids
+                             (nth kids (- f27ch/max-visible 2)) ["gc"]))
+          p (plan f "a" #{} {[] (dec f27ch/max-visible)})
+          row (last (:rows p))]
+      (is (= :ok (:descend row)))
+      (is (true? (f27ch/can-expand? row))))))
+
+(deftest counts-describe-children-actually-emitted-not-the-batch-requested
+  (testing "an expansion with no room reports what it rendered, which is nothing"
+    (let [kids (mapv #(str "k" %) (range f27ch/max-visible))
+          lastk (last kids)
+          f (tree->fn (assoc (zipmap kids (repeat []))
+                             "a" kids
+                             lastk ["grandchild"]))
+          ;; the reader had this branch open before capacity was consumed
+          p (plan f "a" #{[lastk]} {[] f27ch/max-visible})
+          info (get-in p [:info [lastk]])]
+      (is (= 1 (:total info)))
+      (is (= 0 (:shown-count info))
+          "no row was emitted for the grandchild, so none is claimed")
+      (is (= 1 (:remaining info)))
+      (is (= 1 (:withheld info)) "and it is named as withheld by the shared limit")
+      (is (true? (:more? info)))
+      (is (= :partial (:summary info)) "not :ok — the walk really was cut short")
+      (is (true? (f27ch/batch-balances? info)))
+      (is (false? (f27ch/can-continue? info p))
+          "no continuation, because raising the limit cannot make room")
+      (is (true? (:truncated? p)))
+      (is (true? (f27ch/plan-hiding-anything? p)))))
+  (testing "the open node keeps its COLLAPSE control, which is what frees capacity"
+    (let [kids (mapv #(str "k" %) (range f27ch/max-visible))
+          lastk (last kids)
+          f (tree->fn (assoc (zipmap kids (repeat [])) "a" kids lastk ["gc"]))
+          p (plan f "a" #{[lastk]} {[] f27ch/max-visible})
+          row (last (:rows p))]
+      (is (true? (:open? row)))
+      (is (= :ok (:descend row)) "an already-open node is not force-closed at the limit")
+      (is (true? (f27ch/can-expand? row))
+          "so the reader can still collapse it and get the capacity back"))))
+
+(deftest a-mixed-wide-and-deep-tree-reports-the-siblings-it-never-reached
+  (let [kids (mapv #(str "k" %) (range 30))
+        deep-kids (mapv #(str "d" %) (range 250))
+        f (tree->fn (merge (zipmap kids (repeat []))
+                           (zipmap deep-kids (repeat []))
+                           {"a" kids "k0" deep-kids}))
+        p (plan f "a" #{["k0"]} {["k0"] 250})
+        root (get-in p [:info []])
+        branch (get-in p [:info ["k0"]])]
+    (is (= f27ch/max-visible (:visible p)))
+    (is (true? (:truncated? p)))
+    (testing "the early branch reports what it actually emitted"
+      (is (= 250 (:total branch)))
+      (is (= (dec f27ch/max-visible) (:shown-count branch)))
+      (is (= (- 250 (dec f27ch/max-visible)) (:remaining branch)))
+      (is (pos? (:withheld branch)))
+      (is (true? (f27ch/batch-balances? branch))))
+    (testing "and the root says its later siblings never rendered"
+      (is (= 30 (:total root)))
+      (is (= 1 (:shown-count root)) "only k0 reached a row")
+      (is (= 29 (:remaining root)))
+      (is (= 9 (:withheld root))
+          "nine of the ten this batch asked for had no room")
+      (is (= :partial (:summary root)) "never :ok while 29 children are unaccounted for")
+      (is (true? (f27ch/batch-balances? root))))
+    (testing "no growth control anywhere claims it can progress"
+      (is (false? (f27ch/can-continue? root p)))
+      (is (false? (f27ch/can-continue? branch p))))))
+
+(deftest collapsing-a-branch-gives-the-capacity-back
+  (let [kids (mapv #(str "k" %) (range 30))
+        deep-kids (mapv #(str "d" %) (range 250))
+        f (tree->fn (merge (zipmap kids (repeat []))
+                           (zipmap deep-kids (repeat []))
+                           {"a" kids "k0" deep-kids}))
+        opened (plan f "a" #{["k0"]} {["k0"] 250})
+        collapsed (plan f "a" #{} {["k0"] 250})
+        root (get-in collapsed [:info []])]
+    (is (true? (f27ch/plan-at-capacity? opened)))
+    (is (false? (f27ch/plan-at-capacity? collapsed))
+        "closing the branch releases the shared budget")
+    (is (= 10 (:visible collapsed)) "the later siblings are rendered again")
+    (is (= 10 (:shown-count root)))
+    (is (= 20 (:remaining root)))
+    (is (= 0 (:withheld root)))
+    (is (false? (:truncated? collapsed)))
+    (is (true? (f27ch/can-continue? root collapsed))
+        "and the continuation that was correctly withheld is offered again")
+    (is (true? (f27ch/can-expand? (first (:rows collapsed))))
+        "as is the expansion control on the branch that was just closed")))
+
+(deftest descend-state-measures-room-for-a-child-row-not-for-this-one
+  (is (= :ok (f27ch/descend-state "x" #{} 1 (- f27ch/max-visible 2)))
+      "one row still fits after this one")
+  (is (= :budget (f27ch/descend-state "x" #{} 1 (dec f27ch/max-visible)))
+      "this row is the last that fits, so opening it could add nothing")
+  (is (= :budget (f27ch/descend-state "x" #{} 1 f27ch/max-visible)))
+  (is (= :ok (f27ch/descend-state "x" #{} 1 (dec f27ch/max-visible) true))
+      "an already-open node keeps :ok so its collapse control survives")
+  (is (= :cycle (f27ch/descend-state "x" #{"x"} 1 0 true))
+      "but a cycle is still refused, however the node was left")
+  (is (= :depth (f27ch/descend-state "x" #{} f27ch/max-depth 0 true))
+      "and so is the depth safeguard"))
+
+(deftest the-shared-capacity-rule-is-one-rule
+  (let [kids (mapv #(str "k" %) (range (+ f27ch/max-visible 10)))
+        p (plan (tree->fn {"a" kids}) "a" #{} {[] f27ch/max-visible})
+        info (get-in p [:info []])]
+    (is (false? (f27ch/can-continue? info p)) "continuation consults the plan")
+    (is (every? #(false? (f27ch/can-expand? %))
+                (filter #(= :budget (:descend %)) (:rows p)))
+        "and expansion consults the same capacity through :descend")
+    (is (= (f27ch/plan-at-capacity? p) (not (f27ch/can-continue? info p)))
+        "the two answers cannot disagree while children remain")))
+
+;; --- correction batch: continuation belongs to its own branch ---------------
+
+(deftest each-continuation-sits-at-its-own-branch-boundary
+  (let [cs (mapv #(str "c" %) (range 15))
+        f (tree->fn (merge (zipmap cs (repeat []))
+                           {"a" ["b" "c" "d"] "c" cs}))
+        p (plan f "a" #{["c"]} {})
+        rows (:rows p)
+        b (f27ch/branch-continuations p)
+        idx (fn [k] (first (keep-indexed #(when (= k (:block/uuid (:entity %2))) %1) rows)))]
+    (is (= ["b" "c" "c0" "c1" "c2" "c3" "c4" "c5" "c6" "c7" "c8" "c9" "d"]
+           (mapv (comp :block/uuid :entity) rows)))
+    (testing "c's continuation closes after c's last child, before its sibling d"
+      (is (= [["c" "c9"] ["c"]] (get b (idx "c9")))
+          "innermost branch first, then the branch it completes")
+      (is (< (idx "c9") (idx "d")) "so the control renders inside c's own branch")
+      (is (not-any? #(= ["c"] %) (get b (idx "d")))
+          "and never after the whole tree, where it belonged to nothing visible")))
+  (testing "the root is never given a boundary — its branch ends with the tree"
+    (let [p (plan simple "a" #{} {})]
+      (is (not-any? #(some empty? %) (vals (f27ch/branch-continuations p))))))
+  (testing "an empty plan has no boundaries at all"
+    (is (= {} (f27ch/branch-continuations {:rows []})))
+    (is (= {} (f27ch/branch-continuations (plan (tree->fn {}) "a" #{} {})))))
+  (testing "two open branches each close at their own last row"
+    (let [f (tree->fn {"a" ["p" "q"] "p" ["p1" "p2"] "q" ["q1"]})
+          p (plan f "a" #{["p"] ["q"]} {})
+          b (f27ch/branch-continuations p)]
+      ;; rows: p, p1, p2, q, q1
+      (is (= [["p" "p2"] ["p"]] (get b 2)) "p closes after p2, not after q1")
+      (is (= [["q" "q1"] ["q"]] (get b 4))))))
+
+(deftest a-branch-continuation-is-offered-only-where-it-can-progress
+  (let [cs (mapv #(str "c" %) (range 15))
+        f (tree->fn (merge (zipmap cs (repeat [])) {"a" ["b" "c"] "c" cs}))
+        p (plan f "a" #{["c"]} {})
+        info (get-in p [:info ["c"]])]
+    (is (= 15 (:total info)))
+    (is (= 10 (:shown-count info)))
+    (is (= 5 (:remaining info)))
+    (is (true? (f27ch/can-continue? info p))
+        "c really does have more children and there is room for them")
+    (is (false? (f27ch/can-continue? (get-in p [:info []]) p))
+        "while the root, whose two children are both shown, offers nothing")))

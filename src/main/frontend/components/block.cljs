@@ -2687,22 +2687,70 @@
          :ordered (vec (db/sort-by-left raw parent {:check? false}))})
       {:missing? true})))
 
+(defn- f27-btn
+  "Props for one F27 panel control, so every one of them behaves identically.
+
+  These are native `<button>`s, which Enter and Space are supposed to activate
+  on their own. OG installs a global `goog.ui.KeyboardShortcutHandler` on
+  `window` that binds `enter` and prevents the default action of every key it
+  matches — and a button's implicit activation IS that default action, so Enter
+  on a focused control in this panel did nothing at all. The key is therefore
+  handled here and stopped before it reaches the global handler, which restores
+  what a button should do without touching OG's own shortcut configuration.
+
+  `preventDefault` also stops the browser synthesising its own click, so the
+  action runs exactly once however the control was operated."
+  [on-activate extra]
+  (merge {:type "button"
+          :on-click (fn [e] (util/stop e) (on-activate))
+          :on-key-down (fn [e]
+                         (let [k (.-key e)]
+                           (when (or (= k "Enter") (= k " ") (= k "Spacebar"))
+                             (.preventDefault e)
+                             (.stopPropagation e)
+                             (on-activate))))}
+         extra))
+
+(defn- f27-row-label
+  "A short, single-line name for one descendant, used to say WHICH branch a
+  control belongs to. Truncation is the Unicode-safe one from slice 2, so a
+  Korean syllable or an emoji sequence is never split."
+  [entity]
+  (let [{:keys [text]} (f27ctx/split-block-prefix (f27ch/node-label entity))]
+    (f27c/preview-text (or text "") 40)))
+
 (rum/defc f27-descendant-line < rum/static
   "One descendant row: its own expansion control, then its text.
 
   Rendered through the same read-only inline renderer as the ancestor lines, so
   headings, tasks, emphasis, Korean and emoji keep their meaning and no editing
-  handler, id or save path is created."
+  handler, id or save path is created.
+
+  The control is a NATIVE BUTTON, not a styled anchor without an href: it must
+  be reachable by Tab, activated by Enter and Space, carry a visible focus ring
+  and report its own expanded state. Its accessible name says which block it
+  opens, because identical names on every row tell a screen-reader user
+  nothing."
   [config row open? on-toggle]
-  (let [{:keys [entity depth descend has-children?]} row
+  (let [{:keys [entity depth descend probe]} row
         content (f27ch/node-label entity)
         format (or (:block/format entity) :markdown)
+        label (f27-row-label entity)
         {:keys [heading marker text]} (f27ctx/split-block-prefix content)]
     [:div.f27-desc-line {:class (str "depth-" (min depth 5)
                                     (when heading " is-heading"))}
      ;; The control appears only when it can actually do something. Every other
      ;; case is explained by a marker with a title, never a dead affordance.
      (cond
+       ;; A failed or unresolvable probe is NOT an ordinary leaf. Slice 4 showed
+       ;; the same "·" for both, so a read failure on a collapsed child had no
+       ;; way to reach the screen at all.
+       (= probe :error)
+       [:span.f27-desc-mark.is-stop.is-unknown {:title (t :f27/children-probe-error)} "?"]
+
+       (= probe :unavailable)
+       [:span.f27-desc-mark.is-stop.is-unknown {:title (t :f27/children-probe-unavailable)} "!"]
+
        (= descend :cycle)
        [:span.f27-desc-mark.is-stop {:title (t :f27/children-cycle)} "↻"]
 
@@ -2712,11 +2760,15 @@
        (= descend :budget)
        [:span.f27-desc-mark.is-stop {:title (t :f27/children-budget f27ch/max-visible)} "⋯"]
 
-       (and (= descend :ok) has-children?)
-       [:a.f27-desc-toggle
-        {:on-click (fn [e] (util/stop e) (on-toggle))
-         :title (if open? (t :f27/children-hide) (t :f27/children-show))}
-        (if open? "▾" "▸")]
+       (f27ch/can-expand? row)
+       (let [name' (if (string/blank? label)
+                     (if open? (t :f27/children-hide) (t :f27/children-show))
+                     (if open? (t :f27/children-hide-of label) (t :f27/children-show-of label)))]
+         [:button.f27-desc-toggle.f27-btn
+          (f27-btn on-toggle {:aria-expanded (if open? "true" "false")
+                              :aria-label name'
+                              :title name'})
+          (if open? "▾" "▸")])
 
        :else [:span.f27-desc-mark "·"])
      [:span.f27-desc-body
@@ -2728,10 +2780,42 @@
          (when-not (string/blank? text)
            (inline-text config format text))])]]))
 
+(rum/defc f27-descendant-probe-note < rum/static
+  "What a rendered row's OWN children probe found, when that is not an ordinary
+  answer, with a bounded way to try again and a source fallback.
+
+  This is the row's honest state, shown WITHOUT requiring the reader to open a
+  control that a failed probe would never have produced."
+  [row attempts on-retry on-source]
+  (let [{:keys [probe descend child-count depth]} row
+        n (or child-count 0)]
+    (when (or (#{:error :unavailable} probe)
+              (and (#{:budget :depth} descend) (pos? n)))
+      [:div.f27-desc-notes {:class (str "depth-" (min (inc (or depth 0)) 5))}
+       (case probe
+         :error [:div.f27-ctx-note.f27-ctx-error (t :f27/children-probe-error)]
+         :unavailable [:div.f27-ctx-note.f27-ctx-error (t :f27/children-probe-unavailable)]
+         nil)
+       ;; Descendants known to exist behind a node no control can open. Slice 4
+       ;; counted them nowhere, so a grandchild behind the last child that fit
+       ;; simply disappeared.
+       (when (and (= descend :budget) (pos? n))
+         [:div.f27-ctx-note.f27-ctx-capped (t :f27/children-budget-behind n f27ch/max-visible)])
+       (when (and (= descend :depth) (pos? n))
+         [:div.f27-ctx-note.f27-ctx-capped (t :f27/children-depth-behind n f27ch/max-depth)])
+       (when (#{:error :unavailable} probe)
+         (if (f27ch/probe-retry-allowed? attempts)
+           [:button.f27-desc-retry.f27-btn (f27-btn on-retry nil)
+            (t :f27/children-retry)]
+           [:span.f27-ctx-note (t :f27/children-retry-exhausted)]))
+       (when (#{:error :unavailable} probe)
+         [:button.f27-desc-source.f27-btn (f27-btn on-source nil)
+          (t :f27/children-open-source)])])))
+
 (rum/defc f27-descendant-notes < rum/static
   "Whatever one node has to say about its own children, beneath its row."
   [info depth]
-  (let [{:keys [summary remaining unordered]} info]
+  (let [{:keys [summary remaining unordered withheld]} info]
     [:div.f27-desc-notes {:class (str "depth-" (min (inc (or depth 0)) 5))}
      (case summary
        :error [:div.f27-ctx-note.f27-ctx-error (t :f27/children-error)]
@@ -2742,7 +2826,11 @@
      (when (false? (:ordered? info))
        [:div.f27-ctx-note.f27-ctx-error (t :f27/children-unordered unordered)])
      (when (and (= summary :partial) (pos? (or remaining 0)))
-       [:div.f27-ctx-note (t :f27/children-remaining remaining)])]))
+       [:div.f27-ctx-note (t :f27/children-remaining remaining)])
+     ;; Children this node's own batch asked for but the shared limit had no
+     ;; room to render. Distinct from children the batch never requested.
+     (when (pos? (or withheld 0))
+       [:div.f27-ctx-note.f27-ctx-capped (t :f27/children-withheld withheld f27ch/max-visible)])]))
 
 (rum/defc f27-row-descendants < rum/reactive
   "Children of THIS referencing block, and progressively deeper descendants.
@@ -2769,35 +2857,58 @@
         plan (f27ch/build-plan (f27-children-fn repo) uuid' desc)
         root-info (get-in plan [:info []])
         {:keys [rows]} plan
-        ;; Capacity, not merely "the walk was cut short": a plan that fills the
-        ;; safeguard exactly still has no room for another row, so continuation
-        ;; must be withheld there too.
-        full? (f27ch/plan-at-capacity? plan)
+        retries (:retries desc)
+        ;; ONE capacity rule, consulted by every growth control. A plan that
+        ;; fills the safeguard exactly still has no room for another row, so
+        ;; continuation and expansion are both withheld there.
         hiding? (f27ch/plan-hiding-anything? plan)
         summary (:summary root-info)
+        ;; Where each nested continuation belongs: at the end of its OWN branch,
+        ;; not collected after the whole flattened tree with an identical label.
+        boundaries (f27ch/branch-continuations plan)
+        row-at (fn [path] (first (filter #(= path (:path %)) rows)))
         toggle-path! (fn [path]
                        (swap! *desc update :open
                               (fn [o] (if (contains? o path) (disj o path) (conj o path)))))
         show-more! (fn [path]
                      (swap! *desc update :limits
                             (fn [m] (assoc m path (f27ch/continue-limit
-                                                   (get m path f27ch/default-batch))))))]
+                                                   (get m path f27ch/default-batch))))))
+        ;; A retry simply re-renders, which re-reads the database. The count is
+        ;; kept so the offer is bounded rather than endless.
+        retry! (fn [path] (swap! *desc update-in [:retries path] (fnil inc 0)))
+        open-source! (fn [] (route-handler/redirect-to-page! (str uuid')))
+        more-button (fn [path label nested? depth]
+                      [:button.f27-desc-more.f27-btn
+                       (f27-btn #(show-more! path)
+                                {:key (str "m-" (string/join ">" (map str path)))
+                                 :class (when nested? (str "is-nested depth-" (min depth 5)))
+                                 :aria-label label})
+                       label])]
     [:div.f27-desc
      ;; The toggle appears only when there is something to reveal. A block with
      ;; no children says nothing at all rather than offering an empty control.
      (cond
-       (= summary :error)
-       [:div.f27-ctx-note.f27-ctx-error (t :f27/children-error)]
-
-       (= summary :unavailable)
-       [:div.f27-ctx-note.f27-ctx-error (t :f27/children-unavailable)]
+       ;; The referencing block's own children could not be read. Same honest
+       ;; treatment as a failed probe deeper down: say so, offer a bounded
+       ;; retry, and offer the source.
+       (#{:error :unavailable} summary)
+       [:<>
+        [:div.f27-ctx-note.f27-ctx-error
+         (if (= summary :error) (t :f27/children-error) (t :f27/children-unavailable))]
+        (if (f27ch/probe-retry-allowed? (get retries []))
+          [:button.f27-desc-retry.f27-btn (f27-btn #(retry! []) nil)
+           (t :f27/children-retry)]
+          [:span.f27-ctx-note (t :f27/children-retry-exhausted)])
+        [:button.f27-desc-source.f27-btn (f27-btn open-source! nil)
+         (t :f27/children-open-source)]]
 
        (= summary :none) nil
 
        :else
        [:<>
-        [:a.f27-desc-toggle-all
-         {:on-click (fn [e] (util/stop e) (swap! *open? not))}
+        [:button.f27-desc-toggle-all.f27-btn
+         (f27-btn #(swap! *open? not) {:aria-expanded (if open? "true" "false")})
          (if open?
            (t :f27/children-hide-all)
            (t :f27/children-show-all (:total root-info)))]
@@ -2806,46 +2917,55 @@
            [:div.f27-desc-head (t :f27/children-of-this-block)]
            ;; A keyed wrapper element, NOT rum/with-key: with-key clones a React
            ;; element, and handing it a raw hiccup vector fails at render time.
-           (for [row rows
-                 :let [path (:path row)
-                       info (get-in plan [:info path])]]
-             [:div.f27-desc-item {:key (str "d-" (string/join ">" (map str path)))}
-              (f27-descendant-line config row (:open? row)
-                                   (fn [] (toggle-path! path)))
-              (when (:open? row) (f27-descendant-notes info (:depth row)))])
+           (map-indexed
+            (fn [i row]
+              (let [path (:path row)]
+                [:div.f27-desc-item {:key (str "d-" (string/join ">" (map str path)))}
+                 (f27-descendant-line config row (:open? row)
+                                      (fn [] (toggle-path! path)))
+                 ;; The row's own probe outcome, shown on the row itself — no
+                 ;; control has to be opened first to learn that a read failed.
+                 (f27-descendant-probe-note row (get retries path)
+                                            (fn [] (retry! path)) open-source!)
+                 ;; Every branch that CLOSES here, innermost first. What a node
+                 ;; has to say about its own children — the remainder, a lost
+                 ;; order, a failed read — and the control that acts on it both
+                 ;; belong at the END of that node's branch, next to each other
+                 ;; and next to the children they describe.
+                 (for [bpath (get boundaries i)
+                       :let [binfo (get-in plan [:info bpath])
+                             brow (row-at bpath)]
+                       :when (and binfo brow)]
+                   [:div.f27-desc-branch-end
+                    {:key (str "b-" (string/join ">" (map str bpath)))}
+                    (f27-descendant-notes binfo (:depth brow))
+                    (when (f27ch/can-continue? binfo plan)
+                      (more-button bpath
+                                   (let [l (f27-row-label (:entity brow))]
+                                     (if (string/blank? l)
+                                       (t :f27/children-more)
+                                       (t :f27/children-more-of l)))
+                                   true
+                                   (inc (:depth brow))))])]))
+            rows)
            (f27-descendant-notes root-info 0)
-           ;; Continuation for the referencing block's own children.
-           (when (f27ch/can-continue? root-info full?)
-             [:a.f27-desc-more
-              {:on-click (fn [e] (util/stop e) (show-more! []))}
-              (t :f27/children-more)])
-           ;; Continuation for each OPEN node that has more children, offered
-           ;; only where it can actually progress.
-           (for [row rows
-                 :let [path (:path row)
-                       info (get-in plan [:info path])]
-                 :when (and (:open? row) (f27ch/can-continue? info full?))]
-             [:a.f27-desc-more
-              {:key (str "m-" (string/join ">" (map str path)))
-               :class (str "is-nested depth-" (min (inc (:depth row)) 5))
-               :on-click (fn [e] (util/stop e) (show-more! path))}
-              (t :f27/children-more)])
+           ;; The referencing block's own children close at the end of the tree,
+           ;; so its continuation belongs here — and nowhere else.
+           (when (f27ch/can-continue? root-info plan)
+             (more-button [] (t :f27/children-more) false 0))
            (when hiding?
              [:div.f27-ctx-note.f27-ctx-capped
               (t :f27/children-budget f27ch/max-visible)])
            ;; At any safeguard the reader is sent to the source instead of being
            ;; offered a control that cannot progress.
            (when (or hiding? (some #(not= :ok (:descend %)) rows))
-             [:a.f27-desc-source
-              {:on-click (fn [e]
-                           (util/stop e)
-                           (route-handler/redirect-to-page! (str uuid')))}
+             [:button.f27-desc-source.f27-btn (f27-btn open-source! nil)
               (t :f27/children-open-source)])])])]))
 
 (rum/defcs f27-row-context < rum/static
   (rum/local f27ctx/default-batch ::limit)
   (rum/local false ::kids-open?)
-  (rum/local {:open #{} :limits {}} ::desc)
+  (rum/local {:open #{} :limits {} :retries {}} ::desc)
   "Expanded ancestor context for ONE incoming-reference row.
 
   Ancestors are walked in BOUNDED BATCHES with explicit continuation, rather
@@ -2897,10 +3017,8 @@
           (when capped?
             [:div.f27-ctx-note.f27-ctx-capped (t :f27/context-capped f27ctx/hard-cap)])
           (when continue?
-            [:a.f27-ctx-load-more
-             {:on-click (fn [e]
-                          (util/stop e)
-                          (reset! *limit (+ depth f27ctx/default-batch)))}
+            [:button.f27-ctx-load-more.f27-btn
+             (f27-btn #(reset! *limit (+ depth f27ctx/default-batch)) nil)
              (t :f27/context-load-more)])
           ;; Descendants of THIS referencing block.
           (f27-row-descendants config repo uuid'
@@ -2933,8 +3051,8 @@
        ;; Per-row ancestor context. Independent per row and per panel appearance.
        (let [*ctx (::ctx-open? state)]
          [:div.f27-ctx-wrap
-          [:a.f27-ctx-toggle
-           {:on-click (fn [e] (util/stop e) (swap! *ctx not))}
+          [:button.f27-ctx-toggle.f27-btn
+           (f27-btn #(swap! *ctx not) {:aria-expanded (if @*ctx "true" "false")})
            (if @*ctx (t :f27/context-hide) (t :f27/context-show))]
           (when @*ctx (f27-row-context config repo ref-block))])])))
 
@@ -2977,15 +3095,12 @@
        [:div.f27-ref-note.f27-crystal-scope (t :f27/crystal-scope)])
      (f27-crystal-selector repo)
      [:div.f27-ref-actions
-      [:a.f27-ref-action
-       {:on-click (fn [e]
-                    (util/stop e)
-                    (swap! *hide-block-refs? not))}
+      [:button.f27-ref-action.f27-btn
+       (f27-btn #(swap! *hide-block-refs? not)
+                {:aria-expanded (if list-visible? "true" "false")})
        (if list-visible? (t :f27/hide-references) (t :f27/show-references total))]
-      [:a.f27-ref-action
-       {:on-click (fn [e]
-                    (util/stop e)
-                    (reset! *show-ref-overview? false))}
+      [:button.f27-ref-action.f27-btn
+       (f27-btn #(reset! *show-ref-overview? false) nil)
        (t :f27/close-overview)]]]))
 
 (rum/defc block-left-menu < rum/reactive
