@@ -242,3 +242,69 @@
   (is (= :missing (f27c/selection-state "gone" #{"a"}))
       "a chosen marker no longer present must be reported, not silently empty"))
 
+;; ---------------------------------------------------------------------------
+;; Slice 3 — scan honesty.
+;;
+;; The inventory is built by a bounded scan. The interface must never present an
+;; incomplete or failed scan as a complete inventory, and must never report a
+;; chosen marker as gone when the scan simply has not looked at it yet.
+;; ---------------------------------------------------------------------------
+
+(deftest scan-completeness-is-evidence-based
+  (testing "complete only when the scan actually reached the end"
+    (is (true? (f27c/scan-complete? {:scanned 25 :candidates 25})))
+    (is (true? (f27c/scan-complete? {:scanned 30 :candidates 25})) "over-scan still complete")
+    (is (true? (f27c/scan-complete? {:scanned 0 :candidates 0})) "an empty graph is complete"))
+  (testing "an unfinished scan is NOT complete"
+    (is (false? (f27c/scan-complete? {:scanned 20 :candidates 25}))))
+  (testing "a failed scan is never complete, whatever the counts say"
+    (is (false? (f27c/scan-complete? {:scanned 25 :candidates 25 :error "boom"}))
+        "an error must not be overridden by counts that happen to look finished"))
+  (testing "missing counts are not treated as completion"
+    (is (false? (f27c/scan-complete? {})))
+    (is (false? (f27c/scan-complete? {:scanned nil :candidates 5})))
+    (is (false? (f27c/scan-complete? {:scanned 5 :candidates nil})))))
+
+(deftest scan-summary-distinguishes-partial-from-failed
+  (is (= :ok (f27c/scan-summary {:scanned 25 :candidates 25})))
+  (is (= :partial (f27c/scan-summary {:scanned 20 :candidates 25})))
+  (is (= :error (f27c/scan-summary {:scanned 20 :candidates 25 :error "boom"})))
+  (is (= :error (f27c/scan-summary {:scanned 25 :candidates 25 :error "boom"}))
+      "error outranks apparent completeness")
+  (is (= :partial (f27c/scan-summary {})) "an absent scan is partial, never ok"))
+
+(deftest continuation-reaches-completeness-in-bounded-passes
+  ;; A small configurable batch stands in for the production batch, so
+  ;; continuation is exercised without building a huge fixture.
+  (testing "successive passes stay :partial until the last one, then report :ok"
+    (let [candidates 25
+          batch 10
+          passes (map (fn [scanned] {:scanned (min scanned candidates) :candidates candidates})
+                      (range batch (+ candidates batch) batch))
+          summaries (mapv f27c/scan-summary passes)]
+      (is (= [:partial :partial :ok] summaries)
+          "the scan claims completeness only on the pass that actually finishes")))
+  (testing "the batch default is a positive bound, not unlimited"
+    (is (pos? f27c/default-scan-batch))))
+
+(deftest an-unscanned-marker-is-never-called-missing
+  (let [complete {:scanned 25 :candidates 25}
+        partial-scan {:scanned 10 :candidates 25}
+        failed {:scanned 10 :candidates 25 :error "boom"}]
+    (testing "found is found regardless of scan state"
+      (is (= :present (f27c/selection-state "a" #{"a"} complete)))
+      (is (= :present (f27c/selection-state "a" #{"a"} partial-scan)))
+      (is (= :present (f27c/selection-state "A" #{"a"} failed))))
+    (testing "not found + complete scan = genuinely missing"
+      (is (= :missing (f27c/selection-state "gone" #{"a"} complete))))
+    (testing "not found + incomplete scan = UNSCANNED, an absence of evidence"
+      (is (= :unscanned (f27c/selection-state "gone" #{"a"} partial-scan))
+          "a partial scan must not be reported as proof the marker is gone"))
+    (testing "not found + failed scan = UNSCANNED, not missing"
+      (is (= :unscanned (f27c/selection-state "gone" #{"a"} failed))))
+    (testing "no marker chosen is :none whatever the scan did"
+      (is (= :none (f27c/selection-state nil #{"a"} failed)))
+      (is (= :none (f27c/selection-state "  " #{"a"} partial-scan))))
+    (testing "an empty inventory from an incomplete scan is still unscanned"
+      (is (= :unscanned (f27c/selection-state "a" #{} partial-scan)))
+      (is (= :missing (f27c/selection-state "a" #{} complete))))))

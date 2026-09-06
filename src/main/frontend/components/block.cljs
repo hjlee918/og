@@ -60,6 +60,7 @@
             [frontend.util.drawer :as drawer]
             [frontend.util.f27-ref-overview :as f27]
             [frontend.util.f27-crystal :as f27c]
+            [frontend.util.f27-context :as f27ctx]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -2468,45 +2469,59 @@
            vec))))
 
 (defn- f27-crystal-tag-inventory
-  "Explicit tag names actually present in this graph, derived from the SAME two
-  sources the matcher accepts: inline tag nodes and `tags::` properties.
+  "Explicit tag names present in this graph, derived from the SAME two sources
+  the matcher accepts: inline tag nodes and `tags::` properties.
 
   OG offers no API for this — `get-tag-pages` covers only the page-level
   :block/tags property, and :block/refs cannot tell #tag from [[link]] — so the
   inventory is computed here. A page that is only ever an ordinary link target
-  therefore never appears.
+  never appears.
 
-  Scanning is bounded and read-only. Only blocks whose raw content could carry a
-  marker are parsed, so the cost tracks tagged content rather than graph size."
-  [repo]
-  (try
-    (let [db (db/get-db repo)
-          candidates (when db
-                       (->> (d/q '[:find ?c ?f ?p
-                                   :where
-                                   [?b :block/content ?c]
-                                   [(get-else $ ?b :block/format :markdown) ?f]
-                                   [(get-else $ ?b :block/properties {}) ?p]]
-                                 db)
-                            (filter (fn [[c _ p]]
-                                      (or (and (string? c)
-                                               (or (string/includes? c "#")
-                                                   (string/includes? c "tags::")))
-                                          (seq (f27c/tags-from-properties p)))))
-                            (take 20000)))
-          entries (map (fn [[c f p]]
-                         {:inline (f27c/tags-from-ast
-                                   (try (gp-mldoc/inline->edn c (gp-mldoc/default-config (or f :markdown)))
-                                        (catch :default _ nil))
-                                   gp-block/get-tag)
-                          :props (f27c/tags-from-properties p)})
-                       candidates)
-          page-tags (->> (d/q '[:find ?n :where [_ :block/tags ?t] [?t :block/name ?n]] db)
-                         (map first)
-                         (keep f27c/normalize-tag)
-                         set)]
-      (into (f27c/collect-tags entries) page-tags))
-    (catch :default _ #{})))
+  Scanning is BOUNDED and reported honestly. `limit` caps how many candidate
+  blocks are parsed in this pass; the returned map states how many candidates
+  exist so the caller can offer continuation instead of implying completeness.
+  Read-only throughout."
+  ([repo] (f27-crystal-tag-inventory repo f27c/default-scan-batch))
+  ([repo limit]
+   (try
+     (let [db (db/get-db repo)
+           all (when db
+                 (->> (d/q '[:find ?c ?f ?p
+                             :where
+                             [?b :block/content ?c]
+                             [(get-else $ ?b :block/format :markdown) ?f]
+                             [(get-else $ ?b :block/properties {}) ?p]]
+                           db)
+                      (filter (fn [[c _ p]]
+                                (or (and (string? c)
+                                         (or (string/includes? c "#")
+                                             (string/includes? c "tags::")))
+                                    (seq (f27c/tags-from-properties p)))))
+                      vec))
+           candidates (count all)
+           limit (max 0 (or limit f27c/default-scan-batch))
+           batch (subvec all 0 (min limit candidates))
+           entries (map (fn [[c f p]]
+                          {:inline (f27c/tags-from-ast
+                                    (try (gp-mldoc/inline->edn c (gp-mldoc/default-config (or f :markdown)))
+                                         (catch :default _ nil))
+                                    gp-block/get-tag)
+                           :props (f27c/tags-from-properties p)})
+                        batch)
+           page-tags (->> (d/q '[:find ?n :where [_ :block/tags ?t] [?t :block/name ?n]] db)
+                          (map first)
+                          (keep f27c/normalize-tag)
+                          set)]
+       {:repo repo
+        :tags (into (f27c/collect-tags entries) page-tags)
+        :scanned (count batch)
+        :candidates candidates
+        :limit limit
+        :error nil})
+     (catch :default e
+       ;; An error must be visible, never a silently empty "complete" inventory.
+       {:repo repo :tags #{} :scanned 0 :candidates 0 :limit limit
+        :error (or (some-> e .-message) "scan failed")}))))
 
 (rum/defc f27-crystal-preview < rum/static
   [m]
@@ -2524,41 +2539,59 @@
 (rum/defcs f27-crystal-selector < rum/reactive
   (rum/local false ::open?)
   (rum/local "" ::query)
-  (rum/local nil ::inventory)
+  (rum/local nil ::scan)
   "Discoverable control for choosing ONE explicit graph tag as the Crystal
   marker, and for clearing it.
 
-  The list is an inventory of tags actually used explicitly in this graph, and it
-  is SEARCHABLE, so a tag can never become unselectable because of where it
-  sorts. Choosing a marker creates nothing and writes no graph file."
+  The inventory is rescanned each time the control is OPENED, and is scoped to
+  the current graph, so newly added, removed or renamed tags are reflected and a
+  cache from another graph is never reused. It is not rescanned on render or on
+  keystrokes. An incomplete scan says so and offers continuation rather than
+  presenting a partial list as the whole truth."
   [state repo]
   (let [current (state/sub :f27/crystal-tags)
         tag (get current repo)
         *open? (::open? state)
         *query (::query state)
-        *inv (::inventory state)
-        open? @*open?]
+        *scan (::scan state)
+        open? @*open?
+        scan @*scan
+        ;; Guard against reusing another graph's cache even if one lingers.
+        scan (when (and scan (= (:repo scan) repo)) scan)]
     [:div.f27-crystal-config
      [:a.f27-crystal-config-toggle
       {:on-click (fn [e]
                    (util/stop e)
-                   ;; Inventory is computed once when the control is opened,
-                   ;; never on every render.
-                   (when (and (not open?) (nil? @*inv))
-                     (reset! *inv (f27-crystal-tag-inventory repo)))
+                   (when-not open?
+                     ;; Refresh on OPEN — modest, not per render or keystroke.
+                     (reset! *query "")
+                     (reset! *scan (f27-crystal-tag-inventory repo)))
                    (swap! *open? not))}
       (if tag (t :f27/crystal-marker-is tag) (t :f27/crystal-choose))]
      (when open?
-       (let [inv (or @*inv #{})
+       (let [inv (:tags scan #{})
+             summary (f27c/scan-summary (or scan {}))
              {:keys [matches total shown]} (f27c/filter-tags inv @*query)
-             sel-state (f27c/selection-state tag inv)]
+             sel-state (f27c/selection-state tag inv (or scan {}))]
          [:div.f27-crystal-config-panel
           {:on-click (fn [e] (util/stop-propagation e))}
           [:div.f27-crystal-config-help (t :f27/crystal-help)]
           [:div.f27-crystal-config-local (t :f27/crystal-local-only)]
-          ;; A chosen marker that is no longer present is explained, not hidden.
-          (when (= sel-state :missing)
-            [:div.f27-crystal-missing (t :f27/crystal-missing tag)])
+
+          ;; Honest scan state.
+          (case summary
+            :error [:div.f27-crystal-scan-error (t :f27/crystal-scan-error)]
+            :partial [:div.f27-crystal-scan-partial
+                      (t :f27/crystal-scan-partial (:scanned scan) (:candidates scan))]
+            nil)
+
+          ;; A chosen marker that was not found is described according to what
+          ;; the scan actually covered — never called "missing" when unscanned.
+          (case sel-state
+            :missing [:div.f27-crystal-missing (t :f27/crystal-missing tag)]
+            :unscanned [:div.f27-crystal-missing (t :f27/crystal-unscanned tag)]
+            nil)
+
           [:input.f27-crystal-search
            {:type "text"
             :value @*query
@@ -2577,13 +2610,107 @@
               (if (zero? (count inv)) (t :f27/crystal-no-tags) (t :f27/crystal-no-match))])]
           (when (> total shown)
             [:div.f27-crystal-note (t :f27/crystal-narrow (- total shown))])
+          ;; Search only ever covers what was scanned; say so.
+          (when (= summary :partial)
+            [:div.f27-crystal-note (t :f27/crystal-search-partial)])
+          (when (not= summary :ok)
+            [:a.f27-crystal-scan-more
+             {:on-click (fn [e]
+                          (util/stop e)
+                          (reset! *scan (f27-crystal-tag-inventory
+                                         repo
+                                         (+ (:scanned scan 0) f27c/default-scan-batch))))}
+             (t :f27/crystal-scan-more)])
           (when tag
             [:a.f27-crystal-clear
              {:on-click (fn [e] (util/stop e) (state/set-crystal-tag! repo nil))}
              (t :f27/crystal-clear)])]))]))
 
-(rum/defc f27-ref-overview-row < rum/static
-  [config repo ref-block idx crystal-tag]
+(defn- f27-parent-fn
+  "One step upward. Read-only entity lookup; never writes."
+  [repo]
+  (fn [uuid] (try (db/get-block-parent repo uuid) (catch :default _ nil))))
+
+(rum/defc f27-context-line < rum/static
+  "One ancestor or the referencing block itself, rendered read-only.
+
+  Uses OG's own inline renderer so emphasis, links, block refs, Korean and emoji
+  keep their meaning. `inline-text` renders markup only — it installs no editing
+  handler, creates no id, and cannot save.
+
+  A heading's leading `##` and a task's leading `TODO` are BLOCK-level markup an
+  inline renderer echoes as literal characters, so they are split off and shown
+  as structure instead. The block itself is not altered."
+  [config block self?]
+  (let [content (f27ctx/block-label block)
+        format (or (:block/format block) :markdown)
+        {:keys [heading marker text]} (f27ctx/split-block-prefix content)]
+    [:div.f27-ctx-line {:class (str (when self? "is-self ")
+                                    (when heading "is-heading"))}
+     [:span.f27-ctx-marker (if self? "▸" "·")]
+     [:span.f27-ctx-body
+      (if (nil? content)
+        [:span.f27-ctx-unavailable (t :f27/context-unavailable-line)]
+        [:<>
+         (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
+         (when marker [:span.f27-ctx-badge.is-task marker])
+         (when-not (string/blank? text)
+           (inline-text config format text))])]]))
+
+(rum/defcs f27-row-context < rum/static
+  (rum/local f27ctx/default-batch ::limit)
+  "Expanded ancestor context for ONE incoming-reference row.
+
+  Ancestors are walked in BOUNDED BATCHES with explicit continuation, rather
+  than relying on a default parent-query depth that truncates silently.
+
+  The walk is synchronous and cheap (at most `hard-cap` single-step parent
+  lookups), so the component keeps only the current LIMIT in instance-local
+  state and derives everything else from it. Rendering therefore mutates
+  nothing, and there is no 'loading' state to claim — continuation simply
+  raises the limit and the row re-renders.
+
+  State is per component instance, so each row and each panel appearance
+  expands independently."
+  [state config repo ref-block]
+  (let [*limit (::limit state)
+        uuid' (:block/uuid ref-block)]
+    [:div.f27-ctx {:on-click (fn [e] (util/stop-propagation e))}
+     (if (nil? uuid')
+       ;; No identity to walk from. Say so plainly instead of showing an
+       ;; empty panel or a state that could never resolve.
+       [:div.f27-ctx-note.f27-ctx-unavailable (t :f27/context-unavailable-line)]
+       (let [{:keys [ancestors more? cycle? depth capped?]}
+             (f27ctx/load-ancestors (f27-parent-fn repo) uuid' @*limit)
+             {:keys [page ancestors]} (f27ctx/context-rows ancestors ref-block)]
+         [:<>
+          (when page
+            [:div.f27-ctx-page
+             [:a {:on-click (fn [e]
+                              (util/stop e)
+                              (route-handler/redirect-to-page! (:block/name page)))}
+              (or (:block/original-name page) (:block/name page))]])
+          (when (and more? (not cycle?))
+            [:div.f27-ctx-note (t :f27/context-more-above)])
+          [:div.f27-ctx-lines
+           (for [a ancestors]
+             (rum/with-key (f27-context-line config a false)
+               (str "anc-" (or (:block/uuid a) (hash a)))))
+           (f27-context-line config ref-block true)]
+          (when cycle?
+            [:div.f27-ctx-note.f27-ctx-cycle (t :f27/context-cycle)])
+          (when capped?
+            [:div.f27-ctx-note (t :f27/context-capped)])
+          (when (and more? (not cycle?))
+            [:a.f27-ctx-load-more
+             {:on-click (fn [e]
+                          (util/stop e)
+                          (reset! *limit (+ depth f27ctx/default-batch)))}
+             (t :f27/context-load-more)])]))]))
+
+(rum/defcs f27-ref-overview-row < rum/static
+  (rum/local false ::ctx-open?)
+  [state config repo ref-block idx crystal-tag]
   (when (f27/renderable? ref-block)
     (let [{:keys [previews remainder]}
           (when crystal-tag
@@ -2604,7 +2731,14 @@
          [:div.f27-crystal-row
           (for [m previews] (rum/with-key (f27-crystal-preview m) (str (:uuid m))))
           (when (pos? remainder)
-            [:span.f27-crystal-more (t :f27/crystal-more remainder)])])])))
+            [:span.f27-crystal-more (t :f27/crystal-more remainder)])])
+       ;; Per-row ancestor context. Independent per row and per panel appearance.
+       (let [*ctx (::ctx-open? state)]
+         [:div.f27-ctx-wrap
+          [:a.f27-ctx-toggle
+           {:on-click (fn [e] (util/stop e) (swap! *ctx not))}
+           (if @*ctx (t :f27/context-hide) (t :f27/context-show))]
+          (when @*ctx (f27-row-context config repo ref-block))])])))
 
 (rum/defc f27-ref-overview < rum/reactive
   [config repo block list-visible? *hide-block-refs? *show-ref-overview?]

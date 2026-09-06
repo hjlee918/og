@@ -223,17 +223,45 @@
       :total (count hits)
       :inventory-size (count all)})))
 
+(def ^:const default-scan-batch
+  "Candidate blocks parsed per inventory scan pass. Deliberately small enough to
+  keep the interface responsive; the control offers explicit continuation rather
+  than pretending one pass saw everything."
+  20000)
+
+(defn scan-complete?
+  "True only when a scan actually reached the end of the candidate set.
+  An incomplete scan must never be presented as a complete inventory."
+  [{:keys [scanned candidates error]}]
+  (boolean (and (nil? error) (number? scanned) (number? candidates) (>= scanned candidates))))
+
+(defn scan-summary
+  "Describe a scan honestly for the interface.
+
+  :ok        complete and error-free
+  :partial   ran without error but did not reach the end
+  :error     failed; the inventory must not be presented as authoritative"
+  [{:keys [error] :as scan}]
+  (cond
+    error :error
+    (scan-complete? scan) :ok
+    :else :partial))
+
 (defn selection-state
-  "How to describe the current marker relative to the inventory.
+  "How to describe the current marker relative to what the scan actually saw.
 
   :none      — nothing chosen
-  :present   — chosen and still found in the graph
-  :missing   — chosen but no longer found, which must be explained rather than
-               silently showing an empty result"
-  [tag tags]
-  (let [t (normalize-tag tag)]
-    (cond
-      (nil? t) :none
-      (contains? (set (map normalize-tag (or tags #{}))) t) :present
-      :else :missing)))
+  :present   — chosen and found
+  :unscanned — chosen, not found, but the scan was incomplete or failed, so its
+               absence is NOT evidence it is gone. Reported distinctly from
+               :missing precisely so an unscanned tag is never mislabelled.
+  :missing   — chosen, not found, and the scan was complete and error-free"
+  ([tag tags] (selection-state tag tags {:scanned 0 :candidates 0}))
+  ([tag tags scan]
+   (let [t (normalize-tag tag)]
+     (cond
+       (nil? t) :none
+       (contains? (set (map normalize-tag (or tags #{}))) t) :present
+       (= :ok (scan-summary scan)) :missing
+       :else :unscanned))))
 

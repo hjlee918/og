@@ -790,14 +790,22 @@ html.is-mac {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  max-height: 14rem;
+  /* Still bounded, so a block with many references cannot push the editor
+     around; raised from 14rem because an expanded ancestor chain needs room
+     before the list starts scrolling. */
+  max-height: 24rem;
   overflow-y: auto;
 }
 
+/* A row stacks vertically: the breadcrumb line first, then the Crystal chips
+   and the expandable context beneath it. It was a horizontal flex row while a
+   row held only a breadcrumb; leaving it horizontal put the context panel in a
+   cramped right-hand column and collapsed the breadcrumb (which is
+   min-width: 0 and ellipsised) to nothing. */
 .f27-ref-row {
   display: flex;
-  align-items: baseline;
-  gap: 0.35rem;
+  flex-direction: column;
+  gap: 0.1rem;
   min-width: 0;
 }
 
@@ -888,3 +896,46 @@ html.is-mac {
   color: var(--ls-secondary-text-color); font-size: 0.9em; margin: 0.2rem 0;
 }
 .f27-crystal-missing { font-style: italic; }
+
+.f27-crystal-scan-partial, .f27-crystal-scan-error {
+  color: var(--ls-secondary-text-color); font-size: 0.9em; margin: 0.2rem 0; font-style: italic;
+}
+.f27-crystal-scan-error { color: var(--ls-warning-text-color, var(--ls-secondary-text-color)); }
+.f27-crystal-scan-more { display: inline-block; margin-top: 0.3rem; margin-right: 0.75rem;
+  color: var(--ls-link-text-color); cursor: pointer; font-size: 0.9em; }
+
+/* F27 slice 3 — expandable ancestor context. Display-only. */
+.f27-ctx-wrap { margin: 0.2rem 0 0.1rem 1.1rem; }
+.f27-ctx-toggle { color: var(--ls-link-text-color); cursor: pointer; font-size: 0.85em; }
+.f27-ctx {
+  margin: 0.3rem 0 0.4rem 0; padding: 0.35rem 0.5rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  background: var(--ls-tertiary-background-color); border-radius: 4px;
+}
+.f27-ctx-page { font-weight: 600; margin-bottom: 0.25rem; }
+.f27-ctx-page a { cursor: pointer; color: var(--ls-link-text-color); }
+.f27-ctx-lines { display: flex; flex-direction: column; gap: 0.1rem; }
+.f27-ctx-line { display: flex; gap: 0.35rem; align-items: baseline; }
+/* progressive indent conveys hierarchy without reformatting anything on disk */
+.f27-ctx-line:nth-child(1) { margin-left: 0; }
+.f27-ctx-line:nth-child(2) { margin-left: 0.8rem; }
+.f27-ctx-line:nth-child(3) { margin-left: 1.6rem; }
+.f27-ctx-line:nth-child(4) { margin-left: 2.4rem; }
+.f27-ctx-line:nth-child(5) { margin-left: 3.2rem; }
+.f27-ctx-line:nth-child(n+6) { margin-left: 4rem; }
+.f27-ctx-line.is-self { font-weight: 600; }
+.f27-ctx-line.is-heading .f27-ctx-body { font-weight: 600; }
+.f27-ctx-badge {
+  display: inline-block; margin-right: 0.35rem; padding: 0 0.3rem;
+  border-radius: 3px; font-size: 0.75em; line-height: 1.5;
+  background: var(--ls-quaternary-background-color); color: var(--ls-secondary-text-color);
+  vertical-align: baseline;
+}
+.f27-ctx-badge.is-task { letter-spacing: 0.02em; }
+.f27-ctx-marker { color: var(--ls-secondary-text-color); flex: 0 0 auto; }
+.f27-ctx-body { min-width: 0; }
+.f27-ctx-unavailable, .f27-ctx-note {
+  color: var(--ls-secondary-text-color); font-size: 0.9em; font-style: italic;
+}
+.f27-ctx-load-more { display: inline-block; margin-top: 0.3rem; color: var(--ls-link-text-color);
+  cursor: pointer; font-size: 0.85em; }
