@@ -8,24 +8,33 @@
 // no direct Electron or app-bundle launch here and no fallback: if the guarded
 // path refuses, this script stops. See INCIDENT_2026-09-05_UNISOLATED_LAUNCH.md.
 //
-// What it does, in order:
-//   1. checks that every build artifact the preview needs is actually present;
-//   2. makes sure the demonstration graph exists (and rebuilds it on --reset);
-//   3. picks a fresh, uniquely named profile inside the evidence directory;
-//   4. launches through the guarded path, which replaces the environment;
-//   5. opens the demonstration graph and ASSERTS the graph path the application
-//      reports back before it says the preview is ready;
-//   6. holds the session in the foreground until you close it, or until the
-//      bounded-session limit is reached;
-//   7. closes gracefully and reports whether the demonstration notes changed.
+// LIFECYCLE. One controller owns the whole run. Signal handling (SIGINT,
+// SIGTERM, SIGHUP), terminal end-of-input and the session deadline are
+// installed BEFORE the application is launched, not after it is ready, and they
+// apply to setup, to the interactive wait and to --self-check alike. Every exit
+// path — success, refusal, a throw during setup, a signal, the deadline — runs
+// the same idempotent cleanup, which closes whatever was actually launched. A
+// partially launched application is adopted through the guarded launcher's
+// `onApp` hook, so a failure part-way through a launch still has something to
+// close. Nothing else is ever signalled: no process is matched by name and no
+// unrelated process is killed.
 //
-// It does not modify installed applications, user settings, login items,
-// network settings or global shortcuts, and it starts no background watcher and
-// no auto-restart. Closing this command closes the preview.
+// ORDER AT SHUTDOWN. The application is closed and given time to settle FIRST,
+// and only then is the demonstration graph hashed. A close that did not succeed
+// is reported as such, and no preservation claim is made from it.
+//
+// The demonstration notes are ordinary notes. The F27 viewing controls are
+// read-only, but this launcher does not disable OG's editor, so the graph can
+// legitimately change. The byte comparison is a report, not a guarantee.
+//
+// This launcher does not start, stop, manage or modify the installed Logseq OG,
+// user settings, login items, network settings or global shortcuts, and it
+// starts no background watcher and no auto-restart.
 //
 // Usage:
 //   node f27-preview/preview.js              start the preview
-//   node f27-preview/preview.js --reset      rebuild the demonstration graph first
+//   node f27-preview/preview.js --reset      archive the demonstration graph and
+//                                            rebuild it before starting
 //   node f27-preview/preview.js --self-check maintenance: run the walkthrough
 //                                            automatically and exit
 //
@@ -41,31 +50,218 @@ const GRAPH = path.join(PREVIEW_DIR, 'graph/f27-preview-demo');
 const GRAPH_NAME = path.basename(GRAPH);
 const GUARDED_LAUNCH = path.join(EVIDENCE, 'isolated-launch.js');
 
-// The project's existing per-session bound. Preserved here: an application
-// session is not left running indefinitely. Reaching it is not an error, and
-// running this command again starts a fresh session.
+// The project's existing per-session bound. It now covers the WHOLE run —
+// startup, the session itself and the self-check — not just the wait after the
+// preview is ready. Reaching it is not an error.
 const SESSION_LIMIT_MIN = 12;
 const WARN_AT_MIN = 10;
 
-const ARGS = process.argv.slice(2);
-const RESET = ARGS.includes('--reset');
-const SELF_CHECK = ARGS.includes('--self-check');
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const line = (s) => console.log(s);
-const rule = () => line('-'.repeat(72));
 
-function stop(why, extra) {
-  line('');
-  line('PREVIEW NOT STARTED — ' + why);
-  if (extra) line(extra);
-  process.exit(1);
+// A refusal or a failure this launcher understands and reports plainly.
+class PreviewError extends Error {
+  constructor(message, extra) {
+    super(message);
+    this.name = 'PreviewError';
+    this.extra = extra || null;
+  }
+}
+// The run was stopped on purpose: a signal, end of input, or the deadline.
+class CancelledError extends Error {
+  constructor(reason) {
+    super(reason);
+    this.name = 'CancelledError';
+    this.reason = reason;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle controller — installed first, owns every exit path.
+// ---------------------------------------------------------------------------
+function createLifecycle(deps) {
+  const log = deps.log;
+  const state = {
+    app: null,
+    stopReason: null,
+    enterArmed: false,
+    enterQueued: false,
+    cleanup: null, // cached result: cleanup is idempotent
+    handlers: [],
+    timers: [],
+    waiters: [],
+    cancelWaiters: [],
+    stdin: null,
+  };
+
+  function requestStop(reason) {
+    if (state.stopReason) return;
+    state.stopReason = reason;
+    for (const resolve of state.waiters.splice(0)) resolve(reason);
+    for (const reject of state.cancelWaiters.splice(0)) reject(new CancelledError(reason));
+  }
+
+  // Adopt an application handle the moment one exists — including one handed
+  // over by the guarded launcher part-way through a launch that then failed.
+  function adopt(app) {
+    if (app && !state.app) state.app = app;
+    return app;
+  }
+
+  // Run `p`, but give up waiting on it the moment the run is cancelled. The
+  // underlying work is not aborted — it cannot be — but the app handle is
+  // already adopted, so cleanup can still close it.
+  function guard(p) {
+    if (state.stopReason) return Promise.reject(new CancelledError(state.stopReason));
+    if (!p || typeof p.then !== 'function') return Promise.resolve(p);
+    p.catch(() => {}); // a late rejection must not surface as unhandled
+    let mine;
+    const cancelled = new Promise((_, reject) => {
+      mine = reject;
+      state.cancelWaiters.push(reject);
+    });
+    const drop = () => {
+      const i = state.cancelWaiters.indexOf(mine);
+      if (i >= 0) state.cancelWaiters.splice(i, 1);
+    };
+    return Promise.race([p, cancelled]).then(
+      (v) => {
+        drop();
+        return v;
+      },
+      (e) => {
+        drop();
+        throw e;
+      }
+    );
+  }
+
+  function install() {
+    const signal = (name, describe) => {
+      const h = () => requestStop(describe);
+      process.on(name, h);
+      state.handlers.push([name, h]);
+    };
+    signal('SIGINT', 'you pressed Ctrl-C');
+    signal('SIGTERM', 'the system asked this command to stop (SIGTERM)');
+    signal('SIGHUP', 'the terminal went away (SIGHUP)');
+
+    try {
+      const stdin = process.stdin;
+      const onData = () => {
+        if (state.enterArmed) requestStop('you pressed Enter');
+        else state.enterQueued = true; // typed during startup; honoured at READY
+      };
+      // End of input means the terminal is gone only when there IS a terminal.
+      // A closed pipe (`< /dev/null`, or output piped from another command) is
+      // not a cancellation, so the deadline and signals govern instead.
+      const onEnd = () => {
+        if (stdin.isTTY) requestStop('the terminal closed (end of input)');
+      };
+      stdin.on('data', onData);
+      stdin.on('end', onEnd);
+      stdin.resume();
+      state.stdin = { stdin, onData, onEnd };
+    } catch (e) {
+      /* no usable stdin; signals and the deadline still apply */
+    }
+
+    state.timers.push(
+      setTimeout(() => {
+        log('');
+        log(`[preview] ${Math.round((deps.sessionLimitMs - deps.warnMs) / 60000)} minute(s) left in this session.`);
+      }, deps.warnMs)
+    );
+    const limitLabel =
+      deps.sessionLimitMs >= 60000 ? `${Math.round(deps.sessionLimitMs / 60000)}-minute session limit` : 'session limit';
+    state.timers.push(setTimeout(() => requestStop(`the ${limitLabel} was reached`), deps.sessionLimitMs));
+  }
+
+  // Enter closes the preview only once there is something to close. Input typed
+  // during startup is remembered rather than swallowed.
+  function armEnter() {
+    state.enterArmed = true;
+    if (state.enterQueued) requestStop('you pressed Enter');
+  }
+
+  function waitForExit(app) {
+    return new Promise((resolve) => {
+      if (state.stopReason) return resolve(state.stopReason);
+      state.waiters.push(resolve);
+      if (app && typeof app.on === 'function') {
+        app.on('close', () => requestStop('the preview window was closed'));
+      }
+    });
+  }
+
+  // Idempotent. Detaches everything this process owns, then closes the
+  // application it launched — and only that application.
+  async function cleanup() {
+    if (state.cleanup) return state.cleanup;
+    const result = { attempted: false, closed: false, error: null, signalled: false, signalError: null };
+    state.cleanup = result; // claim it before any await, so a second call waits on nothing
+
+    for (const [name, h] of state.handlers.splice(0)) process.removeListener(name, h);
+    for (const t of state.timers.splice(0)) clearTimeout(t);
+    if (state.stdin) {
+      try {
+        state.stdin.stdin.removeListener('data', state.stdin.onData);
+        state.stdin.stdin.removeListener('end', state.stdin.onEnd);
+        state.stdin.stdin.pause();
+      } catch (e) {
+        /* nothing to detach */
+      }
+      state.stdin = null;
+    }
+
+    if (!state.app) return result;
+    result.attempted = true;
+    try {
+      await Promise.race([
+        state.app.close(),
+        deps.sleep(deps.closeTimeoutMs).then(() => {
+          throw new Error(`the application did not close within ${Math.round(deps.closeTimeoutMs / 1000)}s`);
+        }),
+      ]);
+      result.closed = true;
+    } catch (e) {
+      result.error = e;
+      // Last resort, and strictly the child this launcher started itself —
+      // never a process matched by name, never anything unrelated.
+      try {
+        const child = typeof state.app.process === 'function' ? state.app.process() : null;
+        if (child && child.pid && child.killed !== true) {
+          child.kill('SIGTERM');
+          result.signalled = true;
+        }
+      } catch (e2) {
+        result.signalError = e2;
+      }
+    }
+    return result;
+  }
+
+  return {
+    install,
+    adopt,
+    guard,
+    armEnter,
+    waitForExit,
+    cleanup,
+    requestStop,
+    get stopReason() {
+      return state.stopReason;
+    },
+    get app() {
+      return state.app;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
 // 1. Build artifacts
 // ---------------------------------------------------------------------------
-function checkArtifacts() {
+function checkArtifacts(deps) {
+  const log = deps.log;
   const needed = [
     ['compiled renderer', path.join(REPO, 'static/js/main.js')],
     ['compiled main process', path.join(REPO, 'static/electron.js')],
@@ -77,7 +273,7 @@ function checkArtifacts() {
     ['guarded launch path', GUARDED_LAUNCH],
   ];
   const missing = [];
-  line('Build artifacts');
+  log('Build artifacts');
   for (const [label, p] of needed) {
     let st = null;
     try {
@@ -86,21 +282,20 @@ function checkArtifacts() {
       /* reported below */
     }
     if (st) {
-      const kb = (st.size / 1024).toFixed(0);
-      line(`  ok      ${label} — ${p} (${kb} KB, ${st.mtime.toISOString()})`);
+      log(`  ok      ${label} — ${p} (${(st.size / 1024).toFixed(0)} KB, ${st.mtime.toISOString()})`);
     } else {
-      line(`  MISSING ${label} — ${p}`);
+      log(`  MISSING ${label} — ${p}`);
       missing.push(label);
     }
   }
   if (missing.length) {
-    stop(
+    throw new PreviewError(
       `${missing.length} build artifact(s) are missing: ${missing.join(', ')}.`,
       'Rebuild in this order (gulp first, then the ClojureScript compile — the\n' +
         'other order deletes the compiled output):\n' +
         `  cd ${REPO}\n` +
         '  yarn gulp:build\n' +
-        '  yarn cljs:release'
+        '  clojure -M:cljs compile app electron'
     );
   }
 }
@@ -133,18 +328,68 @@ const digest = (d) =>
     )
     .digest('hex');
 
-function ensureGraph() {
+// Never deletes. An existing graph is used as it is, or — only with --reset —
+// moved into a dated archive first. Anything incomplete or unrecognised is
+// refused rather than overwritten, because the demonstration notes are editable
+// and the reader may have changed them.
+function ensureGraph(deps) {
+  const log = deps.log;
   const gen = require(path.join(HERE, 'make-preview-graph.js'));
-  const exists = fs.existsSync(path.join(GRAPH, 'logseq/config.edn'));
-  if (RESET || !exists) {
-    const files = gen.build();
-    line(`Demonstration graph ${RESET && exists ? 'rebuilt' : 'created'}: ${GRAPH} (${files.length} pages)`);
-  } else {
-    line(`Demonstration graph: ${GRAPH} (already present; --reset rebuilds it)`);
+  let state;
+  try {
+    state = gen.inspect();
+  } catch (e) {
+    throw new PreviewError(`the demonstration graph could not be checked: ${e.message}`);
   }
-  const pages = fs.readdirSync(path.join(GRAPH, 'pages')).filter((f) => f.endsWith('.md'));
-  if (pages.length < 9) stop(`the demonstration graph looks incomplete (${pages.length} pages).`);
-  return fs.realpathSync(GRAPH);
+
+  const create = (reason) => {
+    const r = gen.build({ reset: deps.reset });
+    if (r.archived) log(`Previous demonstration graph archived to: ${r.archived}`);
+    log(`Demonstration graph ${reason}: ${r.graph} (${r.files.length} pages)`);
+  };
+
+  if (deps.reset) {
+    if (state.status === 'foreign') {
+      throw new PreviewError(
+        `${state.graph} exists but ${state.detail}.`,
+        'Nothing there will be moved or deleted. Move it aside yourself if you want\n' +
+          'a fresh demonstration graph, then run the command again.'
+      );
+    }
+    try {
+      create(state.status === 'absent' || state.status === 'empty' ? 'created' : 'rebuilt');
+    } catch (e) {
+      throw new PreviewError(`the demonstration graph could not be rebuilt: ${e.message}`);
+    }
+  } else if (state.status === 'absent' || state.status === 'empty') {
+    try {
+      create('created');
+    } catch (e) {
+      throw new PreviewError(`the demonstration graph could not be created: ${e.message}`);
+    }
+  } else if (state.status === 'owned-complete') {
+    log(`Demonstration graph: ${state.graph} (${state.detail}; --reset archives it and starts fresh)`);
+  } else if (state.status === 'owned-incomplete') {
+    throw new PreviewError(
+      `the demonstration graph at ${state.graph} is incomplete (${state.detail}).`,
+      'It will NOT be overwritten or deleted — it may contain notes you changed.\n' +
+        'Run the command again with --reset to move it into a dated archive beside\n' +
+        'it and build a fresh one:\n' +
+        '  node f27-preview/preview.js --reset'
+    );
+  } else {
+    throw new PreviewError(
+      `${state.graph} exists but ${state.detail}.`,
+      'Nothing there will be touched. Move it aside yourself if you want a fresh\n' +
+        'demonstration graph, then run the command again.'
+    );
+  }
+
+  const after = gen.inspect();
+  if (after.status !== 'owned-complete') {
+    throw new PreviewError(`the demonstration graph is not usable (${after.status}: ${after.detail}).`);
+  }
+  return fs.realpathSync(after.graph);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +397,7 @@ function ensureGraph() {
 // ---------------------------------------------------------------------------
 function freshProfile() {
   const d = new Date();
-  const p = (n, w = 2) => String(n).padStart(w, '0');
+  const p = (n) => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(
     d.getMinutes()
   )}${p(d.getSeconds())}`;
@@ -255,48 +500,6 @@ async function markWindow(page, graph, profile) {
       `F27 PREVIEW — demonstration notes only\ngraph: ${path.basename(graph)}   profile: ${profile}`
     )
     .catch(() => {});
-}
-
-// ---------------------------------------------------------------------------
-// The foreground wait. No background watcher, no auto-restart: when this
-// resolves, the preview is closed.
-// ---------------------------------------------------------------------------
-function waitForExit(app) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (reason) => {
-      if (done) return;
-      done = true;
-      clearTimeout(warnT);
-      clearTimeout(limitT);
-      process.removeListener('SIGINT', onSig);
-      try {
-        process.stdin.pause();
-        process.stdin.removeListener('data', onKey);
-      } catch (e) {
-        /* nothing to clean up */
-      }
-      resolve(reason);
-    };
-    const onKey = () => finish('you pressed Enter');
-    const onSig = () => finish('you pressed Ctrl-C');
-    const warnT = setTimeout(() => {
-      line('');
-      line(`[preview] ${SESSION_LIMIT_MIN - WARN_AT_MIN} minute(s) left in this session.`);
-    }, WARN_AT_MIN * 60 * 1000);
-    const limitT = setTimeout(
-      () => finish(`the ${SESSION_LIMIT_MIN}-minute session limit was reached`),
-      SESSION_LIMIT_MIN * 60 * 1000
-    );
-    try {
-      process.stdin.resume();
-      process.stdin.on('data', onKey);
-    } catch (e) {
-      /* no keyboard available; the limit and Ctrl-C still apply */
-    }
-    process.on('SIGINT', onSig);
-    app.on('close', () => finish('the preview window was closed'));
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -529,117 +732,255 @@ async function walkthrough(page, out) {
 }
 
 // ---------------------------------------------------------------------------
-(async () => {
-  rule();
-  line('F27 user preview — isolated development build, demonstration notes only');
-  rule();
-  checkArtifacts();
-  const graph = ensureGraph();
-  const profile = freshProfile();
-  line(`Preview profile: ${path.join(EVIDENCE, profile)} (fresh, created by this run)`);
-  line('');
+// The run. One try/finally: every path below leaves through `finish`, which
+// closes the application, lets it settle, and only then hashes the graph.
+// ---------------------------------------------------------------------------
+const DEFAULTS = {
+  launch: (profile, opts) => require(GUARDED_LAUNCH).launch(profile, opts),
+  openGraph,
+  markWindow,
+  walkthrough,
+  digest,
+  checkArtifacts,
+  ensureGraph,
+  freshProfile,
+  sleep,
+  log: (s) => console.log(s),
+  reset: false,
+  selfCheck: false,
+  // Time for the application's own save/flush to land after a graceful close,
+  // before the final byte check is taken.
+  settleMs: 2500,
+  closeTimeoutMs: 15000,
+  sessionLimitMs: SESSION_LIMIT_MIN * 60 * 1000,
+  warnMs: WARN_AT_MIN * 60 * 1000,
+  writeResult: true,
+  onStarted: null,
+};
 
-  const L = require(GUARDED_LAUNCH);
-  line('Launching through the guarded path (isolated-launch.js)…');
-  const { app, page, profileDir } = await L.launch(profile);
-  line(`  the guarded path accepted the profile and replaced the environment (${profileDir})`);
+async function runPreview(overrides) {
+  const deps = Object.assign({}, DEFAULTS, overrides || {});
+  const log = deps.log;
+  const rule = () => log('-'.repeat(72));
 
-  const opened = await openGraph(page, graph);
-  if (!opened.ok) {
-    line('');
-    line('The demonstration graph could not be confirmed: ' + opened.why);
-    line('Nothing else will be clicked. Closing the preview.');
-    line('');
-    line(MANUAL(graph));
-    await Promise.race([app.close(), sleep(15000)]).catch(() => {});
-    process.exit(1);
-  }
-  const baseline = digest(graph);
-  await markWindow(page, graph, profile);
+  const lc = createLifecycle(deps);
+  lc.install(); // signals, end-of-input and the deadline, before anything runs
 
   const out = {
     started: new Date().toISOString(),
-    graph,
-    graph_reported_by_app: opened.current.path,
-    profile: profileDir,
     launch: 'isolated-launch.js (guarded)',
-    session_limit_minutes: SESSION_LIMIT_MIN,
-    digest_after_housekeeping: baseline,
+    session_limit_minutes: Math.round(deps.sessionLimitMs / 60000),
     checks: [],
   };
+  let error = null;
+  let graph = null;
+  let baseline = null;
+  let profile = null;
+  let readyAt = false;
+  let reason = null;
+  let selfCheckCompleted = false;
 
-  line('');
-  rule();
-  line('PREVIEW READY');
-  rule();
-  line(`Graph the application reports:  ${opened.current.path}`);
-  line(`Graph this launcher asked for:  ${graph}`);
-  line('  the two match, so the preview is showing the demonstration notes');
-  line(`Isolated profile:               ${profileDir}`);
-  line('');
-  line('Finding the right window');
-  line('  * the menu bar says "Electron", not "Logseq" — the installed Logseq OG');
-  line('    is a different application and is not involved;');
-  line(`  * the graph name in the app is "${GRAPH_NAME}";`);
-  line('  * a small orange "F27 PREVIEW" marker sits in the bottom-right corner.');
-  line('');
-  line('Closing it');
-  line('  press Enter in this terminal (or Ctrl-C) — the preview closes gracefully.');
-  line(`  This session also closes itself after ${SESSION_LIMIT_MIN} minutes; that is the`);
-  line('  project\'s standing per-session limit, not a failure. Run the command again');
-  line('  for another session.');
-  rule();
-
-  let reason;
-  if (SELF_CHECK) {
-    line('');
-    line('Self-check: walking through the five guided actions…');
-    await walkthrough(page, out);
-    reason = 'the self-check finished';
-  } else {
-    reason = await waitForExit(app);
-  }
-
-  line('');
-  line('Closing the preview — ' + reason);
-  const after = digest(graph);
-  const unchanged = after === baseline;
-  out.digest_final = after;
-  out.graph_unchanged = unchanged;
-  line(
-    `  demonstration notes ${unchanged ? 'unchanged' : 'CHANGED'} (${baseline.slice(0, 16)} ${
-      unchanged ? '==' : '!='
-    } ${after.slice(0, 16)})`
-  );
-  let closed = false;
   try {
-    await Promise.race([
-      app.close(),
-      sleep(15000).then(() => {
-        throw new Error('close timed out');
-      }),
-    ]);
-    closed = true;
-  } catch (e) {
-    /* reported below */
-  }
-  out.closed_gracefully = closed;
-  line(`  preview ${closed ? 'closed gracefully' : 'DID NOT close within 15s'}`);
-  line('  your own notes and the installed Logseq OG were not opened or changed');
+    if (deps.onStarted) deps.onStarted({ requestStop: lc.requestStop, lifecycle: lc });
 
-  if (SELF_CHECK) {
+    rule();
+    log('F27 user preview — isolated development build, demonstration notes only');
+    rule();
+    deps.checkArtifacts(deps);
+    graph = deps.ensureGraph(deps);
+    out.graph = graph;
+    profile = deps.freshProfile();
+    out.profile = path.join(EVIDENCE, profile);
+    log(`Preview profile: ${out.profile} (fresh, created by this run)`);
+    log('');
+
+    log('Launching through the guarded path (isolated-launch.js)…');
+    // `onApp` hands over the application as soon as it exists, so a failure
+    // later in the launch still leaves something for cleanup to close.
+    const launched = await lc.guard(deps.launch(profile, { onApp: (a) => lc.adopt(a) }));
+    lc.adopt(launched.app);
+    out.profile = launched.profileDir || out.profile;
+    log(`  the guarded path accepted the profile and replaced the environment (${out.profile})`);
+
+    const opened = await lc.guard(deps.openGraph(launched.page, graph));
+    if (!opened.ok) {
+      throw new PreviewError(
+        'the demonstration graph could not be confirmed: ' + opened.why,
+        'Nothing else was clicked.\n\n' + MANUAL(graph)
+      );
+    }
+    out.graph_reported_by_app = opened.current.path;
+
+    baseline = deps.digest(graph);
+    out.digest_after_housekeeping = baseline;
+    await lc.guard(deps.markWindow(launched.page, graph, profile));
+
+    log('');
+    rule();
+    log('PREVIEW READY');
+    rule();
+    log(`Graph the application reports:  ${opened.current.path}`);
+    log(`Graph this launcher asked for:  ${graph}`);
+    log('  the two match, so the preview is showing the demonstration notes');
+    log(`Isolated profile:               ${out.profile}`);
+    log('');
+    log('Finding the right window');
+    log('  * the menu bar says "Electron", not "Logseq" — this is a development');
+    log('    build. Your installed Logseq OG is a separate application: this');
+    log('    command does not start, stop or change it.');
+    log(`  * the graph name in the app is "${GRAPH_NAME}";`);
+    log('  * a small orange "F27 PREVIEW" marker sits in the bottom-right corner.');
+    log('');
+    log('While you are in it');
+    log('  * stay in this demonstration graph — do not open any other graph;');
+    log('  * the F27 reference panels are read-only, but the ordinary editor is');
+    log('    NOT disabled: clicking into a block still edits and saves it. That');
+    log('    only ever affects these demonstration notes.');
+    log('');
+    log('Closing it');
+    log('  press Enter in this terminal (or Ctrl-C) — a graceful close is attempted,');
+    log('  and whether it succeeded is reported below.');
+    log(`  This session also closes itself ${Math.round(deps.sessionLimitMs / 60000)} minutes after it started; that is`);
+    log('  the project\'s standing per-session limit, not a failure. Run the command');
+    log('  again for another session.');
+    rule();
+    readyAt = true;
+    lc.armEnter();
+
+    if (deps.selfCheck) {
+      log('');
+      log('Self-check: walking through the five guided actions…');
+      await lc.guard(deps.walkthrough(launched.page, out));
+      selfCheckCompleted = true;
+      reason = 'the self-check finished';
+    } else {
+      reason = await lc.waitForExit(launched.app);
+    }
+  } catch (e) {
+    error = e;
+    if (e instanceof CancelledError) reason = e.reason;
+  }
+
+  // ---- one exit path -------------------------------------------------------
+  log('');
+  log('Closing the preview' + (reason ? ' — ' + reason : ''));
+
+  const close = await lc.cleanup();
+  out.close_attempted = close.attempted;
+  out.closed_gracefully = close.closed;
+  if (close.attempted) {
+    if (close.closed) {
+      log('  the application closed gracefully');
+    } else {
+      log(`  the application DID NOT close cleanly: ${close.error && close.error.message}`);
+      if (close.signalled) log('  a stop signal was sent to the application this command started, and to nothing else');
+      else log('  no further action was taken; if a preview window is still open, close it from its own menu');
+      out.close_error = close.error ? String(close.error.message) : null;
+      out.signalled = close.signalled;
+    }
+  } else {
+    log('  nothing had been launched, so there was nothing to close');
+  }
+
+  // Only now — after the close, and after the application has had time to
+  // flush — is the graph hashed. A close that failed cannot support a
+  // preservation claim, and none is made.
+  if (graph && baseline) {
+    if (close.closed) await deps.sleep(deps.settleMs);
+    let after = null;
+    try {
+      after = deps.digest(graph);
+    } catch (e) {
+      log('  the demonstration notes could not be re-checked: ' + e.message);
+    }
+    if (after) {
+      out.digest_final = after;
+      out.graph_unchanged = after === baseline;
+      const same = after === baseline;
+      if (!close.attempted || close.closed) {
+        log(
+          `  demonstration notes ${same ? 'unchanged' : 'CHANGED'} after close (${baseline.slice(0, 16)} ${
+            same ? '==' : '!='
+          } ${after.slice(0, 16)})`
+        );
+        if (!same) {
+          log('    that is expected if you edited a note — the editor is not disabled.');
+          log('    --reset archives the current notes and builds a fresh copy.');
+        }
+      } else {
+        out.graph_unchanged = null; // measured, but not a preservation claim
+        log(
+          `  demonstration notes read as ${same ? 'unchanged' : 'CHANGED'} (${after.slice(0, 16)}), but the` +
+            ' application did not'
+        );
+        log('    close cleanly, so this is NOT a claim that nothing was written afterwards.');
+      }
+    }
+  }
+  log('  your own notes were never opened; the installed Logseq OG was not started, stopped or changed');
+
+  if (error && !(error instanceof CancelledError)) {
+    log('');
+    if (error instanceof PreviewError) {
+      log('PREVIEW STOPPED — ' + error.message);
+      if (error.extra) log(error.extra);
+    } else {
+      log('PREVIEW FAILED: ' + (error && error.stack ? error.stack : error));
+    }
+    out.error = String((error && error.message) || error);
+  }
+
+  let exitCode = 0;
+  if (error && !(error instanceof CancelledError)) exitCode = 1;
+  if (close.attempted && !close.closed) exitCode = 1;
+  if (deps.selfCheck) {
     out.summary = {
       pass: out.checks.filter((c) => c.result === 'PASS').length,
       fail: out.checks.filter((c) => c.result === 'FAIL').length,
     };
-    fs.writeFileSync(path.join(PREVIEW_DIR, `preview-self-check-${profile}.json`), JSON.stringify(out, null, 1));
-    line('');
-    line('SELF-CHECK ' + JSON.stringify(out.summary));
-    process.exit(out.summary.fail || !unchanged || !closed ? 1 : 0);
+    // A walkthrough that was cut short — by a signal, the deadline or a throw —
+    // verified nothing, whatever the counters say.
+    out.self_check_completed = selfCheckCompleted;
+    if (out.summary.fail || out.graph_unchanged !== true || !readyAt || !selfCheckCompleted) exitCode = 1;
+    if (deps.writeResult && profile) {
+      try {
+        fs.writeFileSync(path.join(PREVIEW_DIR, `preview-self-check-${profile}.json`), JSON.stringify(out, null, 1));
+      } catch (e) {
+        log('  the self-check result file could not be written: ' + e.message);
+      }
+    }
+    log('');
+    log('SELF-CHECK ' + JSON.stringify(out.summary));
   }
-  process.exit(closed && unchanged ? 0 : 1);
-})().catch((e) => {
-  line('');
-  line('PREVIEW FAILED: ' + (e && e.stack ? e.stack : e));
-  process.exit(1);
-});
+
+  out.exit_code = exitCode;
+  out.ready = readyAt;
+  out.stop_reason = reason;
+  out.original_error = error || null;
+  return out;
+}
+
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  runPreview({ reset: args.includes('--reset'), selfCheck: args.includes('--self-check') })
+    .then((r) => process.exit(r.exit_code))
+    .catch((e) => {
+      // Should not be reachable: runPreview owns its own failures.
+      console.log('PREVIEW FAILED (outside the lifecycle): ' + (e && e.stack ? e.stack : e));
+      process.exit(1);
+    });
+}
+
+module.exports = {
+  runPreview,
+  createLifecycle,
+  DEFAULTS,
+  PreviewError,
+  CancelledError,
+  digest,
+  ensureGraph,
+  checkArtifacts,
+  GRAPH,
+  PREVIEW_DIR,
+  EVIDENCE,
+};
