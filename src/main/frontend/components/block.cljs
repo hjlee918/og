@@ -2467,6 +2467,47 @@
                         :self? (= (:block/uuid b) uuid')}))))
            vec))))
 
+(defn- f27-crystal-tag-inventory
+  "Explicit tag names actually present in this graph, derived from the SAME two
+  sources the matcher accepts: inline tag nodes and `tags::` properties.
+
+  OG offers no API for this — `get-tag-pages` covers only the page-level
+  :block/tags property, and :block/refs cannot tell #tag from [[link]] — so the
+  inventory is computed here. A page that is only ever an ordinary link target
+  therefore never appears.
+
+  Scanning is bounded and read-only. Only blocks whose raw content could carry a
+  marker are parsed, so the cost tracks tagged content rather than graph size."
+  [repo]
+  (try
+    (let [db (db/get-db repo)
+          candidates (when db
+                       (->> (d/q '[:find ?c ?f ?p
+                                   :where
+                                   [?b :block/content ?c]
+                                   [(get-else $ ?b :block/format :markdown) ?f]
+                                   [(get-else $ ?b :block/properties {}) ?p]]
+                                 db)
+                            (filter (fn [[c _ p]]
+                                      (or (and (string? c)
+                                               (or (string/includes? c "#")
+                                                   (string/includes? c "tags::")))
+                                          (seq (f27c/tags-from-properties p)))))
+                            (take 20000)))
+          entries (map (fn [[c f p]]
+                         {:inline (f27c/tags-from-ast
+                                   (try (gp-mldoc/inline->edn c (gp-mldoc/default-config (or f :markdown)))
+                                        (catch :default _ nil))
+                                   gp-block/get-tag)
+                          :props (f27c/tags-from-properties p)})
+                       candidates)
+          page-tags (->> (d/q '[:find ?n :where [_ :block/tags ?t] [?t :block/name ?n]] db)
+                         (map first)
+                         (keep f27c/normalize-tag)
+                         set)]
+      (into (f27c/collect-tags entries) page-tags))
+    (catch :default _ #{})))
+
 (rum/defc f27-crystal-preview < rum/static
   [m]
   (let [label (f27c/preview-text (:content m) 60)]
@@ -2480,41 +2521,66 @@
      [:span.f27-crystal-dot "◆"]
      [:span.f27-crystal-text label]]))
 
-(rum/defcs f27-crystal-selector < rum/reactive (rum/local false ::open?)
-  "Small, discoverable control for choosing ONE existing graph tag as the Crystal
-  marker, and for clearing it. Choosing a marker never creates a page or tag and
-  never writes a graph file."
+(rum/defcs f27-crystal-selector < rum/reactive
+  (rum/local false ::open?)
+  (rum/local "" ::query)
+  (rum/local nil ::inventory)
+  "Discoverable control for choosing ONE explicit graph tag as the Crystal
+  marker, and for clearing it.
+
+  The list is an inventory of tags actually used explicitly in this graph, and it
+  is SEARCHABLE, so a tag can never become unselectable because of where it
+  sorts. Choosing a marker creates nothing and writes no graph file."
   [state repo]
   (let [current (state/sub :f27/crystal-tags)
         tag (get current repo)
         *open? (::open? state)
-        open? @*open?
-        set-open! (fn [v] (reset! *open? v))]
+        *query (::query state)
+        *inv (::inventory state)
+        open? @*open?]
     [:div.f27-crystal-config
      [:a.f27-crystal-config-toggle
-      {:on-click (fn [e] (util/stop e) (set-open! (not open?)))}
+      {:on-click (fn [e]
+                   (util/stop e)
+                   ;; Inventory is computed once when the control is opened,
+                   ;; never on every render.
+                   (when (and (not open?) (nil? @*inv))
+                     (reset! *inv (f27-crystal-tag-inventory repo)))
+                   (swap! *open? not))}
       (if tag (t :f27/crystal-marker-is tag) (t :f27/crystal-choose))]
      (when open?
-       [:div.f27-crystal-config-panel
-        [:div.f27-crystal-config-help (t :f27/crystal-help)]
-        [:div.f27-crystal-config-local (t :f27/crystal-local-only)]
-        (let [tags (->> (db/get-all-pages repo)
-                        (keep :block/original-name)
-                        (remove string/blank?)
-                        sort
-                        (take 300))]
-          [:select.f27-crystal-select
-           {:value (or tag "")
+       (let [inv (or @*inv #{})
+             {:keys [matches total shown]} (f27c/filter-tags inv @*query)
+             sel-state (f27c/selection-state tag inv)]
+         [:div.f27-crystal-config-panel
+          {:on-click (fn [e] (util/stop-propagation e))}
+          [:div.f27-crystal-config-help (t :f27/crystal-help)]
+          [:div.f27-crystal-config-local (t :f27/crystal-local-only)]
+          ;; A chosen marker that is no longer present is explained, not hidden.
+          (when (= sel-state :missing)
+            [:div.f27-crystal-missing (t :f27/crystal-missing tag)])
+          [:input.f27-crystal-search
+           {:type "text"
+            :value @*query
+            :placeholder (t :f27/crystal-search)
             :on-click (fn [e] (util/stop-propagation e))
-            :on-change (fn [e]
-                         (let [v (.. e -target -value)]
-                           (state/set-crystal-tag! repo (when-not (string/blank? v) v))))}
-           [:option {:value ""} (t :f27/crystal-none)]
-           (for [n tags] [:option {:key n :value n} n])])
-        (when tag
-          [:a.f27-crystal-clear
-           {:on-click (fn [e] (util/stop e) (state/set-crystal-tag! repo nil))}
-           (t :f27/crystal-clear)])])]))
+            :on-change (fn [e] (reset! *query (.. e -target -value)))}]
+          [:div.f27-crystal-options
+           (if (seq matches)
+             (for [n matches]
+               [:a.f27-crystal-option
+                {:key n
+                 :class (when (f27c/same-tag? n tag) "is-selected")
+                 :on-click (fn [e] (util/stop e) (state/set-crystal-tag! repo n))}
+                (str "#" n)])
+             [:div.f27-crystal-empty
+              (if (zero? (count inv)) (t :f27/crystal-no-tags) (t :f27/crystal-no-match))])]
+          (when (> total shown)
+            [:div.f27-crystal-note (t :f27/crystal-narrow (- total shown))])
+          (when tag
+            [:a.f27-crystal-clear
+             {:on-click (fn [e] (util/stop e) (state/set-crystal-tag! repo nil))}
+             (t :f27/crystal-clear)])]))]))
 
 (rum/defc f27-ref-overview-row < rum/static
   [config repo ref-block idx crystal-tag]

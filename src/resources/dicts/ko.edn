@@ -283,6 +283,12 @@
  :f27/crystal-help "기존 태그 하나를 고르세요. #태그 또는 tags:: 속성으로 명시적으로 표시된 블록이 해당 참조 옆에 미리보기로 표시됩니다. 태그를 고른다고 태그가 새로 만들어지거나 노트가 바뀌지는 않습니다."
  :f27/crystal-local-only "이 기기에만 저장됩니다. 그래프를 다른 기기로 옮겨도 따라가지 않습니다."
  :f27/crystal-none "선택 안 함"
+ :f27/crystal-search "태그 검색"
+ :f27/crystal-no-tags "이 그래프에는 아직 명시적 태그가 없습니다"
+ :f27/crystal-no-match "검색과 일치하는 태그가 없습니다"
+ :f27/crystal-narrow "{1}개 더 있습니다 — 검색어를 좁혀 보세요"
+ :f27/crystal-missing "현재 표시 태그 \"{1}\"는 이 그래프에서 사용되고 있지 않습니다"
+
  :f27/crystal-clear "표시 태그 해제"
  :f27/crystal-more "외 {1}개"
  :f27/crystal-scope "Crystal 미리보기는 각 참조 블록과 그 상위 블록만 대상으로 합니다."

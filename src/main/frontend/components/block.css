@@ -875,3 +875,16 @@ html.is-mac {
 .f27-crystal-config-local { font-style: italic; }
 .f27-crystal-select { max-width: 18rem; }
 .f27-crystal-clear { display: inline-block; margin-top: 0.35rem; color: var(--ls-link-text-color); cursor: pointer; font-size: 0.9em; }
+
+.f27-crystal-search { width: 100%; max-width: 20rem; padding: 0.15rem 0.35rem; margin-bottom: 0.35rem; }
+.f27-crystal-options { display: flex; flex-wrap: wrap; gap: 0.25rem; max-height: 9rem; overflow-y: auto; }
+.f27-crystal-option {
+  padding: 0.05rem 0.4rem; border-radius: 10px; cursor: pointer; font-size: 0.9em;
+  border: 1px solid var(--ls-quaternary-background-color); color: var(--ls-primary-text-color);
+}
+.f27-crystal-option:hover { border-color: var(--ls-link-text-color); }
+.f27-crystal-option.is-selected { border-color: var(--ls-link-text-color); font-weight: 600; }
+.f27-crystal-empty, .f27-crystal-note, .f27-crystal-missing {
+  color: var(--ls-secondary-text-color); font-size: 0.9em; margin: 0.2rem 0;
+}
+.f27-crystal-missing { font-style: italic; }

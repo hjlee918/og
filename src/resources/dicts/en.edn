@@ -228,6 +228,12 @@
  :f27/crystal-help "Pick one existing tag. Blocks explicitly marked with it — by #tag or a tags:: property — are previewed beside the references that lead to them. Choosing a tag does not create it and does not change your notes."
  :f27/crystal-local-only "Saved on this device only. It does not travel with the graph to another device."
  :f27/crystal-none "None"
+ :f27/crystal-search "Search tags"
+ :f27/crystal-no-tags "No explicit tags found in this graph yet"
+ :f27/crystal-no-match "No tag matches that search"
+ :f27/crystal-narrow "{1} more match — narrow the search to see them"
+ :f27/crystal-missing "Current marker \"{1}\" is not currently used anywhere in this graph"
+
  :f27/crystal-clear "Clear marker"
  :f27/crystal-more "+{1} more"
  :f27/crystal-scope "Crystal previews cover each referencing block and its parent blocks on that page only."
