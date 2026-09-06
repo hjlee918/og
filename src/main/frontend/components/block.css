@@ -848,3 +848,30 @@ html.is-mac {
 .f27-ref-unavailable {
   font-style: italic;
 }
+
+/* F27 slice 2 — Crystal previews and marker selection. Display-only. */
+.f27-ref-row-main { display: flex; align-items: baseline; gap: 0.35rem; min-width: 0; }
+.f27-crystal-row { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.15rem 0 0.2rem 1.1rem; }
+.f27-crystal-chip {
+  display: inline-flex; align-items: baseline; gap: 0.25rem;
+  max-width: 22rem; padding: 0.05rem 0.4rem;
+  border: 1px solid var(--ls-quaternary-background-color);
+  border-radius: 10px; font-size: 0.9em; cursor: pointer;
+  color: var(--ls-primary-text-color);
+}
+.f27-crystal-chip:hover { border-color: var(--ls-link-text-color); }
+.f27-crystal-dot { color: var(--ls-link-text-color); flex: 0 0 auto; }
+.f27-crystal-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.f27-crystal-more { color: var(--ls-secondary-text-color); font-size: 0.9em; align-self: center; }
+.f27-crystal-scope { font-size: 0.9em; }
+.f27-crystal-config { margin-top: 0.4rem; }
+.f27-crystal-config-toggle { color: var(--ls-link-text-color); cursor: pointer; font-size: 0.9em; }
+.f27-crystal-config-panel {
+  margin-top: 0.35rem; padding: 0.4rem 0.5rem;
+  background: var(--ls-tertiary-background-color); border-radius: 4px;
+}
+.f27-crystal-config-help,
+.f27-crystal-config-local { color: var(--ls-secondary-text-color); font-size: 0.9em; margin-bottom: 0.3rem; }
+.f27-crystal-config-local { font-style: italic; }
+.f27-crystal-select { max-width: 18rem; }
+.f27-crystal-clear { display: inline-block; margin-top: 0.35rem; color: var(--ls-link-text-color); cursor: pointer; font-size: 0.9em; }

@@ -172,6 +172,11 @@
 
      :preferred-language                    (storage/get :preferred-language)
 
+     ;; F27 slice 2: the user-chosen Crystal marker tag, per graph.
+     ;; A LOCAL application preference, keyed by repo url. Deliberately not written
+     ;; into the graph's config.edn, so choosing a marker never modifies graph files.
+     :f27/crystal-tags                      (or (storage/get :f27-crystal-tags) {})
+
      ;; electron
      :electron/auto-updater-downloaded      false
      :electron/updater-pending?             false
@@ -861,6 +866,37 @@ Similar to re-frame subscriptions"
   [language]
   (set-state! :preferred-language (name language))
   (storage/set :preferred-language (name language)))
+
+;; ---------------------------------------------------------------------------
+;; F27 slice 2 — Crystal marker preference.
+;;
+;; Stored as a LOCAL application preference (localStorage), keyed by repo url so
+;; two graphs on the same machine keep separate markers. It is intentionally NOT
+;; written to the graph's config.edn: choosing a marker must never modify graph
+;; files. The consequence, disclosed in the UI, is that the choice does not
+;; travel with the graph to another device.
+;; ---------------------------------------------------------------------------
+(defn get-crystal-tag
+  "The Crystal marker tag chosen for `repo`, or nil when none is set."
+  ([] (get-crystal-tag (get-current-repo)))
+  ([repo]
+   (when repo
+     (get (:f27/crystal-tags @state) repo))))
+
+(defn set-crystal-tag!
+  "Choose or clear the Crystal marker for `repo`. Passing nil or a blank string
+  clears it. Writes only this local preference; no graph file is touched."
+  ([tag] (set-crystal-tag! (get-current-repo) tag))
+  ([repo tag]
+   (when repo
+     (let [tag (when (and (string? tag) (not (string/blank? tag)))
+                 (string/trim tag))
+           m   (if tag
+                 (assoc (:f27/crystal-tags @state) repo tag)
+                 (dissoc (:f27/crystal-tags @state) repo))]
+       (set-state! :f27/crystal-tags m)
+       (storage/set :f27-crystal-tags m)
+       tag))))
 
 (defn delete-repo!
   [repo]

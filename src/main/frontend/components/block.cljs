@@ -59,6 +59,7 @@
             [frontend.util.clock :as clock]
             [frontend.util.drawer :as drawer]
             [frontend.util.f27-ref-overview :as f27]
+            [frontend.util.f27-crystal :as f27c]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -2412,19 +2413,134 @@
 ;; Display-only: no graph write, no persistence, no recursive traversal.
 ;; Crystal information is deliberately absent in slice 1 (see F27_FIRST_SLICE_SPEC).
 ;; ---------------------------------------------------------------------------
-(rum/defc f27-ref-overview-row < rum/static
-  [config repo ref-block idx]
-  (when (f27/renderable? ref-block)
-    [:div.f27-ref-row {:key (f27/row-key ref-block idx)}
-     [:span.f27-ref-bullet "›"]
-     [:span.f27-ref-crumb
-      (breadcrumb config repo (:block/uuid ref-block)
-                  {:show-page? true
-                   :level-limit 3
-                   :indent? false
-                   :end-separator? false})]]))
+;; ---------------------------------------------------------------------------
+;; F27 slice 2 — Crystal previews.
+;;
+;; A Crystal is content EXPLICITLY marked with the user's chosen tag. Explicit
+;; means an inline tag node (#tag / #[[multi word]]) that OG's own parser emits,
+;; or a block `tags::` property. An ordinary [[page link]] to the same page, an
+;; inherited path reference, and text inside code are all deliberately excluded,
+;; because OG's parser does not emit a Tag node for them.
+;;
+;; SCOPE: for each incoming-reference row, only the referencing block and its
+;; ancestor chain on that same source page are searched. Unrelated branches, the
+;; rest of the source page, the wider graph and followed references are NOT
+;; searched. This is disclosed in the panel so the reader does not assume every
+;; tagged item on the source page appears.
+;;
+;; All reads. Nothing here writes a graph file.
+;; ---------------------------------------------------------------------------
+(defn- f27-block-explicit-tags
+  "Explicit tag identities carried by one block, using OG's own parser."
+  [block]
+  (let [content (:block/content block)
+        format  (or (:block/format block) :markdown)
+        inline  (when (and (string? content) (seq content))
+                  (try
+                    (f27c/tags-from-ast
+                     (gp-mldoc/inline->edn content (gp-mldoc/default-config format))
+                     gp-block/get-tag)
+                    (catch :default _ nil)))
+        props   (f27c/tags-from-properties (:block/properties block))]
+    {:inline (or inline #{}) :props (or props #{})}))
 
-(rum/defc f27-ref-overview < rum/static
+(defn- f27-crystal-matches
+  "Crystal matches for one incoming-reference row: the referencing block itself,
+  then its ancestors on the same source page, nearest first. Bounded traversal."
+  [repo crystal-tag ref-block]
+  (when (and crystal-tag ref-block)
+    (let [uuid' (:block/uuid ref-block)
+          ancestors (when uuid'
+                      (try
+                        (reverse (db/get-block-parents repo uuid' f27c/max-ancestor-depth))
+                        (catch :default _ nil)))
+          candidates (->> (cons ref-block ancestors)
+                          (remove nil?)
+                          ;; a page entity is not a block match
+                          (remove :block/name))]
+      (->> candidates
+           (keep (fn [b]
+                   (let [{:keys [inline props]} (f27-block-explicit-tags b)]
+                     (when (f27c/block-tagged? crystal-tag inline props)
+                       {:uuid (:block/uuid b)
+                        :content (:block/content b)
+                        :self? (= (:block/uuid b) uuid')}))))
+           vec))))
+
+(rum/defc f27-crystal-preview < rum/static
+  [m]
+  (let [label (f27c/preview-text (:content m) 60)]
+    [:a.f27-crystal-chip
+     {:title label
+      :on-click (fn [e]
+                  (util/stop e)
+                  ;; Navigate through OG's existing block route; no new mechanism.
+                  (when-let [u (:uuid m)]
+                    (route-handler/redirect-to-page! (str u))))}
+     [:span.f27-crystal-dot "◆"]
+     [:span.f27-crystal-text label]]))
+
+(rum/defcs f27-crystal-selector < rum/reactive (rum/local false ::open?)
+  "Small, discoverable control for choosing ONE existing graph tag as the Crystal
+  marker, and for clearing it. Choosing a marker never creates a page or tag and
+  never writes a graph file."
+  [state repo]
+  (let [current (state/sub :f27/crystal-tags)
+        tag (get current repo)
+        *open? (::open? state)
+        open? @*open?
+        set-open! (fn [v] (reset! *open? v))]
+    [:div.f27-crystal-config
+     [:a.f27-crystal-config-toggle
+      {:on-click (fn [e] (util/stop e) (set-open! (not open?)))}
+      (if tag (t :f27/crystal-marker-is tag) (t :f27/crystal-choose))]
+     (when open?
+       [:div.f27-crystal-config-panel
+        [:div.f27-crystal-config-help (t :f27/crystal-help)]
+        [:div.f27-crystal-config-local (t :f27/crystal-local-only)]
+        (let [tags (->> (db/get-all-pages repo)
+                        (keep :block/original-name)
+                        (remove string/blank?)
+                        sort
+                        (take 300))]
+          [:select.f27-crystal-select
+           {:value (or tag "")
+            :on-click (fn [e] (util/stop-propagation e))
+            :on-change (fn [e]
+                         (let [v (.. e -target -value)]
+                           (state/set-crystal-tag! repo (when-not (string/blank? v) v))))}
+           [:option {:value ""} (t :f27/crystal-none)]
+           (for [n tags] [:option {:key n :value n} n])])
+        (when tag
+          [:a.f27-crystal-clear
+           {:on-click (fn [e] (util/stop e) (state/set-crystal-tag! repo nil))}
+           (t :f27/crystal-clear)])])]))
+
+(rum/defc f27-ref-overview-row < rum/static
+  [config repo ref-block idx crystal-tag]
+  (when (f27/renderable? ref-block)
+    (let [{:keys [previews remainder]}
+          (when crystal-tag
+            (f27c/select-previews (f27-crystal-matches repo crystal-tag ref-block)))]
+      [:div.f27-ref-row {:key (f27/row-key ref-block idx)}
+       [:div.f27-ref-row-main
+        [:span.f27-ref-bullet "›"]
+        [:span.f27-ref-crumb
+         (breadcrumb config repo (:block/uuid ref-block)
+                     {:show-page? true
+                      :level-limit 3
+                      :indent? false
+                      :end-separator? false})]]
+       ;; Crystal previews for THIS referencing block and its ancestors only.
+       ;; No configured tag, or no match, renders nothing at all — never an
+       ;; empty placeholder row.
+       (when (seq previews)
+         [:div.f27-crystal-row
+          (for [m previews] (rum/with-key (f27-crystal-preview m) (str (:uuid m))))
+          (when (pos? remainder)
+            [:span.f27-crystal-more (t :f27/crystal-more remainder)])])])))
+
+(rum/defc f27-ref-overview < rum/reactive
   [config repo block list-visible? *hide-block-refs? *show-ref-overview?]
   ;; (:block/_refs block) yields reverse-reference stubs ({:db/id N}), not
   ;; realised entities, so each one is resolved before a row can show its own
@@ -2434,7 +2550,10 @@
   ;; panel total, the visible rows and the remainder can never silently disagree.
   (let [{:keys [total rows displayed capped duplicates unavailable]}
         (f27/prepare-rows (:block/_refs block) (fn [id] (db/entity id)))
-        shown rows]
+        shown rows
+        ;; Subscribed, not merely read: the panel must re-render when the user
+        ;; chooses or clears a marker.
+        crystal-tag (get (state/sub :f27/crystal-tags) repo)]
     [:div.f27-ref-overview
      ;; Contain clicks so opening/closing the panel never reaches the block's
      ;; own content handler (which would start editing) or an ancestor handler.
@@ -2443,7 +2562,7 @@
       :on-mouse-down (fn [e] (util/stop-propagation e))}
      [:div.f27-ref-overview-head (t :f27/incoming-references total)]
      [:div.f27-ref-rows
-      (map-indexed (fn [idx r] (f27-ref-overview-row config repo r idx)) shown)]
+      (map-indexed (fn [idx r] (f27-ref-overview-row config repo r idx crystal-tag)) shown)]
      ;; Every incoming reference that is NOT visible above is explained. A row
      ;; that cannot render is never reported as displayed.
      (when (pos? duplicates)
@@ -2454,6 +2573,11 @@
        [:div.f27-ref-more (t :f27/more-not-shown capped)])
      (when (and (zero? displayed) (pos? total))
        [:div.f27-ref-note (t :f27/nothing-displayable)])
+     ;; Crystal scope is stated so the reader never assumes every tagged item on
+     ;; the source page is included.
+     (when crystal-tag
+       [:div.f27-ref-note.f27-crystal-scope (t :f27/crystal-scope)])
+     (f27-crystal-selector repo)
      [:div.f27-ref-actions
       [:a.f27-ref-action
        {:on-click (fn [e]

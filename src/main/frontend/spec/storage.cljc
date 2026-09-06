@@ -20,6 +20,7 @@
 (s/def :ui/wide-mode boolean?)
 (s/def :git/current-repo string?)
 (s/def ::preferred-language string?)
+(s/def ::f27-crystal-tags map?)
 (s/def ::developer-mode string?) ;; Funny string boolean
 (s/def :document/mode? boolean?)
 (s/def :ui/shortcut-tooltip? boolean?)
@@ -54,6 +55,7 @@
             :ui/wide-mode
             :git/current-repo
             ::preferred-language
+            ::f27-crystal-tags
             ::developer-mode
             :document/mode?
             :ui/shortcut-tooltip?
