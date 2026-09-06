@@ -58,6 +58,7 @@
             [frontend.extensions.pdf.utils :as pdf-utils]
             [frontend.util.clock :as clock]
             [frontend.util.drawer :as drawer]
+            [frontend.util.f27-ref-overview :as f27]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -2376,21 +2377,94 @@
         nil)]]))
 
 (rum/defc block-refs-count < rum/static
-  [block *hide-block-refs?]
+  [block *hide-block-refs? *show-ref-overview?]
   (let [block-refs-count (count (:block/_refs block))]
     (when (> block-refs-count 0)
       [:div
        [:a.open-block-ref-link.bg-base-2.text-sm.ml-2.fade-link
-        {:title "Open block references"
+        {:title (t :f27/badge-title)
          :style {:margin-top -1}
          :on-click (fn [e]
+                     ;; Shift-click keeps its existing behaviour exactly: straight
+                     ;; to the right sidebar, bypassing the F27 overview.
                      (if (gobj/get e "shiftKey")
                        (state/sidebar-add-block!
                         (state/get-current-repo)
                         (:db/id block)
                         :block-ref)
-                       (swap! *hide-block-refs? not)))}
+                       ;; F27 slice 1: a normal click opens the compact
+                       ;; incoming-reference overview instead of jumping straight
+                       ;; to the full list. The full list stays one click away and
+                       ;; renders through OG's existing component, unchanged.
+                       (if (some? *show-ref-overview?)
+                         (swap! *show-ref-overview? not)
+                         (swap! *hide-block-refs? not))))}
         block-refs-count]])))
+
+;; ---------------------------------------------------------------------------
+;; F27 slice 1 — compact incoming-reference overview.
+;;
+;; The badge counts INCOMING references. Each row therefore describes ONE
+;; referencing block and shows THAT block's own source page and short ancestor
+;; path, reusing OG's existing `breadcrumb`. It is not a restatement of the
+;; canonical target's own location.
+;;
+;; Display-only: no graph write, no persistence, no recursive traversal.
+;; Crystal information is deliberately absent in slice 1 (see F27_FIRST_SLICE_SPEC).
+;; ---------------------------------------------------------------------------
+(rum/defc f27-ref-overview-row < rum/static
+  [config repo ref-block idx]
+  (when (f27/renderable? ref-block)
+    [:div.f27-ref-row {:key (f27/row-key ref-block idx)}
+     [:span.f27-ref-bullet "›"]
+     [:span.f27-ref-crumb
+      (breadcrumb config repo (:block/uuid ref-block)
+                  {:show-page? true
+                   :level-limit 3
+                   :indent? false
+                   :end-separator? false})]]))
+
+(rum/defc f27-ref-overview < rum/static
+  [config repo block list-visible? *hide-block-refs? *show-ref-overview?]
+  ;; (:block/_refs block) yields reverse-reference stubs ({:db/id N}), not
+  ;; realised entities, so each one is resolved before a row can show its own
+  ;; page and ancestor path. Resolution is a read; nothing is written.
+  ;;
+  ;; prepare-rows accounts for EVERY incoming entry, so the badge count, the
+  ;; panel total, the visible rows and the remainder can never silently disagree.
+  (let [{:keys [total rows displayed capped duplicates unavailable]}
+        (f27/prepare-rows (:block/_refs block) (fn [id] (db/entity id)))
+        shown rows]
+    [:div.f27-ref-overview
+     ;; Contain clicks so opening/closing the panel never reaches the block's
+     ;; own content handler (which would start editing) or an ancestor handler.
+     ;; stop-propagation, not stop: inner breadcrumb links must keep working.
+     {:on-click (fn [e] (util/stop-propagation e))
+      :on-mouse-down (fn [e] (util/stop-propagation e))}
+     [:div.f27-ref-overview-head (t :f27/incoming-references total)]
+     [:div.f27-ref-rows
+      (map-indexed (fn [idx r] (f27-ref-overview-row config repo r idx)) shown)]
+     ;; Every incoming reference that is NOT visible above is explained. A row
+     ;; that cannot render is never reported as displayed.
+     (when (pos? duplicates)
+       [:div.f27-ref-note (t :f27/repeated-from-same-block duplicates)])
+     (when (pos? unavailable)
+       [:div.f27-ref-note.f27-ref-unavailable (t :f27/context-unavailable unavailable)])
+     (when (pos? capped)
+       [:div.f27-ref-more (t :f27/more-not-shown capped)])
+     (when (and (zero? displayed) (pos? total))
+       [:div.f27-ref-note (t :f27/nothing-displayable)])
+     [:div.f27-ref-actions
+      [:a.f27-ref-action
+       {:on-click (fn [e]
+                    (util/stop e)
+                    (swap! *hide-block-refs? not))}
+       (if list-visible? (t :f27/hide-references) (t :f27/show-references total))]
+      [:a.f27-ref-action
+       {:on-click (fn [e]
+                    (util/stop e)
+                    (reset! *show-ref-overview? false))}
+       (t :f27/close-overview)]]]))
 
 (rum/defc block-left-menu < rum/reactive
   [_config {:block/keys [uuid] :as _block}]
@@ -2417,10 +2491,18 @@
                  embed-self? (and (:embed? config)
                                   (= (:block/uuid block) (:block/uuid (:block config))))
                  default-hide? (if (and current-block-page? (not embed-self?) (state/auto-expand-block-refs?)) false true)]
-             (assoc state ::hide-block-refs? (atom default-hide?))))}
+             ;; F27 slice 1: a SECOND, instance-local atom for the compact overview.
+             ;; Instance-local means repeated appearances of the same block each own
+             ;; their own panel state and never control one another. The existing
+             ;; auto-expand behaviour above is untouched.
+             (assoc state
+                    ::hide-block-refs? (atom default-hide?)
+                    ::show-ref-overview? (atom false))))}
   [state config {:block/keys [uuid format] :as block} edit-input-id block-id edit? hide-block-refs-count? selected?]
   (let [*hide-block-refs? (get state ::hide-block-refs?)
         hide-block-refs? (rum/react *hide-block-refs?)
+        *show-ref-overview? (get state ::show-ref-overview?)
+        show-ref-overview? (rum/react *show-ref-overview?)
         editor-box (get config :editor-box)
         editor-id (str "editor-" edit-input-id)
         slide? (:slide? config)
@@ -2476,7 +2558,15 @@
                                   (editor-handler/edit-block! block :max (:block/uuid block)))}
                 svg/edit])
 
-             (block-refs-count block *hide-block-refs?)])]
+             (block-refs-count block *hide-block-refs? *show-ref-overview?)])]
+
+         ;; F27 slice 1: compact incoming-reference overview, shown above OG's
+         ;; existing full reference list. The list below is rendered by the same
+         ;; component as before and is not modified by this slice.
+         (when (and show-ref-overview? (> refs-count 0))
+           (f27-ref-overview config (state/get-current-repo) block
+                             (not hide-block-refs?)
+                             *hide-block-refs? *show-ref-overview?))
 
          (when (and (not hide-block-refs?) (> refs-count 0))
            (let [refs-cp (state/get-component :block/linked-references)]

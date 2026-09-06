@@ -764,3 +764,87 @@ html.is-mac {
     @apply bg-gray-04;
   }
 }
+
+/* ------------------------------------------------------------------
+   F27 slice 1 — compact incoming-reference overview.
+   Display-only. Bounded height so a block with many references cannot
+   push the editor around; the row cap and the "+N more" notice keep the
+   list honest about what is not shown.
+   ------------------------------------------------------------------ */
+.f27-ref-overview {
+  margin: 0.25rem 0 0.35rem 1.25rem;
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  background: var(--ls-secondary-background-color);
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+
+.f27-ref-overview-head {
+  color: var(--ls-secondary-text-color);
+  font-weight: 500;
+  margin-bottom: 0.3rem;
+}
+
+.f27-ref-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.f27-ref-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.f27-ref-bullet {
+  color: var(--ls-secondary-text-color);
+  flex: 0 0 auto;
+}
+
+/* Keep a long path on one line with an ellipsis rather than wrapping and
+   pushing the block content around. The full text stays reachable via the
+   breadcrumb's own links. */
+.f27-ref-crumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.f27-ref-more {
+  margin-top: 0.3rem;
+  color: var(--ls-secondary-text-color);
+  font-style: italic;
+}
+
+.f27-ref-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--ls-quaternary-background-color);
+}
+
+.f27-ref-action {
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+}
+
+.f27-ref-action:hover {
+  color: var(--ls-link-text-hover-color);
+}
+
+.f27-ref-note {
+  margin-top: 0.3rem;
+  color: var(--ls-secondary-text-color);
+  font-size: 0.95em;
+}
+
+.f27-ref-unavailable {
+  font-style: italic;
+}
