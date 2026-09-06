@@ -1028,3 +1028,202 @@ html.is-mac {
   color: var(--ls-link-text-color); cursor: pointer; font-size: 0.85em; }
 .f27-desc-source { display: inline-block; margin-top: 0.3rem;
   color: var(--ls-link-text-color); cursor: pointer; font-size: 0.85em; }
+
+/* F27 slice 5 — chained inbound-reference exploration. Display-only. One level
+   is on screen at a time: nothing here nests a panel inside another panel. */
+
+.f27-in {
+  margin-top: 0.45rem;
+}
+
+.f27-in-toggle {
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+.f27-in-body {
+  margin-top: 0.3rem;
+  padding: 0.35rem 0.45rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  background: var(--ls-tertiary-background-color);
+  border-radius: 4px;
+}
+
+.f27-in-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem;
+  font-size: 0.85em;
+  margin-bottom: 0.25rem;
+}
+
+.f27-in-path-label {
+  color: var(--ls-secondary-text-color);
+  margin-right: 0.15rem;
+}
+
+.f27-in-path-step {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.f27-in-path-sep {
+  color: var(--ls-secondary-text-color);
+}
+
+.f27-in-path-current {
+  font-weight: 600;
+}
+
+.f27-in-path-jump {
+  font-size: 1em;
+  text-decoration: underline;
+}
+
+.f27-in-back {
+  margin-left: 0.4rem;
+  font-size: 1em;
+  text-decoration: underline;
+}
+
+/* The direction is stated in words, not only implied by placement, because a
+   panel opened from a reference overview is where it is easiest to reverse. */
+
+.f27-in-head {
+  font-weight: 600;
+  margin-bottom: 0.1rem;
+}
+
+.f27-in-direction {
+  color: var(--ls-secondary-text-color);
+  font-size: 0.85em;
+  font-style: italic;
+  margin-bottom: 0.3rem;
+}
+
+.f27-in-count {
+  color: var(--ls-secondary-text-color);
+  font-size: 0.85em;
+  margin-bottom: 0.25rem;
+}
+
+.f27-in-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.f27-in-row {
+  padding: 0.2rem 0 0.25rem;
+  border-top: 1px solid var(--ls-quaternary-background-color);
+}
+
+.f27-in-row:first-child {
+  border-top: 0;
+}
+
+.f27-in-row-head {
+  display: flex;
+  gap: 0.35rem;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.f27-in-mark {
+  flex: 0 0 auto;
+  width: 1em;
+  text-align: center;
+  color: var(--ls-secondary-text-color);
+}
+
+/* A row that cannot be opened further must not look like an ordinary one. */
+
+.f27-in-mark.is-stop {
+  color: var(--ls-warning-text-color, var(--ls-secondary-text-color));
+  font-weight: 600;
+}
+
+.f27-in-crumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.f27-in-text {
+  margin: 0.1rem 0 0.15rem 1.35rem;
+  min-width: 0;
+}
+
+.f27-in-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-left: 1.35rem;
+  font-size: 0.85em;
+}
+
+.f27-in-explore,
+.f27-in-source,
+.f27-in-more,
+.f27-in-retry {
+  font-size: 1em;
+  text-decoration: underline;
+}
+
+.f27-in-more,
+.f27-in-retry,
+.f27-in-source {
+  display: inline-block;
+  margin-top: 0.25rem;
+}
+
+/* Crystal selector — the same native-button treatment as every other F27
+   control, so its options and actions are reachable by Tab and activated by
+   Enter and Space.
+
+   `.f27-btn` strips the default button chrome, and it is declared EARLIER in
+   this file than these rules, so it would otherwise take the chips' border,
+   their own text colour and their 0.9em size with it. Everything the selector
+   already looked like is restored here explicitly; nothing about it changes
+   except that it can now be operated from the keyboard. */
+
+.f27-crystal-chip.f27-btn,
+.f27-crystal-option.f27-btn {
+  border: 1px solid var(--ls-quaternary-background-color);
+  border-radius: 10px;
+  font-size: 0.9em;
+  color: var(--ls-primary-text-color);
+}
+
+.f27-crystal-chip.f27-btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  max-width: 22rem;
+  padding: 0.05rem 0.4rem;
+}
+
+.f27-crystal-option.f27-btn {
+  padding: 0.05rem 0.4rem;
+}
+
+.f27-crystal-config-toggle.f27-btn,
+.f27-crystal-scan-more.f27-btn,
+.f27-crystal-clear.f27-btn {
+  display: inline-block;
+  font-size: 0.9em;
+}
+
+.f27-crystal-scan-more.f27-btn {
+  margin-top: 0.3rem;
+  margin-right: 0.75rem;
+}
+
+.f27-crystal-clear.f27-btn {
+  margin-top: 0.35rem;
+}

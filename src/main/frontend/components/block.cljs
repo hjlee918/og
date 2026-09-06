@@ -62,6 +62,7 @@
             [frontend.util.f27-crystal :as f27c]
             [frontend.util.f27-context :as f27ctx]
             [frontend.util.f27-children :as f27ch]
+            [frontend.util.f27-inbound :as f27in]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -2524,16 +2525,56 @@
        {:repo repo :tags #{} :scanned 0 :candidates 0 :limit limit
         :error (or (some-> e .-message) "scan failed")}))))
 
+(defn- f27-display-content
+  "One block's content as OG itself shows it: its BUILT-IN properties removed.
+
+  `:block/content` is the raw file text, so a block carrying a persisted `id::`
+  renders that line as literal text through an inline renderer. Every block in a
+  reference chain has one by necessity — that is what makes it referable — so
+  without this the panel showed a 36-character identifier under each row.
+
+  `remove-built-in-properties` is the same function `block-content` uses for the
+  outline itself, so the panel and the block agree on what the block says. The
+  block on disk is untouched; this only affects what is displayed."
+  [format content]
+  (when (and (string? content) (not (string/blank? content)))
+    (let [c (property/remove-built-in-properties (or format :markdown) content)]
+      (when (and (string? c) (not (string/blank? c))) (string/trim c)))))
+
+(defn- f27-btn
+  "Props for one F27 panel control, so every one of them behaves identically.
+
+  These are native `<button>`s, which Enter and Space are supposed to activate
+  on their own. OG installs a global `goog.ui.KeyboardShortcutHandler` on
+  `window` that binds `enter` and prevents the default action of every key it
+  matches — and a button's implicit activation IS that default action, so Enter
+  on a focused control in this panel did nothing at all. The key is therefore
+  handled here and stopped before it reaches the global handler, which restores
+  what a button should do without touching OG's own shortcut configuration.
+
+  `preventDefault` also stops the browser synthesising its own click, so the
+  action runs exactly once however the control was operated."
+  [on-activate extra]
+  (merge {:type "button"
+          :on-click (fn [e] (util/stop e) (on-activate))
+          :on-key-down (fn [e]
+                         (let [k (.-key e)]
+                           (when (or (= k "Enter") (= k " ") (= k "Spacebar"))
+                             (.preventDefault e)
+                             (.stopPropagation e)
+                             (on-activate))))}
+         extra))
+
 (rum/defc f27-crystal-preview < rum/static
   [m]
   (let [label (f27c/preview-text (:content m) 60)]
-    [:a.f27-crystal-chip
-     {:title label
-      :on-click (fn [e]
-                  (util/stop e)
-                  ;; Navigate through OG's existing block route; no new mechanism.
-                  (when-let [u (:uuid m)]
-                    (route-handler/redirect-to-page! (str u))))}
+    [:button.f27-crystal-chip.f27-btn
+     (f27-btn (fn []
+                ;; Navigate through OG's existing block route; no new mechanism.
+                (when-let [u (:uuid m)]
+                  (route-handler/redirect-to-page! (str u))))
+              {:title label
+               :aria-label label})
      [:span.f27-crystal-dot "◆"]
      [:span.f27-crystal-text label]]))
 
@@ -2560,14 +2601,15 @@
         ;; Guard against reusing another graph's cache even if one lingers.
         scan (when (and scan (= (:repo scan) repo)) scan)]
     [:div.f27-crystal-config
-     [:a.f27-crystal-config-toggle
-      {:on-click (fn [e]
-                   (util/stop e)
-                   (when-not open?
-                     ;; Refresh on OPEN — modest, not per render or keystroke.
-                     (reset! *query "")
-                     (reset! *scan (f27-crystal-tag-inventory repo)))
-                   (swap! *open? not))}
+     [:button.f27-crystal-config-toggle.f27-btn
+      (f27-btn (fn []
+                 (when-not open?
+                   ;; Refresh on OPEN — modest, not per render or keystroke.
+                   ;; Scoped to THIS graph, exactly as before.
+                   (reset! *query "")
+                   (reset! *scan (f27-crystal-tag-inventory repo)))
+                 (swap! *open? not))
+               {:aria-expanded (if open? "true" "false")})
       (if tag (t :f27/crystal-marker-is tag) (t :f27/crystal-choose))]
      (when open?
        (let [inv (:tags scan #{})
@@ -2602,10 +2644,11 @@
           [:div.f27-crystal-options
            (if (seq matches)
              (for [n matches]
-               [:a.f27-crystal-option
-                {:key n
-                 :class (when (f27c/same-tag? n tag) "is-selected")
-                 :on-click (fn [e] (util/stop e) (state/set-crystal-tag! repo n))}
+               [:button.f27-crystal-option.f27-btn
+                (f27-btn #(state/set-crystal-tag! repo n)
+                         {:key n
+                          :class (when (f27c/same-tag? n tag) "is-selected")
+                          :aria-pressed (if (f27c/same-tag? n tag) "true" "false")})
                 (str "#" n)])
              [:div.f27-crystal-empty
               (if (zero? (count inv)) (t :f27/crystal-no-tags) (t :f27/crystal-no-match))])]
@@ -2615,16 +2658,15 @@
           (when (= summary :partial)
             [:div.f27-crystal-note (t :f27/crystal-search-partial)])
           (when (not= summary :ok)
-            [:a.f27-crystal-scan-more
-             {:on-click (fn [e]
-                          (util/stop e)
-                          (reset! *scan (f27-crystal-tag-inventory
-                                         repo
-                                         (+ (:scanned scan 0) f27c/default-scan-batch))))}
+            [:button.f27-crystal-scan-more.f27-btn
+             (f27-btn #(reset! *scan (f27-crystal-tag-inventory
+                                      repo
+                                      (+ (:scanned scan 0) f27c/default-scan-batch)))
+                      nil)
              (t :f27/crystal-scan-more)])
           (when tag
-            [:a.f27-crystal-clear
-             {:on-click (fn [e] (util/stop e) (state/set-crystal-tag! repo nil))}
+            [:button.f27-crystal-clear.f27-btn
+             (f27-btn #(state/set-crystal-tag! repo nil) nil)
              (t :f27/crystal-clear)])]))]))
 
 (defn- f27-parent-fn
@@ -2648,8 +2690,8 @@
   inline renderer echoes as literal characters, so they are split off and shown
   as structure instead. The block itself is not altered."
   [config block self?]
-  (let [content (f27ctx/block-label block)
-        format (or (:block/format block) :markdown)
+  (let [format (or (:block/format block) :markdown)
+        content (f27-display-content format (f27ctx/block-label block))
         {:keys [heading marker text]} (f27ctx/split-block-prefix content)]
     [:div.f27-ctx-line {:class (str (when self? "is-self ")
                                     (when heading "is-heading"))}
@@ -2687,36 +2729,18 @@
          :ordered (vec (db/sort-by-left raw parent {:check? false}))})
       {:missing? true})))
 
-(defn- f27-btn
-  "Props for one F27 panel control, so every one of them behaves identically.
-
-  These are native `<button>`s, which Enter and Space are supposed to activate
-  on their own. OG installs a global `goog.ui.KeyboardShortcutHandler` on
-  `window` that binds `enter` and prevents the default action of every key it
-  matches — and a button's implicit activation IS that default action, so Enter
-  on a focused control in this panel did nothing at all. The key is therefore
-  handled here and stopped before it reaches the global handler, which restores
-  what a button should do without touching OG's own shortcut configuration.
-
-  `preventDefault` also stops the browser synthesising its own click, so the
-  action runs exactly once however the control was operated."
-  [on-activate extra]
-  (merge {:type "button"
-          :on-click (fn [e] (util/stop e) (on-activate))
-          :on-key-down (fn [e]
-                         (let [k (.-key e)]
-                           (when (or (= k "Enter") (= k " ") (= k "Spacebar"))
-                             (.preventDefault e)
-                             (.stopPropagation e)
-                             (on-activate))))}
-         extra))
-
 (defn- f27-row-label
-  "A short, single-line name for one descendant, used to say WHICH branch a
-  control belongs to. Truncation is the Unicode-safe one from slice 2, so a
-  Korean syllable or an emoji sequence is never split."
+  "A short, single-line name for one block, used to say WHICH branch or step a
+  control belongs to.
+
+  Built-in properties are dropped, inline reference markup is reduced to what a
+  person reads, and truncation is the Unicode-safe one from slice 2, so a Korean
+  syllable or an emoji sequence is never split. A referring block's raw text is
+  mostly `((uuid))` by definition, which would otherwise fill the whole label
+  with an identifier and name nothing."
   [entity]
-  (let [{:keys [text]} (f27ctx/split-block-prefix (f27ch/node-label entity))]
+  (let [content (f27-display-content (:block/format entity) (f27ch/node-label entity))
+        {:keys [text]} (f27ctx/split-block-prefix (f27in/plain-label content))]
     (f27c/preview-text (or text "") 40)))
 
 (rum/defc f27-descendant-line < rum/static
@@ -2733,7 +2757,7 @@
   nothing."
   [config row open? on-toggle]
   (let [{:keys [entity depth descend probe]} row
-        content (f27ch/node-label entity)
+        content (f27-display-content (:block/format entity) (f27ch/node-label entity))
         format (or (:block/format entity) :markdown)
         label (f27-row-label entity)
         {:keys [heading marker text]} (f27ctx/split-block-prefix content)]
@@ -2962,10 +2986,338 @@
              [:button.f27-desc-source.f27-btn (f27-btn open-source! nil)
               (t :f27/children-open-source)])])])]))
 
+;; --- F27 slice 5 — chained inbound-reference exploration --------------------
+;;
+;; DIRECTION: everything below is about blocks that REFER TO a selected block.
+;; It is never the links written inside that block (outgoing references are not
+;; followed at all) and never its children (slice 4, kept visibly separate).
+
+(defn- f27-inbound-probe
+  "Whether ONE result row has inbound references of its own, so a control that
+  takes the next step appears only where there is a step to take.
+
+  The block is re-resolved by uuid rather than trusting the entity already in
+  hand, so a block that has gone away since the level was read is reported as
+  unavailable instead of silently answering zero. A read that throws is reported
+  as a failure: `{:total 0}` would assert 'nothing references this', which is
+  exactly what a failed read did not establish.
+
+  Read-only: one entity lookup and one count of an existing reverse-reference
+  attribute. Nothing here writes, persists an id, or opens a transaction."
+  [repo e]
+  (try
+    (if-let [live (db/entity repo [:block/uuid (:block/uuid e)])]
+      {:total (count (:block/_refs live))}
+      {:missing? true})
+    (catch :default _ {:error? true})))
+
+(defn- f27-load-inbound
+  "Read ONE exploration level: the DIRECT inbound references of `uuid`.
+
+  `(:block/_refs e)` is exactly what the reference badge counts, so the panel's
+  total and the badge can never silently disagree. It is a single reverse-index
+  read; no query walks the graph, no reference is followed, and no second level
+  is fetched — the next level exists only if the reader asks for it.
+
+  Each RETAINED row is then probed once, except rows already on the active trail,
+  whose descent is refused by identity and needs no probe. The probes happen here,
+  on the reader's explicit action, so that rendering and paging stay pure reads of
+  what was already fetched.
+
+  Every failure is turned into an explicit outcome: a block with no identity, a
+  block that no longer resolves, and a read that threw are three different
+  things, and none of them is an empty answer."
+  [repo uuid skip-keys]
+  (try
+    (if-let [e (db/entity repo [:block/uuid uuid])]
+      (let [prepared (f27in/prepare-results (vec (:block/_refs e))
+                                            (fn [id] (db/entity repo id)))
+            skip (set skip-keys)
+            probes (reduce (fn [m r]
+                             (let [k (f27in/step-key r)]
+                               (if (contains? skip k)
+                                 m
+                                 (assoc m k (f27-inbound-probe repo r)))))
+                           {}
+                           (:unique prepared))]
+        {:status :loaded :result prepared :probes probes})
+      {:status :unavailable})
+    (catch :default _ {:status :error})))
+
+(rum/defc f27-inbound-row < rum/static
+  "One block that REFERENCES the block at the current step.
+
+  Shows that block's OWN source page and short ancestor path through OG's
+  existing `breadcrumb`, and its text through OG's inline renderer, so emphasis,
+  links, block refs, Korean and emoji keep their meaning. `inline-text` renders
+  markup only: it installs no editing handler, creates no id, and has no save
+  path — the same renderer audited in slices 3 and 4.
+
+  A heading's leading `##` and a task's leading `TODO` are BLOCK-level markup an
+  inline renderer would echo as literal characters, so they are shown as
+  structure instead. The block itself is not altered."
+  [config repo entity relation probe on-explore on-source]
+  (let [format (or (:block/format entity) :markdown)
+        content (f27-display-content format (f27in/block-label entity))
+        {:keys [heading marker text]} (f27ctx/split-block-prefix content)
+        label (f27-row-label entity)
+        n (f27in/probe-count probe)]
+    [:div.f27-in-row
+     [:div.f27-in-row-head
+      [:span.f27-in-mark {:class (case relation
+                                  (:cycle :error :unavailable :trail) "is-stop"
+                                  nil)}
+       (case relation
+         :cycle "↻"
+         :error "?"
+         :unavailable "!"
+         :trail "⋯"
+         "›")]
+      [:span.f27-in-crumb
+       (breadcrumb config repo (:block/uuid entity)
+                   {:show-page? true
+                    :level-limit 3
+                    :indent? false
+                    :end-separator? false})]]
+     [:div.f27-in-text
+      (if (nil? content)
+        [:span.f27-ctx-unavailable (t :f27/context-unavailable-line)]
+        [:<>
+         (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
+         (when marker [:span.f27-ctx-badge.is-task marker])
+         (when-not (string/blank? text)
+           (inline-text config format text))])]
+     [:div.f27-in-actions
+      ;; Exactly one relation earns a control that opens another level. The
+      ;; others are explained where the control would have been, so the reader
+      ;; is never left with an affordance that cannot progress.
+      (case relation
+        :ok
+        [:button.f27-in-explore.f27-btn
+         (f27-btn on-explore {:aria-label (t :f27/inbound-explore-of label (or n 0))})
+         (if n (t :f27/inbound-explore-n n) (t :f27/inbound-explore))]
+
+        :none [:span.f27-ctx-note (t :f27/inbound-none)]
+        :cycle [:span.f27-ctx-note.f27-ctx-cycle (t :f27/inbound-cycle)]
+        :trail [:span.f27-ctx-note.f27-ctx-capped (t :f27/inbound-trail-full f27in/max-trail)]
+        :error [:span.f27-ctx-note.f27-ctx-error (t :f27/inbound-probe-error)]
+        :unavailable [:span.f27-ctx-note.f27-ctx-error (t :f27/inbound-probe-unavailable)]
+        nil)
+      ;; Read-only source navigation is available on every row, whatever its
+      ;; relation — including the two that cannot be opened further.
+      [:button.f27-in-source.f27-btn
+       (f27-btn on-source {:aria-label (t :f27/inbound-open-source-of label)})
+       (t :f27/inbound-open-source)]]]))
+
+(rum/defc f27-in-path < rum/static
+  "The path the reader has walked, and Back.
+
+  Every step but the current one is a control that returns to that step, so the
+  path is readable AND usable; Back is the same operation for the immediately
+  previous step and is kept as its own control because that is the one action
+  the reader reaches for."
+  [trail on-jump on-back]
+  [:div.f27-in-path
+   [:span.f27-in-path-label (t :f27/inbound-path)]
+   (map-indexed
+    (fn [i s]
+      (let [l (f27-row-label (:entity s))
+            l (if (string/blank? l) (t :f27/inbound-origin) l)
+            last? (= i (dec (count trail)))]
+        [:span.f27-in-path-step {:key (str "p-" i "-" (str (:key s)))}
+         (when (pos? i) [:span.f27-in-path-sep "›"])
+         (if last?
+           [:span.f27-in-path-current {:aria-current "true"} l]
+           [:button.f27-in-path-jump.f27-btn
+            (f27-btn #(on-jump i) {:aria-label (t :f27/inbound-step-to l)})
+            l])]))
+    trail)
+   (when (f27in/can-go-back? trail)
+     (let [prev (f27-row-label (:entity (nth (vec trail) (- (count trail) 2))))
+           prev (if (string/blank? prev) (t :f27/inbound-origin) prev)]
+       [:button.f27-in-back.f27-btn
+        (f27-btn on-back {:aria-label (t :f27/inbound-back-to prev)})
+        (t :f27/inbound-back)]))])
+
+(rum/defcs f27-row-inbound < rum/reactive
+  ;; A level's read is deferred by one turn (see `load!`), so it can still be in
+  ;; flight when the reader collapses the whole context panel. A plain volatile
+  ;; — not a rum/local, which would request a render on the very component being
+  ;; torn down — records that the component has gone, and the answer is dropped
+  ;; instead of writing into state nothing is showing.
+  {:will-mount (fn [state] (assoc state ::in-live (volatile! true)))
+   :will-unmount (fn [state] (vreset! (::in-live state) false) state)}
+  "Blocks that REFERENCE this referencing block, explored one level at a time.
+
+  If B references A and C references B, the overview for A lists B; this is
+  where the reader asks what references B, sees C, and can then ask the same
+  question about C or go Back.
+
+  What it deliberately is NOT:
+    * it does not follow the links written INSIDE the selected block;
+    * it does not show the selected block's children — that is the descendant
+      tree above, and the two are labelled apart;
+    * it never mounts a complete context panel inside another one. One level is
+      on screen at a time, with a path and Back, so nothing recurses.
+
+  Nothing is read until the reader opens it, and no level is read until the
+  reader steps into it. Back and the path re-display a level the reader already
+  walked, without another read.
+
+  All state lives in ONE atom per row instance and is scoped to the graph, so
+  each row and each panel appearance explores independently, and a graph switch
+  starts over rather than showing another graph's path. It is TRANSIENT and
+  READ-ONLY: nothing here edits, persists an id, opens a transaction, or writes
+  a file."
+  [component-state config repo ref-block *open? *ex]
+  (let [live? (::in-live component-state)
+        raw-ex (rum/react *ex)
+        open? (rum/react *open?)
+        ;; Derived, never written during render: a state belonging to another
+        ;; graph is treated as absent, and the next action rebuilds it.
+        ex (if (= repo (:repo raw-ex)) raw-ex {:repo repo :trail [] :req 0})
+        trail (vec (:trail ex))
+        step (f27in/current-step trail)
+        page (when (:result step) (f27in/page-of (:result step) (:limit step)))
+        state (f27in/level-state step page)
+        probes (:probes step)
+        trail-label (let [l (f27-row-label (:entity step))]
+                      (if (string/blank? l) (t :f27/inbound-origin) l))
+        next-req (fn [] (inc (:req @*ex 0)))
+        load! (fn [req uuid' skip]
+                ;; Deferred by one turn so the level's :loading state is a real
+                ;; rendered state rather than one the model claims and never
+                ;; shows. `apply-result` drops the answer if the reader has left
+                ;; the level meanwhile, so Back can never be overwritten by a
+                ;; read it did not ask for.
+                (js/setTimeout
+                 (fn []
+                   (when (and @live?
+                              (f27in/accepts-result? (:trail @*ex) req))
+                     (let [outcome (f27-load-inbound repo uuid' skip)]
+                       (swap! *ex update :trail f27in/apply-result req outcome))))
+                 0))
+        start! (fn []
+                 (let [cur @*ex
+                       fresh? (or (not= repo (:repo cur)) (empty? (:trail cur)))
+                       req (inc (:req cur 0))]
+                   (if fresh?
+                     (let [origin (f27in/new-step ref-block req)]
+                       (reset! *ex {:repo repo :trail [origin] :req req})
+                       (when (= :loading (:status origin))
+                         (load! req (:uuid origin) #{(:key origin)})))
+                     ;; The path is kept across hide/show, but the level now on
+                     ;; screen is read again, so reopening never shows an answer
+                     ;; that has since gone stale.
+                     (let [t (f27in/reload-step (:trail cur) req)
+                           s (f27in/current-step t)]
+                       (swap! *ex assoc :req req :trail t)
+                       (when (= :loading (:status s))
+                         (load! req (:uuid s) (f27in/trail-keys t)))))))
+        toggle! (fn [] (if open? (reset! *open? false)
+                           (do (start!) (reset! *open? true))))
+        explore! (fn [entity]
+                   (when-not (f27in/trail-full? trail)
+                     (let [req (next-req)
+                           s (f27in/new-step entity req)
+                           t (f27in/push-step trail s)]
+                       (swap! *ex assoc :req req :trail t)
+                       (when (= :loading (:status s))
+                         (load! req (:uuid s) (f27in/trail-keys t))))))
+        ;; Back and a path jump re-display a level already walked. They do not
+        ;; read anything: that is what retaining the history is for.
+        back! (fn [] (swap! *ex update :trail f27in/pop-step))
+        jump! (fn [i] (swap! *ex update :trail f27in/truncate-trail i))
+        more! (fn [] (swap! *ex update :trail
+                            f27in/set-limit (f27in/next-limit (:limit step))))
+        retry! (fn []
+                 (let [req (next-req)
+                       t (f27in/mark-retry trail req)
+                       s (f27in/current-step t)]
+                   (swap! *ex assoc :req req :trail t)
+                   (when (= :loading (:status s))
+                     (load! req (:uuid s) (f27in/trail-keys t)))))
+        source! (fn [u] (fn [] (route-handler/redirect-to-page! (str u))))
+        source-here! (source! (:uuid step))]
+    [:div.f27-in
+     [:button.f27-in-toggle.f27-btn
+      (f27-btn toggle! {:aria-expanded (if open? "true" "false")})
+      (if open? (t :f27/inbound-hide) (t :f27/inbound-show))]
+     (when (and open? step)
+       [:div.f27-in-body
+        (f27-in-path trail jump! back!)
+        [:div.f27-in-head (t :f27/inbound-head trail-label)]
+        ;; Said in words, every time, because a panel opened from a reference
+        ;; overview is exactly where the direction is easy to get backwards.
+        [:div.f27-in-direction (t :f27/inbound-direction)]
+        (case state
+          ;; A read that has been asked for and has not answered. Never shown as
+          ;; "nothing references this".
+          :loading [:div.f27-ctx-note (t :f27/inbound-loading)]
+
+          :no-identity [:div.f27-ctx-note.f27-ctx-error (t :f27/inbound-no-identity)]
+
+          :unavailable
+          [:<>
+           [:div.f27-ctx-note.f27-ctx-error (t :f27/inbound-unavailable)]
+           [:button.f27-in-source.f27-btn (f27-btn source-here! nil)
+            (t :f27/inbound-open-source)]]
+
+          ;; A failed read is not evidence of an empty answer, so it says so,
+          ;; offers a bounded retry, and then offers the source instead of
+          ;; becoming an endless button.
+          :error
+          [:<>
+           [:div.f27-ctx-note.f27-ctx-error (t :f27/inbound-error)]
+           (if (f27in/retry-allowed? (:attempts step))
+             [:button.f27-in-retry.f27-btn (f27-btn retry! nil)
+              (t :f27/inbound-retry)]
+             [:span.f27-ctx-note (t :f27/inbound-retry-exhausted)])
+           [:button.f27-in-source.f27-btn (f27-btn source-here! nil)
+            (t :f27/inbound-open-source)]]
+
+          :empty [:div.f27-ctx-note (t :f27/inbound-empty)]
+
+          [:<>
+           [:div.f27-in-count (t :f27/inbound-count (:total (:result step)))]
+           [:div.f27-in-rows
+            (for [e (:shown page)
+                  :let [k (f27in/step-key e)
+                        relation (f27in/row-relation k trail (get probes k))]]
+              [:div.f27-in-item {:key (str "in-" (str k))}
+               (f27-inbound-row config repo e relation (get probes k)
+                                #(explore! e) (source! (:block/uuid e)))])]
+           ;; Every inbound entry that is not visible above is explained. A row
+           ;; that could not render is never reported as displayed.
+           (when (pos? (:duplicates (:result step)))
+             [:div.f27-ctx-note (t :f27/inbound-duplicates (:duplicates (:result step)))])
+           (when (pos? (:unavailable (:result step)))
+             [:div.f27-ctx-note.f27-ctx-error
+              (t :f27/inbound-unresolved (:unavailable (:result step)))])
+           (when (pos? (:remaining page))
+             [:div.f27-ctx-note (t :f27/inbound-remaining (:remaining page))])
+           (when (f27in/can-continue? page)
+             [:button.f27-in-more.f27-btn (f27-btn more! nil)
+              (t :f27/inbound-more)])
+           ;; Entries beyond the per-level cap are counted and named, but no
+           ;; control claims to reach them, because none can.
+           (when (f27in/cap-hiding-anything? page)
+             [:div.f27-ctx-note.f27-ctx-capped
+              (t :f27/inbound-beyond-cap (:beyond-cap page) f27in/max-shown)])
+           (when (and (zero? (:shown-count page)) (pos? (:total (:result step))))
+             [:div.f27-ctx-note (t :f27/inbound-nothing-displayable)])
+           (when (or (f27in/cap-hiding-anything? page)
+                     (f27in/trail-full? trail)
+                     (zero? (:shown-count page)))
+             [:button.f27-in-source.f27-btn (f27-btn source-here! nil)
+              (t :f27/inbound-open-source)])])])]))
+
 (rum/defcs f27-row-context < rum/static
   (rum/local f27ctx/default-batch ::limit)
   (rum/local false ::kids-open?)
   (rum/local {:open #{} :limits {} :retries {}} ::desc)
+  (rum/local false ::inbound-open?)
+  (rum/local {:repo nil :trail [] :req 0} ::inbound)
   "Expanded ancestor context for ONE incoming-reference row.
 
   Ancestors are walked in BOUNDED BATCHES with explicit continuation, rather
@@ -3022,7 +3374,12 @@
              (t :f27/context-load-more)])
           ;; Descendants of THIS referencing block.
           (f27-row-descendants config repo uuid'
-                               (::kids-open? state) (::desc state))]))]))
+                               (::kids-open? state) (::desc state))
+          ;; Blocks that REFERENCE this referencing block — the opposite
+          ;; direction from the descendants above, and deliberately below them
+          ;; so the two are never read as one list.
+          (f27-row-inbound config repo ref-block
+                           (::inbound-open? state) (::inbound state))]))]))
 
 (rum/defcs f27-ref-overview-row < rum/static
   (rum/local false ::ctx-open?)
