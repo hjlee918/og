@@ -2627,9 +2627,14 @@
              (t :f27/crystal-clear)])]))]))
 
 (defn- f27-parent-fn
-  "One step upward. Read-only entity lookup; never writes."
+  "One step upward. Read-only entity lookup; never writes.
+
+  A failed lookup is deliberately allowed to THROW. Swallowing it here and
+  returning nil would make an unreadable parent indistinguishable from reaching
+  the top of the outline, and the panel would then claim complete ancestry it
+  never actually saw. `load-ancestors` catches it and reports it."
   [repo]
-  (fn [uuid] (try (db/get-block-parent repo uuid) (catch :default _ nil))))
+  (fn [uuid] (db/get-block-parent repo uuid)))
 
 (rum/defc f27-context-line < rum/static
   "One ancestor or the referencing block itself, rendered read-only.
@@ -2680,9 +2685,13 @@
        ;; No identity to walk from. Say so plainly instead of showing an
        ;; empty panel or a state that could never resolve.
        [:div.f27-ctx-note.f27-ctx-unavailable (t :f27/context-unavailable-line)]
-       (let [{:keys [ancestors more? cycle? depth capped?]}
+       (let [{:keys [ancestors more? cycle? depth capped? error?]}
              (f27ctx/load-ancestors (f27-parent-fn repo) uuid' @*limit)
-             {:keys [page ancestors]} (f27ctx/context-rows ancestors ref-block)]
+             {:keys [page ancestors]} (f27ctx/context-rows ancestors ref-block)
+             ;; Continuation is offered ONLY when clicking it can actually load
+             ;; something: at the hard cap it cannot, and after a failed lookup
+             ;; there is nothing dependable to continue from.
+             continue? (and more? (not cycle?) (not capped?) (not error?))]
          [:<>
           (when page
             [:div.f27-ctx-page
@@ -2699,9 +2708,13 @@
            (f27-context-line config ref-block true)]
           (when cycle?
             [:div.f27-ctx-note.f27-ctx-cycle (t :f27/context-cycle)])
+          ;; A failed read keeps whatever was already loaded and says the chain
+          ;; above it is unknown — never that it is finished.
+          (when error?
+            [:div.f27-ctx-note.f27-ctx-error (t :f27/context-error)])
           (when capped?
-            [:div.f27-ctx-note (t :f27/context-capped)])
-          (when (and more? (not cycle?))
+            [:div.f27-ctx-note.f27-ctx-capped (t :f27/context-capped f27ctx/hard-cap)])
+          (when continue?
             [:a.f27-ctx-load-more
              {:on-click (fn [e]
                           (util/stop e)

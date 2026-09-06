@@ -60,23 +60,117 @@
       (is (true? cycle?))
       (is (false? more?) "a repeat must never be advertised as further real context"))))
 
-(deftest degenerate-input-is-safe
-  (is (= {:ancestors [] :more? false :cycle? false :depth 0 :capped? false}
-         (ctx/load-ancestors nil "a" 5)))
-  (is (= {:ancestors [] :more? false :cycle? false :depth 0 :capped? false}
-         (ctx/load-ancestors linear nil 5)))
-  (testing "a parent-fn that throws ends the chain instead of propagating"
-    (let [boom (fn [_] (throw (js/Error. "db gone")))
-          {:keys [ancestors cycle?]} (ctx/load-ancestors boom "a" 5)]
-      (is (= [] ancestors))
-      (is (false? cycle?)))))
+(def ^:private empty-result
+  {:ancestors [] :more? false :cycle? false :depth 0 :capped? false :error? false})
 
-(deftest hard-cap-bounds-an-unbounded-chain
-  (testing "an effectively infinite non-repeating chain is still bounded"
-    (let [endless (fn [u] {:block/uuid (str u "x") :block/content "c"})
-          {:keys [depth capped?]} (ctx/load-ancestors endless "a" 10000)]
-      (is (= ctx/hard-cap depth))
-      (is (true? capped?)))))
+(deftest degenerate-input-is-safe
+  (is (= empty-result (ctx/load-ancestors nil "a" 5)))
+  (is (= empty-result (ctx/load-ancestors linear nil 5))))
+
+;; ---------------------------------------------------------------------------
+;; The hard cap.
+;;
+;; Two distinct situations must not be conflated: a chain that STOPS exactly at
+;; the cap (nothing was truncated) and a chain that CONTINUES past it (the cap
+;; is hiding real ancestry and continuation cannot reach it).
+;; ---------------------------------------------------------------------------
+
+(defn- chain-of
+  "A parent-fn producing exactly `n` ancestors above \"a\", then the top."
+  [n]
+  (fn [u]
+    (let [i (if (= u "a") 0 (js/parseInt (subs u 1) 10))]
+      (when (< i n) {:block/uuid (str "p" (inc i)) :block/content (str "level " (inc i))}))))
+
+(deftest a-chain-ending-exactly-at-the-cap-is-not-reported-as-truncated
+  (let [{:keys [depth more? capped? error? cycle?]}
+        (ctx/load-ancestors (chain-of ctx/hard-cap) "a" 10000)]
+    (is (= ctx/hard-cap depth) "every level up to the cap is loaded")
+    (is (false? more?) "there is genuinely nothing above")
+    (is (false? capped?)
+        "the cap must not claim to be hiding context when the chain simply ends there")
+    (is (false? error?))
+    (is (false? cycle?))))
+
+(deftest a-chain-one-past-the-cap-is-reported-as-truncated
+  (let [{:keys [depth more? capped?]}
+        (ctx/load-ancestors (chain-of (inc ctx/hard-cap)) "a" 10000)]
+    (is (= ctx/hard-cap depth))
+    (is (true? more?) "ancestry really does remain above")
+    (is (true? capped?) "and the cap is why it cannot be loaded")))
+
+(deftest an-unbounded-chain-is-still-bounded-and-says-so
+  (let [endless (fn [u] {:block/uuid (str u "x") :block/content "c"})
+        {:keys [depth more? capped?]} (ctx/load-ancestors endless "a" 10000)]
+    (is (= ctx/hard-cap depth))
+    (is (true? more?))
+    (is (true? capped?))))
+
+(deftest a-request-beyond-the-cap-is-clamped-not-honoured
+  (testing "asking for more than the cap can never load more than the cap"
+    (let [endless (fn [u] {:block/uuid (str u "x")})
+          first-pass (ctx/load-ancestors endless "a" ctx/hard-cap)
+          beyond (ctx/load-ancestors endless "a" (+ ctx/hard-cap 8))]
+      (is (= ctx/hard-cap (:depth first-pass)))
+      (is (= ctx/hard-cap (:depth beyond))
+          "continuation past the cap cannot advance, so it must not be offered")
+      (is (true? (:capped? beyond))))))
+
+;; ---------------------------------------------------------------------------
+;; Lookup failure is not completion.
+;;
+;; `parent-fn` reads the database and can fail. A failure that came back as nil
+;; would be indistinguishable from reaching the top, and the panel would then
+;; present a chain it never actually finished walking as complete.
+;; ---------------------------------------------------------------------------
+
+(defn- failing-after
+  "A parent-fn over `linear` that throws once the walk reaches `bad`."
+  [bad]
+  (fn [u]
+    (if (= u bad)
+      (throw (js/Error. "simulated read failure"))
+      (linear u))))
+
+(deftest a-failure-during-traversal-is-reported-and-keeps-what-loaded
+  (let [{:keys [ancestors more? cycle? capped? error? depth]}
+        (ctx/load-ancestors (failing-after "c") "a" 8)]
+    (is (true? error?) "the failure must be visible to the caller")
+    (is (= ["b" "c"] (map :block/uuid ancestors))
+        "context loaded before the failure is retained, not discarded")
+    (is (= 2 depth))
+    (is (false? more?) "an unknown remainder must not be advertised as more context")
+    (is (false? cycle?))
+    (is (false? capped?))))
+
+(deftest a-failure-on-the-very-first-step-yields-no-context-but-an-error
+  (let [{:keys [ancestors error?]} (ctx/load-ancestors (failing-after "a") "a" 8)]
+    (is (true? error?))
+    (is (= [] ancestors))))
+
+(deftest a-failure-during-the-continuation-peek-is-reported-too
+  (testing "the peek that decides whether more exists can fail like any other read"
+    ;; limit 2 loads b and c, then peeks from "c" — which is the call that throws.
+    (let [{:keys [ancestors more? error?]} (ctx/load-ancestors (failing-after "c") "a" 2)]
+      (is (true? error?) "a failed peek must not be reported as 'nothing above'")
+      (is (= ["b" "c"] (map :block/uuid ancestors)) "the loaded batch is kept")
+      (is (false? more?)))))
+
+(deftest a-successful-walk-never-reports-an-error
+  (is (false? (:error? (ctx/load-ancestors linear "a" 10))))
+  (is (false? (:error? (ctx/load-ancestors linear "a" 2))))
+  (is (false? (:error? (ctx/load-ancestors (chain {}) "solo" 8))))
+  (is (false? (:error? (ctx/load-ancestors (chain {"a" "a"}) "a" 8)))
+      "a cycle is a known outcome, not a read failure"))
+
+(deftest error-and-completion-are-never-claimed-together
+  (testing "no result may look finished while an error occurred"
+    (doseq [[label res] [["mid-walk" (ctx/load-ancestors (failing-after "c") "a" 8)]
+                         ["at-peek" (ctx/load-ancestors (failing-after "c") "a" 2)]
+                         ["first-step" (ctx/load-ancestors (failing-after "a") "a" 8)]]]
+      (is (true? (:error? res)) label)
+      (is (false? (:cycle? res)) label)
+      (is (false? (:capped? res)) label))))
 
 (deftest display-order-is-outermost-first
   (let [{:keys [ancestors]} (ctx/load-ancestors linear "a" 10)]

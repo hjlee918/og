@@ -937,5 +937,8 @@ html.is-mac {
 .f27-ctx-unavailable, .f27-ctx-note {
   color: var(--ls-secondary-text-color); font-size: 0.9em; font-style: italic;
 }
+/* A failed read is not the same as a finished chain, so it is not styled like
+   an ordinary note. */
+.f27-ctx-note.f27-ctx-error { color: var(--ls-warning-text-color, var(--ls-secondary-text-color)); }
 .f27-ctx-load-more { display: inline-block; margin-top: 0.3rem; color: var(--ls-link-text-color);
   cursor: pointer; font-size: 0.85em; }

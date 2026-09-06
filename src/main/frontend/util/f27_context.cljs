@@ -30,46 +30,62 @@
 (defn load-ancestors
   "Walk upward from `uuid`, nearest parent first, at most `limit` levels.
 
-  `parent-fn` maps a block uuid to its parent entity (or nil at the top).
+  `parent-fn` maps a block uuid to its parent entity, or nil at the top of the
+  outline. It is allowed to THROW: a failed lookup must stay distinguishable
+  from reaching the top, so this function catches it and says so rather than
+  letting a broken read masquerade as a finished chain.
 
   Returns:
     :ancestors  vector of parent entities, NEAREST FIRST
-    :more?      true when a further parent exists beyond `limit`
-    :cycle?     true when the walk revisited an identity and stopped
+    :more?      further ancestry exists beyond what was loaded
+    :cycle?     the walk revisited an identity and stopped
     :depth      number of levels actually loaded
-    :capped?    true when the hard cap stopped the walk
+    :capped?    the HARD CAP is what stopped the walk and ancestry still
+                remains, so continuation cannot reach it. False for a chain
+                that merely ends exactly at the cap, because nothing was
+                truncated there.
+    :error?     a parent lookup failed. Whatever was already loaded is kept and
+                returned; the chain must NOT be presented as complete.
 
-  Never throws for a missing parent: the chain simply ends."
+  `:capped?` and `:error?` each mean continuation is pointless, for different
+  reasons, and callers must not offer it in either case."
   ([parent-fn uuid] (load-ancestors parent-fn uuid default-batch))
   ([parent-fn uuid limit]
-   (let [limit (min (max 0 (or limit default-batch)) hard-cap)]
+   (let [limit (min (max 0 (or limit default-batch)) hard-cap)
+         base {:ancestors [] :more? false :cycle? false :depth 0
+               :capped? false :error? false}
+         ;; [:ok parent-or-nil] on a successful read, [:error nil] on a failure.
+         ;; Reaching the top and failing to look are different outcomes.
+         step (fn [u] (try [:ok (parent-fn u)] (catch :default _ [:error nil])))]
      (if (or (nil? parent-fn) (nil? uuid))
-       {:ancestors [] :more? false :cycle? false :depth 0 :capped? false}
+       base
        (loop [current uuid
               seen #{uuid}
               acc []
               n 0]
-         (if (>= n limit)
-           ;; Peek one step further to report honestly whether more exists,
-           ;; without loading it.
-           (let [nxt (try (parent-fn current) (catch :default _ nil))
-                 nxt-id (:block/uuid nxt)]
-             {:ancestors acc
-              :more? (boolean (and nxt-id (not (contains? seen nxt-id))))
-              :cycle? (boolean (and nxt-id (contains? seen nxt-id)))
-              :depth (count acc)
-              :capped? (>= n hard-cap)})
-           (let [parent (try (parent-fn current) (catch :default _ nil))
-                 pid (:block/uuid parent)]
-             (cond
-               (nil? parent)
-               {:ancestors acc :more? false :cycle? false :depth (count acc) :capped? false}
-
-               (contains? seen pid)
-               {:ancestors acc :more? false :cycle? true :depth (count acc) :capped? false}
-
-               :else
-               (recur pid (conj seen pid) (conj acc parent) (inc n))))))))))
+         (let [done (fn [m] (merge base (assoc m :ancestors acc :depth (count acc))))]
+           (if (>= n limit)
+             ;; Peek one step further to report honestly whether more exists,
+             ;; without loading it. A failure HERE is a failure too: it must not
+             ;; be reported as "nothing further above".
+             (let [[status nxt] (step current)
+                   nxt-id (:block/uuid nxt)]
+               (cond
+                 (= :error status) (done {:error? true})
+                 (nil? nxt) (done {})
+                 (and nxt-id (contains? seen nxt-id)) (done {:cycle? true})
+                 :else (done {:more? true :capped? (>= n hard-cap)})))
+             (let [[status parent] (step current)
+                   pid (:block/uuid parent)]
+               (cond
+                 (= :error status) (done {:error? true})
+                 (nil? parent) (done {})
+                 (and pid (contains? seen pid)) (done {:cycle? true})
+                 ;; An ancestor with no identity of its own (a page) is shown,
+                 ;; but there is nothing left to continue the walk from.
+                 (nil? pid) (merge base {:ancestors (conj acc parent)
+                                         :depth (inc (count acc))})
+                 :else (recur pid (conj seen pid) (conj acc parent) (inc n)))))))))))
 
 (defn display-order
   "Ancestors as the reader expects them: outermost first, nearest last.
