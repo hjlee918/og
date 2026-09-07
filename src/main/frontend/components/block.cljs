@@ -65,6 +65,7 @@
             [frontend.util.f27-context :as f27ctx]
             [frontend.util.f27-children :as f27ch]
             [frontend.util.f27-inbound :as f27in]
+            [frontend.util.f27-inert :as f27i]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -1138,7 +1139,11 @@
     ;; the electron branch below and renders as a bare `file://` anchor with
     ;; `target="_blank"`. Inside an F27 panel it is presented as a named
     ;; attachment instead. Guarded on the same key, so nothing changes elsewhere.
-    (and (:f27/media-render config) (f27a/graph-local? s))
+    ;; Recognition, not authorisation: F27 handles every node OG would have
+    ;; called a local asset, and then refuses the ones that are not provably
+    ;; inside the graph's own asset directory. Falling through instead would
+    ;; hand a traversal path back to OG's `file://` anchor.
+    (and (:f27/media-render config) (f27a/recognized-local? s))
     ((:f27/media-render config) config s label full_text)
 
     (not (string/includes? s "."))
@@ -1616,7 +1621,16 @@
 
 (defn inline
   [{:keys [html-export?] :as config} item]
-  (match item
+  ;; F27 dynamic boundary. Inside an F27 panel body a Macro, inline HTML or
+  ;; Hiccup node is presented as an inert placeholder instead of being handed to
+  ;; `macro-cp` (which renders embeds, queries, remote players and plugin slots)
+  ;; or to `dangerouslySetInnerHTML`. `:f27/inert-render` is set ONLY by F27's
+  ;; body renderer and answers nil for every node it does not claim, so with the
+  ;; key absent — and for every other node with it present — this is
+  ;; byte-for-byte the dispatch it has always been.
+  (if-let [inert (when-let [f (:f27/inert-render config)] (f config item))]
+    inert
+    (match item
          [(:or "Plain" "Spaces") s]
          s
 
@@ -1713,7 +1727,7 @@
          ["Macro" options]
          (macro-cp config options)
 
-         :else ""))
+         :else "")))
 
 (rum/defc block-child
   [block]
@@ -2731,69 +2745,137 @@
 
   Outside Electron there is no such handling, so there is no control rather than
   a control that does nothing."
-  [src label]
-  (when (and (util/electron?) (string? src) (not (string/blank? src)))
+  [abs-path label]
+  (when (and (util/electron?) (string? abs-path) (not (string/blank? abs-path)))
     [:button.f27-asset-open.f27-btn
      (f27-btn (fn []
-                (try (ipc/ipc "openFileInFolder" (fs/asset-path-normalize src))
+                ;; The VALIDATED path, exactly as the graph's own asset listing
+                ;; reported it. Not the href, and not a path recovered from the
+                ;; display URL: a control that reveals a file must dispatch the
+                ;; path that was authorised, or the authorisation means nothing.
+                (try (ipc/ipc "openFileInFolder" abs-path)
                      (catch :default _ nil)))
               {:aria-label (if label (t :f27/asset-open-of label) (t :f27/asset-open))
                :title (t :f27/asset-open)})
      "↗"]))
 
+(def ^:private f27-asset-index-ttl
+  "How long one graph's asset listing is reused, in milliseconds.
+
+  The listing IS the authorisation, so it is read rather than assumed; a body
+  carrying five assets must not read it five times. A file added while a panel
+  is open is therefore unavailable for up to this long, which is the direction
+  this boundary is meant to fail in."
+  5000)
+
+(defonce ^:private *f27-asset-index (atom {}))
+
+(defn- f27-nfc
+  "One spelling of a name, for comparison only.
+
+  macOS hands back a Korean filename decomposed while a name decoded from a note
+  is composed. Without this the same file has two names and one of them is never
+  found."
+  [s]
+  (let [s (str s)]
+    (try (.normalize s "NFC") (catch :default _ s))))
+
+(defn- f27-asset-listing
+  "Every REAL file inside this graph's own asset directory: a map from the
+  graph-relative path to the absolute path the filesystem reported.
+
+  This is the containment authority, and it is deliberately a listing rather
+  than a per-path probe. OG's own recursive `readdir` — unchanged, and already
+  how the graph is read — removes symbolic links as it walks. A link planted
+  inside `assets/` that points outside the graph therefore never appears here,
+  so it is never authorised, and this batch adds no new capability to the main
+  process to achieve that.
+
+  Membership answers three questions at once: the file exists, it is inside the
+  asset directory, and it is a real file rather than a way out of one."
+  [repo]
+  (let [dir (config/get-repo-dir repo)
+        root (when-not (string/blank? (str dir))
+               (str (string/replace (str dir) #"/+$" "") "/"))
+        adir (when root (str root gp-config/local-assets-dir))
+        now (js/Date.now)
+        cached (get @*f27-asset-index adir)]
+    (cond
+      (nil? adir) (p/resolved {})
+      (and cached (< (- now (:at cached)) f27-asset-index-ttl)) (p/resolved (:files cached))
+      :else
+      (-> (p/let [files (fs/readdir adir)]
+            (let [m (reduce (fn [acc abs]
+                              (let [abs (str abs)]
+                                (if (string/starts-with? abs root)
+                                  (assoc acc (f27-nfc (subs abs (count root))) abs)
+                                  acc)))
+                            {}
+                            (or files []))]
+              (swap! *f27-asset-index assoc adir {:at now :files m})
+              m))
+          ;; A directory that cannot be read authorises nothing, and is not
+          ;; cached, so a graph whose assets appear later is not stuck.
+          (p/catch (fn [_] {}))))))
+
 (defn- f27-asset-locate
-  "The graph-relative path this asset is actually stored under, or nil.
+  "The absolute path this asset is stored under, or nil.
 
-  A read, and the only filesystem question this slice asks. It probes RELATIVE
-  TO THE GRAPH DIRECTORY rather than round-tripping the resolved `assets://` URL
-  back into a path, and it answers with the spelling that was FOUND rather than
-  a bare true/false.
+  Two gates, in order, and both must pass:
 
-  Both of those matter, and a live run showed why. A picture written
-  `../assets/%EC%A7%91%EC%A4%91%20...png` is the same file as one written
-  `../assets/집중 노트.png`. Probing the written spelling reported it missing;
-  and even with the probe corrected, building the display URL from the written
-  spelling produced an address the asset protocol could not resolve, so the
-  image failed to load and the chip said \"file not found\" about a file that was
-  right there. Resolving from the spelling that exists fixes both at once.
+    1. **Containment**, purely, before any filesystem call at all. OG's
+       `local-asset?` is a prefix recogniser: it calls
+       `../assets/../../outside.png`, `../assets/%2e%2e/%2e%2e/outside.png` and
+       `../assets-other/x.png` local. A spelling that is not provably inside the
+       asset directory yields no candidates, so nothing is probed, loaded or
+       revealed for it.
+    2. **The graph's own asset listing**, which excludes symbolic links, so a
+       path that is lexically contained but leaves through a link is refused
+       too.
 
-  Each candidate is tried in order, and a failed probe is a nil rather than an
-  exception that would leave a chip saying nothing at all."
-  [dir paths]
-  (if (or (string/blank? (str dir)) (empty? paths))
-    (p/resolved nil)
-    (reduce (fn [acc rel]
-              (p/then acc (fn [found]
-                            (if found
-                              found
-                              (p/then (p/catch (fs/file-exists? dir rel) (fn [_] false))
-                                      (fn [ok] (when ok rel)))))))
-            (p/resolved nil)
-            paths)))
+  The answer is the path the FILESYSTEM reported, not the spelling the author
+  typed — a live run showed that resolving from the typed spelling produced an
+  address the asset protocol could not open. Both spellings of an encoded name
+  are still tried, decoded first."
+  [repo href]
+  (let [rels (f27a/contained-paths href)]
+    (if (empty? rels)
+      (p/resolved nil)
+      (p/let [idx (f27-asset-listing repo)]
+        (some (fn [rel]
+                (when-let [abs (get idx (f27-nfc rel))]
+                  {:rel rel :abs abs}))
+              rels)))))
 
 (rum/defcs f27-local-asset < rum/reactive
   (rum/local nil ::src)
+  (rum/local nil ::abs)
   (rum/local nil ::exists?)
   (rum/local false ::broken?)
   {:will-mount
    (fn [state]
-     ;; Resolve and probe ONCE, on mount, rather than on every render. Both are
-     ;; reads: `make-asset-url` is OG's own resolution, and the probe is OG's own
-     ;; `file-exists?` against the graph directory. Nothing here writes, and
-     ;; nothing here fetches: a local file is not a network request.
+     ;; Authorise and resolve ONCE, on mount, rather than on every render.
+     ;; Everything here is a read: containment is pure and happens first, the
+     ;; listing is OG's own `readdir`, and `make-asset-url` is OG's own
+     ;; resolution. Nothing writes, and nothing fetches — a local file is not a
+     ;; network request.
      (let [[_config href _kind _name _label] (:rum/args state)
            *src (::src state)
-           *exists? (::exists? state)]
+           *exists? (::exists? state)
+           *abs (::abs state)]
        (try
-         (p/let [found (f27-asset-locate (config/get-repo-dir (state/get-current-repo))
-                                         (f27a/repo-relative-paths href))]
+         (p/let [found (f27-asset-locate (state/get-current-repo) href)]
            (reset! *exists? (some? found))
            (when found
-             ;; Resolved from the spelling that was found on disk, not the one
-             ;; the author happened to type, so an encoded name and a literal
-             ;; one produce the same working address.
+             ;; The reveal control dispatches THIS path — the one the filesystem
+             ;; reported for an authorised file — not a path derived from the
+             ;; href or from the display URL.
+             (reset! *abs (:abs found))
+             ;; Resolved from the spelling found on disk, not the one the author
+             ;; happened to type, so an encoded name and a literal one produce
+             ;; the same working address.
              (p/let [url (editor-handler/make-asset-url
-                          (config/get-local-asset-absolute-path found))]
+                          (config/get-local-asset-absolute-path (:rel found)))]
                (reset! *src url))))
          (catch :default _ (reset! *exists? false)))
        state))}
@@ -2823,6 +2905,7 @@
         ;; that preview has a text budget and an image has no place in it.
         image? (and (= :image kind)
                     (zero? level)
+                    (not (:f27/compact? config))
                     (some? src)
                     (not missing?))]
     [:<>
@@ -2832,7 +2915,7 @@
       (when badge [:span.f27-ctx-badge.is-asset badge])
       [:span.f27-asset-name shown]
       (when missing? [:span.f27-asset-missing (t :f27/asset-missing)])
-      (when-not missing? (f27-asset-open-button src shown))]
+      (when-not missing? (f27-asset-open-button @(::abs state) shown))]
      (when image?
        [:span.f27-asset-figure
         [:img.f27-asset-img
@@ -2873,8 +2956,19 @@
            [:span.f27-asset-name shown]
            [:a.f27-asset-name {:href href :target "_blank" :rel "noreferrer"} shown])])
 
-      (f27a/graph-local? href)
-      (f27-local-asset config href (f27a/asset-kind href) name' label)
+      ;; Written as a graph-local asset. Whether it IS one is a separate
+      ;; question, and it is asked before anything is probed, loaded or
+      ;; revealed. `../assets/../../outside.png` and `../assets-other/x.png` are
+      ;; both recognised by OG's prefix matcher and neither is inside the asset
+      ;; directory; they are named and refused here, with no control at all.
+      (f27a/recognized-local? href)
+      (if (f27a/contained? href)
+        (f27-local-asset config href (f27a/asset-kind href) name' label)
+        [:span.f27-asset.is-outside {:title (t :f27/asset-outside)}
+         [:span.f27-asset-mark {:aria-hidden "true"} "⚠"]
+         (when-let [b (f27a/asset-badge href)] [:span.f27-ctx-badge.is-asset b])
+         [:span.f27-asset-name (or name' (t :f27/asset-unnamed))]
+         [:span.f27-asset-missing (t :f27/asset-outside-short)]])
 
       ;; Neither in this graph's assets nor an address: a path this panel cannot
       ;; resolve and must not guess at. It is named, and nothing is offered.
@@ -2885,6 +2979,106 @@
                                  (f27c/preview-text (or (get-label-text label) full-text "")
                                                     f27b/max-label-chars)
                                  (t :f27/asset-unnamed))]])))
+
+;; ---------------------------------------------------------------------------
+;; F27 dynamic boundary — a construct that RENDERS rather than reads.
+;;
+;; The asset hooks above cover image and media LINKS. They do not cover
+;; everything `inline` dispatches, and three shapes still reached code that
+;; produces its own content:
+;;
+;;   * `Macro` reaches `macro-cp`. That is a renderer of programs: `{{embed}}`
+;;     renders another block or page recursively — the very substitution this
+;;     panel exists to stop — `{{query}}` runs a query, `{{youtube}}`,
+;;     `{{vimeo}}`, `{{bilibili}}`, `{{video}}` and `{{tweet}}` each mount a
+;;     remote player, and `{{renderer}}` hands the slot to a plugin.
+;;   * `Inline_Html` and `Export_Snippet "html"` reach `dangerouslySetInnerHTML`
+;;     with sanitised HTML. Sanitising decides which tags survive; it does not
+;;     decide whether anything is loaded.
+;;   * `Inline_Hiccup` is read as data and then also set as inner HTML.
+;;
+;; Deferring the embed FEATURE cannot mean running OG's unrestricted embed
+;; renderer inside the panel meanwhile. Each of these becomes an inert, named,
+;; bounded placeholder, carrying the one control this project can already honour
+;; — the block, the page or the address it points at. This is boundary closure,
+;; not an embed viewer: nothing here renders a target's content.
+;; ---------------------------------------------------------------------------
+
+(defn- f27-inert-page-button
+  "Open the page an embed names, through OG's existing page route."
+  [page label]
+  [:button.f27-inert-open.f27-btn
+   (f27-btn (fn [] (route-handler/redirect-to-page! page))
+            {:aria-label (t :f27/inert-open-page-of (or label page))
+             :title (t :f27/inert-open-page)})
+   "↗"])
+
+(defn- f27-inert-macro
+  "One macro, named rather than run.
+
+  An `{{embed ((uuid))}}` is the case that matters most: it is the construct
+  most likely to reintroduce the recursive substitution this panel was built to
+  stop, so it is shown as the target's own compact label with the same source
+  control every other F27 chip carries. Reading the target's label is a lookup,
+  not a rendering: no part of the target's content is emitted here."
+  [config options]
+  (let [repo (:f27/ref-repo config)
+        {:keys [name arguments]} options
+        {:keys [kind value]} (f27i/macro-target name arguments)
+        args (f27i/macro-label name arguments f27b/max-label-chars)
+        embed? (= "embed" name)
+        entity (when (= :block kind) (f27-ref-target repo value))
+        text-label (when entity (f27-ref-label entity))
+        shown (or text-label
+                  (when (= :page kind) (f27c/preview-text value f27b/max-label-chars))
+                  args)
+        title (if embed? (t :f27/inert-embed) (t :f27/inert-macro name))]
+    [:span.f27-inert {:class (if embed? "is-embed" "is-macro") :title title}
+     ;; The macro's NAME is the badge, `{{embed}}` rather than `{{}}` beside a
+     ;; separate word: a live screen showed the two spans running together and
+     ;; reading as "embedFocus is a skill…" and "youtubehttps://…".
+     [:span.f27-ctx-badge.is-inert
+      (str "{{" (f27c/preview-text (str name) f27i/max-badge-name-chars) "}}")]
+     (cond
+       (= :url kind)
+       [:a.f27-inert-text {:href value :target "_blank" :rel "noreferrer"}
+        (or shown value)]
+
+       shown [:span.f27-inert-text shown]
+       :else nil)
+     (case kind
+       :block (when entity (f27-ref-source-button value text-label))
+       :page (f27-inert-page-button value shown)
+       nil)]))
+
+(defn- f27-inert-markup
+  "Inline HTML or Hiccup, shown as the characters the note contains.
+
+  Nothing here produces markup, so nothing can load, execute or lay out. The
+  fragment is bounded like every other compact label, so a long one cannot
+  become the content of the row it sits in."
+  [badge s]
+  (let [shown (f27i/markup-label s f27b/max-label-chars)]
+    [:span.f27-inert.is-markup {:title (t :f27/inert-markup)}
+     [:span.f27-ctx-badge.is-inert badge]
+     (if shown
+       [:code.f27-inert-text shown]
+       [:span.f27-inert-text (t :f27/inert-empty)])]))
+
+(defn- f27-inert-render
+  "Present ONE dynamic construct found inside an F27 panel body, or answer nil.
+
+  nil means \"this is not a node the boundary claims\", and `inline` then renders
+  it exactly as it always has. Only the shapes that reach a renderer or
+  `innerHTML` are claimed."
+  [config item]
+  (case (f27i/node-kind item)
+    :macro (f27-inert-macro config (second item))
+    :html (f27-inert-markup "HTML" (if (= "Export_Snippet" (first item))
+                                     (nth item 2 nil)
+                                     (second item)))
+    :hiccup (f27-inert-markup "HICCUP" (second item))
+    nil))
 
 (declare f27-ref-render)
 
@@ -2899,10 +3093,31 @@
   (assoc config
          :f27/ref-render f27-ref-render
          :f27/media-render f27-asset-render
+         :f27/inert-render f27-inert-render
          :f27/ref-repo repo
          :f27/ref-level 0
          :f27/ref-trail (f27b/push-trail #{} (f27-ref-key host-uuid))
          :f27/ref-budget (volatile! (f27b/new-budget))))
+
+(defn- f27-breadcrumb-config
+  "Rendering config for the ONE-LINE path an F27 row shows above its content.
+
+  F27 reuses OG's own `breadcrumb`, and `breadcrumb` renders each ancestor's
+  title through `map-inline` with the config it is given. Given a plain config
+  that reaches OG's unguarded renderer: a live run found three of the fixture's
+  deliberately escaping asset paths rendered as full `resizable-image` elements
+  INSIDE the reference panel, because the referencing block's parent contained
+  them. A breadcrumb is a panel surface like any other.
+
+  It starts at `max-preview-level` on purpose. That is not a claim about nesting
+  — it is the level at which this contract stops expanding anything, which is
+  exactly right for a one-line path: a reference is named, an asset is a compact
+  indicator, and nothing grows. `:f27/compact?` says the same thing in words, so
+  a reader of the asset renderer does not have to infer it from a number."
+  [config repo host-uuid]
+  (assoc (f27-body-config config repo host-uuid)
+         :f27/ref-level f27b/max-preview-level
+         :f27/compact? true))
 
 (defn- f27-ref-render
   "Present ONE block reference found inside an F27 panel body.
@@ -3577,7 +3792,12 @@
          :trail "⋯"
          "›")]
       [:span.f27-in-crumb
-       (breadcrumb config repo (:block/uuid entity)
+       ;; The F27 config, not the plain one: `breadcrumb` renders each
+       ;; ancestor's title through OG's inline renderer, so without it an asset,
+       ;; a macro or inline HTML written in a PARENT block would be rendered
+       ;; unguarded inside this panel.
+       (breadcrumb (f27-breadcrumb-config config repo (:block/uuid entity))
+                   repo (:block/uuid entity)
                    {:show-page? true
                     :level-limit 3
                     :indent? false
@@ -3922,7 +4142,11 @@
        [:div.f27-ref-row-main
         [:span.f27-ref-bullet "›"]
         [:span.f27-ref-crumb
-         (breadcrumb config repo (:block/uuid ref-block)
+         ;; The F27 config, for the same reason as the inbound row above. This
+         ;; is also what keeps the COMPACT OVERVIEW compact: an asset in an
+         ;; ancestor's text is a small indicator here, never a picture.
+         (breadcrumb (f27-breadcrumb-config config repo (:block/uuid ref-block))
+                     repo (:block/uuid ref-block)
                      {:show-page? true
                       :level-limit 3
                       :indent? false

@@ -1409,6 +1409,57 @@ html.is-mac {
   border-radius: 3px;
 }
 
+/* A path that is written as a local asset but is not inside the graph's own
+   asset directory. Named, refused, and carrying no control at all. */
+.f27-asset.is-outside {
+  border-style: dashed;
+  border-color: var(--ls-warning-text-color, var(--ls-quaternary-background-color));
+}
+
+/* ---------------------------------------------------------------------------
+   F27 dynamic boundary — a construct that renders rather than reads.
+
+   A macro, inline HTML or Hiccup is shown as an inert placeholder: a badge, a
+   name, and at most one control that opens something this project can already
+   navigate to. Styled as a NAME rather than as quoted content, so a reader can
+   see at a glance that the panel is describing something instead of showing it.
+   --------------------------------------------------------------------------- */
+
+.f27-inert {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.15rem;
+  max-width: 100%;
+  padding: 0 0.15rem;
+  border-radius: 3px;
+  border: 1px dashed var(--ls-quaternary-background-color);
+  vertical-align: baseline;
+}
+
+.f27-inert-text {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* The fragment of a markup node is characters, not markup, and reads as such. */
+.f27-inert.is-markup .f27-inert-text {
+  font-size: 0.9em;
+  color: var(--ls-secondary-text-color);
+}
+
+.f27-inert-open {
+  margin-left: 0.15rem;
+  padding: 0 0.15rem;
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.f27-inert-open:hover { color: var(--ls-link-text-hover-color); }
+
+.f27-ctx-badge.is-inert { letter-spacing: 0.02em; }
+
 /* Repeated collapse / Back controls, at the end of the content they close. */
 .f27-ctx-end,
 .f27-desc-end,
