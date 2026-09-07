@@ -228,27 +228,46 @@ async function main() {
     urlTypes.trim().slice(0, 120));
 
   // renderer provenance inside the PACKAGED app
-  let mismatched = 0, comparedFiles = 0;
+  let differing = 0, comparedFiles = 0;
+  const notInAccepted = [];
   const acceptedStatic = path.join(ACCEPTED, 'static');
+  const skipTop = ['node_modules', 'electron.js', 'electron.js.map', 'tests.js',
+                   'package.json', 'forge.config.js', ID.MANIFEST_FILE];
   (function walk(rel) {
     const dir = path.join(RES_APP, rel);
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? path.join(rel, e.name) : e.name;
-      if (!rel && ['node_modules', 'electron.js', 'electron.js.map', 'tests.js',
-                   'package.json', 'forge.config.js', ID.MANIFEST_FILE].includes(e.name)) continue;
-      if (!rel && e.name.startsWith('pilot-')) continue;
+      if (!rel && (skipTop.includes(e.name) || e.name.startsWith('pilot-'))) continue;
       if (rel === 'icons' && e.name === 'pilot.icns') continue;
-      if (e.isDirectory()) walk(r);
-      else if (e.isFile()) {
-        const acc = path.join(acceptedStatic, r);
-        if (!fs.existsSync(acc)) { mismatched++; return; }
-        comparedFiles++;
-        if (sha256(fs.readFileSync(path.join(RES_APP, r))) !== sha256(fs.readFileSync(acc))) mismatched++;
-      }
+      if (e.isDirectory()) { walk(r); continue; }
+      if (!e.isFile()) continue;
+      const acc = path.join(acceptedStatic, r);
+      // `continue`, not `return`: returning here would abandon the rest of the
+      // directory and quietly shrink the comparison.
+      if (!fs.existsSync(acc)) { notInAccepted.push(r); continue; }
+      comparedFiles++;
+      if (sha256(fs.readFileSync(path.join(RES_APP, r))) !== sha256(fs.readFileSync(acc))) differing++;
     }
   })('');
+
+  // Accounted for in the other direction too, so "identical" is a statement
+  // about a known set rather than about whatever happened to be walked.
+  const acceptedOnly = [];
+  (function walkAcc(rel) {
+    const dir = path.join(acceptedStatic, rel);
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? path.join(rel, e.name) : e.name;
+      if (!rel && (skipTop.includes(e.name) || e.name.startsWith('pilot-'))) continue;
+      if (e.isDirectory()) { walkAcc(r); continue; }
+      if (e.isFile() && !fs.existsSync(path.join(RES_APP, r))) acceptedOnly.push(r);
+    }
+  })('');
+
   record('P1.6', 'packaged renderer asset set is byte-identical to the accepted checkout',
-    mismatched === 0, `${comparedFiles} files compared, ${mismatched} differing`);
+    differing === 0 && notInAccepted.length === 0,
+    `${comparedFiles} files compared, ${differing} differing, ` +
+    `${notInAccepted.length} packaged files with no accepted counterpart; ` +
+    `not packaged: ${acceptedOnly.length ? acceptedOnly.join(', ') : 'none'}`);
 
   const mainJs = fs.readFileSync(path.join(RES_APP, 'js', 'main.js'), 'utf8');
   record('P1.7', 'packaged renderer still declares the accepted revision',
