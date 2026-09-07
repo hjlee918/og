@@ -209,20 +209,42 @@
           (string/join (for [j (range kids)]
                          (str "\t- child " i "-" j "\n")))))))
 
-(defn- measured
-  "Run `f` counting `d/datoms` calls and the datoms actually realised.
+(defn- counting-seq
+  "`s`, one element at a time, counting each element as the CALLER takes it.
 
-  The seq is wrapped in a lazy `map`, so a scan that is stopped early counts
-  only what was consumed — which is the whole question."
+  `lazy-seq`/`cons` is deliberately unchunked. `map` over an index slice is
+  not: taking its first element realises a whole chunk, so a `map`-based
+  counter reports the chunk, not the consumption. That is why `:datoms` below
+  varies between runs while the work does not — see
+  `asking-whether-children-exist-builds-nothing`."
+  [counter s]
+  (lazy-seq
+   (when-let [c (seq s)]
+     (vswap! counter inc)
+     (cons (first c) (counting-seq counter (rest c))))))
+
+(defn- measured
+  "Run `f` counting `d/datoms` calls and two different things about the datoms.
+
+  `:slices`   how many index scans were started — deterministic.
+  `:consumed` how many datoms the CALLER actually took — deterministic, and the
+              number that answers \"did this walk the children?\".
+  `:datoms`   how many the underlying chunked seq realised on the way. This is
+              an implementation artifact of datascript's index chunking: a
+              caller that takes one datom can realise 1, 4, 8 or 16 of them
+              depending on where the datom sits in its index node. Reported
+              because it is informative, NEVER asserted as a fixed bound."
   [f]
   (let [slices (volatile! 0)
         realized (volatile! 0)
+        consumed (volatile! 0)
         orig d/datoms]
     (with-redefs [d/datoms (fn [& args]
                              (vswap! slices inc)
-                             (map (fn [x] (vswap! realized inc) x) (apply orig args)))]
+                             (counting-seq consumed
+                                           (map (fn [x] (vswap! realized inc) x) (apply orig args))))]
       (let [v (f)]
-        {:value v :slices @slices :datoms @realized}))))
+        {:value v :slices @slices :datoms @realized :consumed @consumed}))))
 
 (deftest the-page-is-big-enough-for-the-measurement-to-mean-something
   (load-test-files [{:file/path "pages/big.md" :file/content (page-of big-tops big-kids)}])
@@ -325,24 +347,97 @@
     (testing "and it is four times the five-block cost, not four hundred"
       (is (< (:datoms m) (* 10 57))))))
 
-(deftest asking-whether-children-exist-builds-nothing
-  (load-test-files [{:file/path "pages/big.md" :file/content (page-of big-tops big-kids)}])
-  (let [db (conn/get-db repo)
-        first-top (:block (first (:blocks (f27p/excerpt repo "big" 1))))
-        m (measured #(f27p/has-children? db (:db/id first-top)))]
-    (println "F27-COST child-existence question on a block with 30 children:"
-             (pr-str {:slices (:slices m) :datoms (:datoms m)}))
-    (is (true? (:value m)))
-    (is (= 1 (:slices m)) "one scan")
-    (is (<= (:datoms m) 8)
-        (str "measured " (:datoms m) " datoms realised for 30 children"))
+;; A small, deterministic fixture for the existence probe alone: one block with
+;; a single child, one with two hundred, and one with none. Two hundred is not a
+;; stress number — it is a number the OLD eager lookup could not answer without
+;; building two hundred entities, which is the whole discrimination.
+(def ^:private probe-kids 200)
 
-    (testing "whereas the reverse-reference lookup builds every direct child"
-      ;; This is the measurement that rejected `(some? (:block/_parent e))`, and
-      ;; it is asserted so the choice cannot be quietly undone.
-      (let [s (:block/_parent first-top)]
-        (is (= big-kids (count s))
-            "30 entities materialised merely to answer 'are there any'")))))
+(defn- probe-page []
+  (str "- one child\n\t- the only child\n"
+       "- many children\n"
+       (string/join (for [j (range probe-kids)] (str "\t- child " j "\n")))
+       "- no children at all\n"))
+
+(deftest asking-whether-children-exist-builds-nothing
+  ;; WHAT THIS ASSERTS, and why it is not a number that drifts.
+  ;;
+  ;; The requirement is that asking "are there children?" must not collect the
+  ;; children. The measurement that used to stand for it — datoms realised
+  ;; against a fixed bound of 8 — was not a measurement of that: `map` over a
+  ;; datascript index slice is CHUNKED, so taking one datom realises whatever
+  ;; the chunk holds. Observed 1, 4, 8 and 16 for identical work, so the test
+  ;; failed roughly two runs in five while nothing was wrong. Raising the bound
+  ;; to 16 would have kept a number that measures datascript's node fill rather
+  ;; than this code's behaviour.
+  ;;
+  ;; What is deterministic, and what the requirement actually says:
+  ;;   * ONE index scan, started and stopped;
+  ;;   * ONE datom taken from it — or none, when there are no children;
+  ;;   * the SAME cost for one child and for two hundred, which is what
+  ;;     "does not collect them" means;
+  ;;   * and the contrast, measured on the same fixture, with the reverse
+  ;;     lookup this deliberately does not use.
+  (load-test-files [{:file/path "pages/probe.md" :file/content (probe-page)}])
+  (let [db (conn/get-db repo)
+        blocks (:blocks (f27p/excerpt repo "probe" 3))
+        [one many none] (mapv :block blocks)
+        m1 (measured #(f27p/has-children? db (:db/id one)))
+        mn (measured #(f27p/has-children? db (:db/id many)))
+        m0 (measured #(f27p/has-children? db (:db/id none)))]
+    (println "F27-COST child-existence question, 1 vs" probe-kids "children vs none:"
+             (pr-str {:one {:slices (:slices m1) :consumed (:consumed m1) :datoms (:datoms m1)}
+                      :many {:slices (:slices mn) :consumed (:consumed mn) :datoms (:datoms mn)}
+                      :none {:slices (:slices m0) :consumed (:consumed m0) :datoms (:datoms m0)}}))
+
+    (testing "the fixture really is what the measurement claims"
+      (is (= ["one child" "many children" "no children at all"]
+             (mapv string/trim (contents {:blocks blocks}))))
+      (is (= probe-kids (count (:block/_parent many)))
+          "two hundred children really are there to be collected"))
+
+    (testing "the answer is right"
+      (is (true? (:value m1)))
+      (is (true? (:value mn)))
+      (is (false? (:value m0))))
+
+    (testing "one index scan, whatever the number of children"
+      (is (= 1 (:slices m1)))
+      (is (= 1 (:slices mn)))
+      (is (= 1 (:slices m0))))
+
+    (testing "one datom taken — and none when there is nothing to take"
+      (is (= 1 (:consumed m1)) (str "took " (:consumed m1) " datom(s) for one child"))
+      (is (= 1 (:consumed mn)) (str "took " (:consumed mn) " datom(s) for " probe-kids " children"))
+      (is (= 0 (:consumed m0)) (str "took " (:consumed m0) " datom(s) for no children")))
+
+    (testing "and therefore the cost does not grow with the children — the requirement itself"
+      (is (= (:slices m1) (:slices mn)))
+      (is (= (:consumed m1) (:consumed mn))))
+
+    ;; THE REGRESSION, and how it fires.
+    ;;
+    ;; `(:block/_parent e)` does not go through `d/datoms` at all: datascript's
+    ;; `-lookup-backwards` calls `db/-search` and then
+    ;; `(reduce #(conj %1 (entity db (:e %2))) #{} datoms)` — an Entity built for
+    ;; EVERY child, eagerly, with no early stop available. Its measured
+    ;; signature is therefore `{:slices 0 :consumed 0}`: it performs none of the
+    ;; bounded scan this contract requires.
+    ;;
+    ;; So restoring it breaks the assertions above directly — `(= 1 (:slices
+    ;; mn))` and `(= 1 (:consumed mn))` both become 0. Verified by swapping the
+    ;; implementation and running this test, not assumed.
+    (testing "the reverse-reference lookup this deliberately does not use collects every child"
+      (let [fresh (db-utils/entity db (:db/id many))
+            eager (measured #(some? (:block/_parent fresh)))]
+        (println "F27-COST the reverse lookup, for contrast:"
+                 (pr-str {:slices (:slices eager) :consumed (:consumed eager)
+                          :entities-built (count (:block/_parent fresh))}))
+        (is (true? (:value eager)))
+        (is (= probe-kids (count (:block/_parent fresh)))
+            (str probe-kids " entities materialised merely to answer 'are there any'"))
+        (is (zero? (:slices eager))
+            "it performs none of the bounded scan the probe performs — which is what the assertions above detect")))))
 
 (deftest an-excerpt-never-pulls-the-page
   (load-test-files [{:file/path "pages/big.md" :file/content (page-of big-tops big-kids)}])

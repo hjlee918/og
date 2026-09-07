@@ -1,13 +1,14 @@
 'use strict';
 //
-// Which commit is the preview actually running?
+// Which commit is the preview actually running — and can that be ESTABLISHED?
 //
 // The preview is a LOCAL TEST BUILD. It is not an installer, not a release and
 // not a replacement for the application the user runs every day — so the one
 // thing it owes the reader is an honest answer to "what code is this?", and a
-// refusal when it cannot give one.
+// REFUSAL when it cannot give one. "Not contradicted" is not an answer; every
+// path below either establishes identity or refuses.
 //
-// There are two independent facts to read, and this module reads both:
+// The two facts this reads:
 //
 //   1. THE REVISION COMPILED INTO THE RENDERER. `shadow-cljs.edn` runs
 //      `shadow.hooks/git-revision-hook` on the `:app` build, which puts
@@ -16,19 +17,31 @@
 //      `static/js/main.js`, so it can be read without loading 32 MB. This is
 //      the renderer's own account of where it came from — not an inference.
 //
-//   2. WHAT THE CHECKOUT SAYS NOW. The same `git describe`, plus the full
-//      `HEAD` and whether the working tree is clean.
+//   2. WHAT IS ON DISK NOW. The commit the built revision names, diffed
+//      against the WORKING TREE over the paths the build actually reads.
 //
-// If those two disagree, the window would show code other than the commit this
-// preview claims to demonstrate, so the launch is refused with the rebuild
-// command. `static/electron.js` and `static/css/style.css` carry no revision of
-// their own; for those the check is a modification-time comparison against the
-// sources the build actually reads.
+// THE VERDICT is one of three, and only the first two may launch:
 //
-// A dirty working tree is reported, never silently accepted: `<sha>-dirty`
-// names a commit but not a state, so two different dirty trees produce the same
-// string. Identity is then *unprovable* rather than *established*, and the
-// report says so.
+//   exact        the renderer's revision is this checkout's revision, the tree
+//                is clean, and nothing the build reads differs.
+//   equivalent   the renderer was built from a DIFFERENT but CLEAN commit, and
+//                nothing the build reads differs between that commit and the
+//                working tree. This repository holds the preview tooling beside
+//                the application, so a commit that touched only the tooling
+//                lands here. It is allowed only because both sides are
+//                comparable: a clean commit on one side, the files on disk on
+//                the other.
+//   unverified   anything else — and the launcher refuses.
+//
+// WHAT WAS WRONG BEFORE, AND IS NOT NOW. A `-dirty` suffix was stripped and the
+// resulting COMMIT was compared. That cannot establish what an originally dirty
+// build contains: the working tree it was compiled from is gone and was never
+// recorded. A dirty BUILT revision is now refused outright rather than compared.
+// A dirty WORKING TREE is no longer refused on sight, because the comparison
+// below reads the working tree itself — if the dirt is outside the build's own
+// inputs, identity still holds and is proved rather than assumed.
+//
+// WHAT THIS DOES NOT PROVE, stated rather than implied — see `LIMITS`.
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -68,6 +81,28 @@ const REBUILD = (repo) =>
   `  cd ${repo}\n` +
   '  yarn gulp:build\n' +
   '  clojure -M:cljs compile app electron';
+
+const RECOVER = (repo) =>
+  'The preview will not open a window whose code it cannot name. To establish\n' +
+  'identity, commit (or stash) what is outstanding and rebuild, so the renderer\n' +
+  'records a revision that names an exact tree:\n' +
+  `  cd ${repo}\n` +
+  '  git status --short\n' +
+  '  git stash            # or commit\n' +
+  '  yarn gulp:build\n' +
+  '  clojure -M:cljs compile app electron';
+
+const IDENTITY = { EXACT: 'exact', EQUIVALENT: 'equivalent', UNVERIFIED: 'unverified' };
+
+// What a passing check does and does not establish. Printed with the report, so
+// the claim is never larger than the evidence.
+const LIMITS = [
+  'a revision names the commit the compiler saw, not the bytes it emitted; nothing here recompiles or hashes the output to prove they correspond',
+  '`git describe --dirty` does not consider untracked files, so untracked files under the build inputs are checked separately and refuse the run',
+  'files IGNORED by git under the build inputs are generated and cannot be compared by content; they are listed, and covered only by the modification-time check below',
+  'modification times are a freshness heuristic for `static/electron.js` and `static/css/style.css`, which carry no revision of their own — they are not content provenance',
+  'the Electron binary is a downloaded dependency; nothing here signs or verifies it',
+];
 
 // The Electron binary is a downloaded dependency, not something this checkout
 // compiles, so it is never compared against a source time.
@@ -139,31 +174,67 @@ function gitState(repo, deps) {
 function newestInput(repo, deps) {
   const io = (deps && deps.fs) || fs;
   let newest = { at: 0, file: null };
-  const visit = (p) => {
+  const unreadable = [];
+  const visit = (p, required) => {
     let st;
     try {
       st = io.statSync(p);
     } catch (e) {
-      return; // an input that is not there cannot make a build stale
+      // A DECLARED input that is not there, or cannot be read, is not a
+      // freshness question — it means this check does not cover what it claims
+      // to cover, and the run is refused rather than quietly passed.
+      if (required) unreadable.push({ file: path.relative(repo, p), why: e.message });
+      return;
     }
     if (st.isDirectory()) {
-      let entries = [];
+      let entries;
       try {
         entries = io.readdirSync(p);
       } catch (e) {
+        unreadable.push({ file: path.relative(repo, p), why: e.message });
         return;
       }
       for (const e of entries) {
         if (e === '.DS_Store' || e === 'node_modules' || e === '.git') continue;
-        visit(path.join(p, e));
+        visit(path.join(p, e), false);
       }
       return;
     }
     const at = st.mtimeMs;
     if (at > newest.at) newest = { at, file: p };
   };
-  for (const rel of (deps && deps.inputs) || INPUTS) visit(path.join(repo, rel));
-  return newest;
+  for (const rel of (deps && deps.inputs) || INPUTS) visit(path.join(repo, rel), true);
+  return { at: newest.at, file: newest.file, unreadable };
+}
+
+// Files under the build inputs that a git comparison cannot speak for.
+//
+//   untracked  would be compiled and is invisible to every diff — refused
+//   ignored    generated, so it cannot be compared by content. This repository
+//              really has one (`src/main/frontend/tldraw-logseq.js`, produced by
+//              `yarn tldraw:build` and required by `frontend.extensions.tldraw`),
+//              so this is listed as a stated limit rather than refused, and it
+//              is still covered by the modification-time check.
+function auditTree(git, inputs) {
+  const out = { untracked: null, ignored: null, error: null };
+  if (!git || git.error) {
+    out.error = 'the checkout could not be queried';
+    return out;
+  }
+  const list = (args) => {
+    const raw = git.run(['ls-files', '--others'].concat(args, ['--'], inputs));
+    return String(raw || '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  };
+  try {
+    out.untracked = list(['--exclude-standard']);
+    out.ignored = list(['--ignored', '--exclude-standard']);
+  } catch (e) {
+    out.error = e && e.message ? e.message : String(e);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,13 +242,19 @@ function newestInput(repo, deps) {
 // ---------------------------------------------------------------------------
 function inspect(repo, deps) {
   const io = (deps && deps.fs) || fs;
+  const inputs = (deps && deps.inputs) || INPUTS;
   const report = {
     repo,
     artifacts: [],
     missing: [],
     stale: [],
+    // Reasons identity could not be ESTABLISHED. Any entry refuses the run.
+    refusals: [],
     warnings: [],
+    limits: LIMITS,
+    identity: IDENTITY.UNVERIFIED,
     revision: { built: null, checkout: null, matches: null, provable: false },
+    tree: null,
     git: null,
   };
 
@@ -194,8 +271,7 @@ function inspect(repo, deps) {
   }
   if (report.missing.length) {
     report.ok = false;
-    report.reason =
-      `${report.missing.length} build artifact(s) are missing: ${report.missing.join(', ')}.`;
+    report.reason = `${report.missing.length} build artifact(s) are missing: ${report.missing.join(', ')}.`;
     report.advice = REBUILD(repo);
     return report;
   }
@@ -207,57 +283,102 @@ function inspect(repo, deps) {
   report.revision.built_why = built.why;
   report.revision.checkout = git.describe || null;
 
+  // -------------------------------------------------------------------------
+  // Identity. Each branch either establishes it or refuses; none of them warns
+  // and continues.
+  // -------------------------------------------------------------------------
   if (git.error) {
-    report.warnings.push(`the checkout's own revision could not be read (${git.error}), so the build cannot be compared to it`);
+    report.refusals.push(
+      `this checkout's own revision could not be read (${git.error}), so there is nothing to identify the build against`
+    );
   } else if (!built.revision) {
-    report.warnings.push(`${built.why}, so the renderer cannot be compared to the checkout`);
+    report.refusals.push(`${built.why}, so the window's code cannot be named`);
+  } else if (/-dirty$/.test(built.revision)) {
+    // THE CORRECTION. The tree this was compiled from was never recorded and
+    // cannot be recovered, so no comparison can speak for its contents. Its
+    // commit prefix names a neighbour of that tree, not the tree.
+    report.refusals.push(
+      `the compiled renderer was built from an UNCOMMITTED tree ("${built.revision}"). The files it was ` +
+        `compiled from were never recorded, so no comparison can establish what it contains`
+    );
   } else {
-    report.revision.matches = built.revision === git.describe;
-    // `-dirty` names a commit but not a state: two different uncommitted trees
-    // describe identically, so a match here is not proof.
-    report.revision.provable = report.revision.matches && !git.dirty;
-    if (!report.revision.matches) {
-      // A DIFFERENT commit is not automatically a different application. This
-      // repository holds the preview tooling beside the application, so a
-      // commit that changed only the tooling leaves the built code correct.
-      // The question asked is therefore the precise one: does anything the
-      // build actually READS differ between the two commits?
-      const inputs = (deps && deps.inputs) || INPUTS;
-      const from = commitOf(built.revision);
-      let same = null;
+    const from = commitOf(built.revision);
+    let known = false;
+    try {
+      git.run(['rev-parse', '--verify', '--quiet', from + '^{commit}']);
+      known = true;
+    } catch (e) {
+      report.refusals.push(
+        `the compiled renderer was built from "${built.revision}", which is not a commit in this checkout`
+      );
+    }
+    if (known) {
+      // The comparison that matters: that commit against the FILES ON DISK,
+      // over the paths the build reads. `git diff <commit> -- <paths>` reads the
+      // working tree, so a dirty tree is answered rather than assumed about.
+      let differs = null;
       try {
-        git.run(['rev-parse', '--verify', '--quiet', from + '^{commit}']);
-        git.run(['diff', '--quiet', from, 'HEAD', '--'].concat(inputs));
-        same = true;
+        git.run(['diff', '--quiet', from, '--'].concat(inputs));
+        differs = false;
       } catch (e) {
-        // `git diff --quiet` exits 1 when there IS a difference, and
-        // `rev-parse --verify` fails when the commit is not in this checkout.
-        // Both land here; they are told apart below.
-        same = false;
+        // `git diff --quiet` exits non-zero when there IS a difference, and
+        // also on a genuine failure. Both fail closed here.
+        differs = true;
       }
-      report.revision.same_build_inputs = same;
-      if (same) {
-        report.warnings.push(
-          `the compiled renderer was built from "${built.revision}", not from HEAD, but nothing the build reads ` +
-            `differs between them — the window runs this checkout's application code`
+      if (differs) {
+        report.stale.push(
+          `what the build reads differs between "${built.revision}" and the files on disk` +
+            (git.dirty ? ' (this working tree has uncommitted changes)' : '')
         );
       } else {
-        report.stale.push(
-          `the compiled renderer was built from "${built.revision}", but this checkout is "${git.describe}"`
-        );
+        report.identity =
+          built.revision === git.describe && !git.dirty ? IDENTITY.EXACT : IDENTITY.EQUIVALENT;
+        report.revision.matches = built.revision === git.describe;
+        report.revision.provable = true;
+        if (report.identity === IDENTITY.EQUIVALENT) {
+          report.warnings.push(
+            `the renderer was built from "${built.revision}" rather than from HEAD, but nothing the build reads ` +
+              `differs between that commit and the files on disk` +
+              (git.dirty ? ', and this tree\'s uncommitted changes are all outside those files' : '')
+          );
+        }
       }
-    } else if (git.dirty) {
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // What a git comparison cannot speak for.
+  // -------------------------------------------------------------------------
+  const tree = auditTree(git, inputs);
+  report.tree = tree;
+  if (tree.error) {
+    report.refusals.push(
+      `the build inputs could not be audited for untracked files (${tree.error}), so the comparison above cannot be trusted to cover them`
+    );
+  } else {
+    if (tree.untracked && tree.untracked.length) {
+      report.refusals.push(
+        `${tree.untracked.length} untracked file(s) sit under the build inputs and would be compiled while being ` +
+          `invisible to every comparison: ${tree.untracked.slice(0, 5).join(', ')}` +
+          (tree.untracked.length > 5 ? ', …' : '')
+      );
+    }
+    if (tree.ignored && tree.ignored.length) {
       report.warnings.push(
-        'the working tree has uncommitted changes, so "' +
-          git.describe +
-          '" names a commit but not a state — the build cannot be proved to be this checkout'
+        `${tree.ignored.length} generated file(s) under the build inputs are ignored by git and cannot be compared ` +
+          `by content — covered only by the modification-time check: ${tree.ignored.join(', ')}`
       );
     }
   }
 
+  // -------------------------------------------------------------------------
   // Times, for the two artifacts that carry no revision of their own.
+  // -------------------------------------------------------------------------
   const newest = newestInput(repo, deps);
   report.newest_input = newest.file ? { file: path.relative(repo, newest.file), mtimeMs: newest.at } : null;
+  for (const u of newest.unreadable) {
+    report.refusals.push(`a declared build input could not be read (${u.file}: ${u.why}), so it was never compared`);
+  }
   if (newest.file) {
     for (const a of report.artifacts) {
       if (NOT_COMPILED_HERE.has(a.label)) continue;
@@ -269,10 +390,21 @@ function inspect(repo, deps) {
     }
   }
 
-  report.ok = report.stale.length === 0;
+  // The label and the decision must never disagree: anything that refuses is
+  // unverified, whatever the revision comparison alone concluded.
+  if (report.refusals.length) {
+    report.identity = IDENTITY.UNVERIFIED;
+    report.revision.provable = false;
+  }
+  report.ok = report.refusals.length === 0 && report.stale.length === 0;
   if (!report.ok) {
-    report.reason = `the build does not match this checkout: ${report.stale.join('; ')}.`;
-    report.advice = REBUILD(repo);
+    if (report.refusals.length) {
+      report.reason = `the build's identity could not be established: ${report.refusals.join('; ')}.`;
+      report.advice = RECOVER(repo);
+    } else {
+      report.reason = `the build does not match this checkout: ${report.stale.join('; ')}.`;
+      report.advice = REBUILD(repo);
+    }
   }
   return report;
 }
@@ -289,16 +421,17 @@ function lines(report) {
     );
   }
   if (report.git && !report.git.error) {
-    out.push(`  commit  ${report.git.head}`);
+    out.push(`  commit  ${report.git.head}${report.git.dirty ? ' (working tree has uncommitted changes)' : ''}`);
     out.push(`          ${report.git.branch} · ${report.git.committed} · ${report.git.subject}`);
   }
   if (report.revision.built) out.push(`  renderer built from   ${report.revision.built}`);
   else if (report.revision.built_why) out.push(`  renderer built from   unknown (${report.revision.built_why})`);
   if (report.revision.checkout) out.push(`  this checkout is      ${report.revision.checkout}`);
-  if (report.revision.provable) {
-    out.push('  the renderer states the same revision this checkout reports, and the tree is clean');
-  } else if (report.revision.same_build_inputs) {
-    out.push('  a different commit, but identical in everything the build reads');
+  out.push(`  identity              ${report.identity.toUpperCase()}`);
+  if (report.identity === 'exact') {
+    out.push('    the renderer states this checkout\'s revision, the tree is clean, and nothing the build reads differs');
+  } else if (report.identity === 'equivalent') {
+    out.push('    a different but CLEAN commit, and nothing the build reads differs from the files on disk');
   }
   if (report.newest_input) {
     out.push(
@@ -306,8 +439,11 @@ function lines(report) {
     );
   }
   for (const w of report.warnings) out.push(`  NOTE    ${w}`);
-  for (const s of report.stale) out.push(`  STALE   ${s}`);
+  for (const r of report.refusals) out.push(`  REFUSED ${r}`);
+  for (const s2 of report.stale) out.push(`  STALE   ${s2}`);
+  out.push('  what this does not prove:');
+  for (const l of report.limits || []) out.push(`    · ${l}`);
   return out;
 }
 
-module.exports = { inspect, lines, revisionOf, gitState, newestInput, commitOf, ARTIFACTS, INPUTS, REBUILD };
+module.exports = { inspect, lines, revisionOf, gitState, newestInput, auditTree, commitOf, IDENTITY, LIMITS, ARTIFACTS, INPUTS, REBUILD, RECOVER };

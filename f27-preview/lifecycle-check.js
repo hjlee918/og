@@ -619,12 +619,11 @@ function integratedGeneratorChecks() {
 }
 
 // ---------------------------------------------------------------------------
-function buildIdentityChecks() {
-  console.log('Build identity (doubles)');
-
-  // A stand-in checkout: four artifacts, one source file, and a git that says
-  // whatever the case under test needs it to say.
-  const scene = (over = {}) => {
+// A stand-in checkout: four artifacts, one source file, and a git that says
+// whatever the case under test needs it to say. Shared by the verdict checks
+// and by the "a refused verdict launches nothing" checks below, so both drive
+// the REAL module rather than a description of it.
+function identityScene(over = {}) {
     const times = Object.assign(
       { renderer: 2000, electron: 2000, css: 2000, electronBin: 1000, source: 1000 },
       over.times
@@ -661,6 +660,7 @@ function buildIdentityChecks() {
       },
     };
     const git = (args) => {
+      if (over.gitDead) throw new Error('git: command not found');
       if (args[0] === 'rev-parse' && args[1] === 'HEAD') return 'abc1230000000000000000000000000000000000';
       if (args[0] === 'describe') return over.checkoutRevision === undefined ? 'abc123' : over.checkoutRevision;
       if (args[0] === 'rev-parse' && args[1] === '--verify') {
@@ -672,45 +672,140 @@ function buildIdentityChecks() {
         if (over.buildInputsDiffer) throw new Error('exit 1');
         return '';
       }
+      if (args[0] === 'ls-files') {
+        if (over.lsFilesFails) throw new Error('ls-files could not run');
+        return (args.includes('--ignored') ? over.ignored || [] : over.untracked || []).join('\n');
+      }
       if (args[0] === 'rev-parse') return 'a-branch';
       return 'a subject';
     };
     return identity.inspect('/r', { fs: fsDouble, git, inputs: ['src/main'] });
-  };
+}
 
+function buildIdentityChecks() {
+  console.log('Build identity — what may launch, and what is refused (doubles)');
+  const scene = identityScene;
+
+  // --- the three states the supervisor reproduced, which used to LAUNCH -----
   {
-    const r = scene();
+    const r = scene({ builtRevision: '' });
     check(
-      'a-build-whose-revision-matches-a-clean-checkout-is-accepted-and-provable',
-      r.ok === true && r.revision.matches === true && r.revision.provable === true && r.warnings.length === 0,
-      `ok=${r.ok}, built=${r.revision.built}, checkout=${r.revision.checkout}, provable=${r.revision.provable}`
+      'a-renderer-that-states-no-revision-is-refused-not-warned-about',
+      r.ok === false && r.identity === 'unverified' && /cannot be named/.test(r.reason) && /git stash/.test(r.advice),
+      `ok=${r.ok}, identity=${r.identity}; ${JSON.stringify(r.refusals)}`
     );
   }
   {
-    const r = scene({ builtRevision: 'old999', buildInputsDiffer: true });
+    const r = scene({ builtRevision: 'abc123-dirty', checkoutRevision: 'abc123-dirty' });
     check(
-      'a-renderer-built-from-a-commit-whose-sources-differ-is-refused-by-name',
-      r.ok === false && /old999/.test(r.reason) && /abc123/.test(r.reason) && /gulp:build/.test(r.advice),
-      `ok=${r.ok}; reason = ${JSON.stringify(r.reason)}`
+      'a-renderer-built-from-an-uncommitted-tree-is-refused-even-when-the-strings-match',
+      r.ok === false && r.identity === 'unverified' && /UNCOMMITTED/.test(r.reason),
+      `ok=${r.ok}, identity=${r.identity}; ${JSON.stringify(r.refusals)}`
+    );
+  }
+  {
+    const r = scene({ gitDead: true });
+    check(
+      'a-checkout-whose-revision-cannot-be-read-is-refused',
+      r.ok === false && r.identity === 'unverified' && /nothing to identify the build against/.test(r.reason),
+      `ok=${r.ok}, identity=${r.identity}; ${JSON.stringify(r.refusals)}`
+    );
+  }
+
+  // --- the dirty suffix is never stripped and then treated as proof ---------
+  {
+    // The build was dirty at a commit whose COMMITTED tree matches perfectly.
+    // The old gate stripped `-dirty`, compared the commits, and passed.
+    const r = scene({ builtRevision: 'abc123-dirty', checkoutRevision: 'abc123' });
+    check(
+      'a-dirty-built-revision-is-not-rescued-by-comparing-its-commit',
+      r.ok === false && r.identity === 'unverified' && /never recorded/.test(r.reason),
+      `ok=${r.ok}; ${JSON.stringify(r.refusals)}`
+    );
+  }
+
+  // --- what a git comparison cannot see ------------------------------------
+  {
+    const r = scene({ untracked: ['src/main/frontend/sneaky.cljs'] });
+    check(
+      'an-untracked-file-under-the-build-inputs-is-refused-because-no-diff-can-see-it',
+      r.ok === false && r.identity === 'unverified' && /sneaky\.cljs/.test(r.reason),
+      `ok=${r.ok}; ${JSON.stringify(r.refusals)}`
+    );
+  }
+  {
+    const r = scene({ lsFilesFails: true });
+    check(
+      'an-audit-that-could-not-run-is-refused-rather-than-assumed-empty',
+      r.ok === false && r.identity === 'unverified' && /untracked files/.test(r.reason),
+      `ok=${r.ok}; ${JSON.stringify(r.refusals)}`
+    );
+  }
+  {
+    // A GENERATED file that git ignores cannot be compared by content. This
+    // repository really has one, so it is named as a limit rather than refused.
+    const r = scene({ ignored: ['src/main/frontend/tldraw-logseq.js'] });
+    check(
+      'a-generated-ignored-build-input-is-named-as-a-limit-rather-than-refused',
+      r.ok === true && r.warnings.some((w) => /ignored by git and cannot be compared/.test(w)),
+      `ok=${r.ok}; ${JSON.stringify(r.warnings)}`
+    );
+  }
+  {
+    const r = scene({ missing: ['/r/src/main'] });
+    check(
+      'a-declared-build-input-that-cannot-be-read-is-refused-rather-than-skipped',
+      r.ok === false && r.identity === 'unverified' && /never compared/.test(r.reason),
+      `ok=${r.ok}; ${JSON.stringify(r.refusals)}`
+    );
+  }
+
+  // --- what may launch ------------------------------------------------------
+  {
+    const r = scene();
+    check(
+      'an-exact-identity-launches',
+      r.ok === true && r.identity === 'exact' && r.revision.provable === true && r.refusals.length === 0,
+      `identity=${r.identity}, built=${r.revision.built}, checkout=${r.revision.checkout}`
     );
   }
   {
     // The tooling in this repository sits beside the application, so a commit
-    // that touched only the tooling must not be reported as a stale build.
+    // that touched only the tooling is comparable and allowed — but only
+    // because the BUILT revision is clean and the comparison reads the files
+    // on disk.
     const r = scene({ builtRevision: 'old999' });
     check(
-      'a-commit-that-changed-nothing-the-build-reads-is-accepted-and-said-so',
-      r.ok === true && r.revision.same_build_inputs === true &&
+      'a-clean-commit-that-changed-nothing-the-build-reads-is-equivalent-and-launches',
+      r.ok === true && r.identity === 'equivalent' &&
         r.warnings.some((w) => /nothing the build reads differs/.test(w)),
-      `ok=${r.ok}; ${JSON.stringify(r.warnings)}`
+      `identity=${r.identity}; ${JSON.stringify(r.warnings)}`
+    );
+  }
+  {
+    // A dirty WORKING TREE is no longer refused on sight: the comparison reads
+    // the working tree, so dirt outside the build's own inputs is answered.
+    const r = scene({ builtRevision: 'old999', checkoutRevision: 'abc123-dirty' });
+    check(
+      'uncommitted-changes-outside-the-build-inputs-are-proved-harmless-rather-than-assumed',
+      r.ok === true && r.identity === 'equivalent' && r.git.dirty === true,
+      `identity=${r.identity}, tree dirty=${r.git.dirty}`
+    );
+  }
+  {
+    const r = scene({ builtRevision: 'old999', checkoutRevision: 'abc123-dirty', buildInputsDiffer: true });
+    check(
+      'uncommitted-changes-INSIDE-the-build-inputs-are-refused',
+      r.ok === false && /differs between/.test(r.reason) && /uncommitted changes/.test(r.stale[0]),
+      `ok=${r.ok}; ${JSON.stringify(r.stale)}`
     );
   }
   {
     const r = scene({ builtRevision: 'notinthisrepo', unknownCommit: true });
     check(
       'a-renderer-built-from-a-commit-this-checkout-does-not-have-is-refused',
-      r.ok === false && r.revision.same_build_inputs === false && /notinthisrepo/.test(r.reason),
-      `ok=${r.ok}; reason = ${JSON.stringify(r.reason)}`
+      r.ok === false && r.identity === 'unverified' && /not a commit in this checkout/.test(r.reason),
+      `ok=${r.ok}; ${JSON.stringify(r.refusals)}`
     );
   }
   {
@@ -729,31 +824,92 @@ function buildIdentityChecks() {
       `missing = ${JSON.stringify(r.missing)}; the checkout was not consulted = ${r.git === null}`
     );
   }
+
+  // --- the claim is never larger than the evidence -------------------------
   {
-    const r = scene({ builtRevision: 'abc123-dirty', checkoutRevision: 'abc123-dirty' });
+    const r = scene();
     check(
-      'a-dirty-tree-is-reported-as-unprovable-rather-than-accepted-quietly',
-      r.ok === true && r.revision.matches === true && r.revision.provable === false &&
-        r.warnings.some((w) => /cannot be proved/.test(w)),
-      `provable=${r.revision.provable}; warnings = ${JSON.stringify(r.warnings)}`
-    );
-  }
-  {
-    const r = scene({ builtRevision: '' });
-    check(
-      'a-renderer-that-states-no-revision-is-reported-not-guessed-at',
-      r.revision.matches === null && r.warnings.some((w) => /no build revision/.test(w)),
-      `warnings = ${JSON.stringify(r.warnings)}`
+      'a-passing-report-states-what-it-does-not-prove',
+      Array.isArray(r.limits) && r.limits.length >= 4 &&
+        r.limits.some((l) => /not the bytes it emitted/.test(l)) &&
+        r.limits.some((l) => /freshness heuristic/.test(l)) &&
+        identity.lines(r).some((l) => /what this does not prove/.test(l)),
+      `${r.limits.length} stated limit(s), printed with the report`
     );
   }
 
-  // And the real checkout's revision is read from where it actually is.
   {
     const real = identity.revisionOf(path.join(preview.REPO, 'static/js/main.js'));
     check(
       'the-real-renderers-revision-is-readable-from-the-head-of-the-bundle',
       typeof real.revision === 'string' && real.revision.length > 0,
       `frontend.config.REVISION = ${JSON.stringify(real.revision)}${real.why ? ' — ' + real.why : ''}`
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The point of all of the above: a refused verdict must produce ZERO launches.
+// These drive the REAL identity module through the REAL launcher, and count
+// how many times the guarded launch path was entered.
+// ---------------------------------------------------------------------------
+async function refusalLaunchesNothingChecks() {
+  console.log('A refused build identity launches nothing');
+
+  const run = async (over) => {
+    let launches = 0;
+    const app = fakeApp();
+    const { deps, logs } = baseDeps({
+      app,
+      // `selfCheck` only so a run that IS allowed to launch finishes by itself
+      // instead of waiting out the session; it does not affect the gate, which
+      // runs before either path.
+      selfCheck: true,
+      writeResult: false,
+      // The REAL gate, driven by the REAL identity module over doubles. The
+      // other lifecycle checks stub `checkBuild` out; these must not.
+      checkBuild: preview.DEFAULTS.checkBuild,
+      inspectBuild: () => identityScene(over),
+      launch: async (profile, opts) => {
+        launches++;
+        if (opts && typeof opts.onApp === 'function') opts.onApp(app);
+        await tick();
+        return { app, page: {}, profileDir: '/double/profile' };
+      },
+    });
+    const out = await preview.runPreview(deps);
+    return { out, launches, logs, app };
+  };
+
+  const refused = [
+    ['no revision in the renderer', { builtRevision: '' }],
+    ['a renderer built from an uncommitted tree', { builtRevision: 'abc123-dirty', checkoutRevision: 'abc123-dirty' }],
+    ['git unavailable', { gitDead: true }],
+    ['an untracked file under the build inputs', { untracked: ['src/main/x.cljs'] }],
+    ['a commit this checkout does not have', { builtRevision: 'nope', unknownCommit: true }],
+    ['a declared build input that cannot be read', { missing: ['/r/src/main'] }],
+    ['build inputs that differ from the build', { builtRevision: 'old999', buildInputsDiffer: true }],
+  ];
+  for (const [name, over] of refused) {
+    const { out, launches, logs } = await run(over);
+    check(
+      'refused-launches-nothing: ' + name,
+      launches === 0 && out.exit_code === 1 && out.ready === false && out.close_attempted === false &&
+        said(logs, /PREVIEW STOPPED/) && said(logs, /nothing had been launched/),
+      `guarded launches = ${launches}, exit = ${out.exit_code}, ready = ${out.ready}, ` +
+        `anything to close = ${out.close_attempted}`
+    );
+  }
+
+  // And the converse, so the gate is not simply refusing everything.
+  for (const [name, over] of [['exact', {}], ['equivalent', { builtRevision: 'old999' }]]) {
+    const { out, launches } = await run(over);
+    check(
+      'an-established-identity-does-launch: ' + name,
+      launches === 1 && out.ready === true && out.exit_code === 0 && out.build.identity === name &&
+        out.closed_gracefully === true,
+      `guarded launches = ${launches}, identity = ${out.build && out.build.identity}, exit = ${out.exit_code}, ` +
+        `closed = ${out.closed_gracefully}`
     );
   }
 }
@@ -792,6 +948,7 @@ function demoSelectionChecks() {
   generatorChecks();
   integratedGeneratorChecks();
   buildIdentityChecks();
+  await refusalLaunchesNothingChecks();
   demoSelectionChecks();
   await lifecycleChecks();
   console.log('-'.repeat(72));

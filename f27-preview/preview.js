@@ -299,8 +299,14 @@ function createLifecycle(deps) {
 // when it cannot give one. See build-identity.js for how each fact is read.
 function checkBuild(deps) {
   const log = deps.log;
-  const report = buildIdentity.inspect(REPO);
+  // `deps.inspectBuild` exists so the refusal can be tested against the REAL
+  // module with filesystem/Git doubles, and so a test can prove that a refused
+  // identity produces ZERO launches rather than a warning.
+  const report = (deps.inspectBuild || buildIdentity.inspect)(REPO);
   for (const l of buildIdentity.lines(report)) log(l);
+  // Refuses on BOTH kinds of answer: a build that contradicts this checkout,
+  // and a build whose identity could not be established at all. "Not
+  // contradicted" was never an answer, and used to launch.
   if (!report.ok) throw new PreviewError(report.reason, report.advice);
   return report;
 }
@@ -531,6 +537,7 @@ const DEFAULTS = {
   walkthrough: null,
   digest,
   checkBuild,
+  inspectBuild: null,
   ensureGraph,
   freshProfile,
   sleep,
@@ -653,8 +660,14 @@ async function runPreview(overrides) {
     log('    command does not start, stop or change it.');
     log(`  * the graph name in the app is "${path.basename(graph)}";`);
     if (out.build && out.build.revision && out.build.revision.built) {
-      log(`  * it is running the code compiled from ${out.build.revision.built}` +
-          `${out.build.revision.provable ? ', which is this checkout' : ''}.`);
+      log(
+        `  * it is running the code compiled from ${out.build.revision.built}` +
+          (out.build.identity === 'exact'
+            ? ', which is this checkout.'
+            : out.build.identity === 'equivalent'
+              ? ', and nothing this build reads differs from the files on disk.'
+              : '.')
+      );
     }
     log('  * a small orange "F27 PREVIEW" marker sits in the bottom-right corner.');
     log('');
