@@ -18,6 +18,11 @@ module.exports = Object.freeze({
   ACTIVE_MARKER: 'LOGSEQ-OG-F27-PILOT-GUARDS-ACTIVE-1',
   INERT_MARKER: 'LOGSEQ-OG-F27-PILOT-GUARDS-INERT-1',
 
+  // The pilot's own state root, nested inside the Electron product directory
+  // because Chromium's crash handler creates that product directory before the
+  // entry script runs. See pilot-isolation.js.
+  STATE_DIR: 'pilot-state',
+
   MANIFEST_FILE: 'pilot-build-manifest.json',
   MAIN_BUNDLE: 'electron.js',
   OWNERSHIP_MARKER: 'PILOT-OWNED.json',

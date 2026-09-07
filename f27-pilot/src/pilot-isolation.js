@@ -101,7 +101,50 @@ function establish(opts) {
   } catch (e) {
     throw new Refusal('appdata-unresolvable', `${appDataRaw}: ${e.code || e.message}`);
   }
-  const ROOT = path.join(appDataReal, ID.PRODUCT_NAME);
+
+  // WHY THE ROOT IS A LEVEL DEEPER THAN THE PRODUCT DIRECTORY.
+  //
+  // Chromium's crash handler starts before the main script runs, and it creates
+  // `<appData>/<productName>/Crashpad` on its own. So `<appData>/<productName>`
+  // is ALREADY THERE on a genuinely first launch, and a rule of "an existing
+  // directory without our marker is unknown" would refuse every first start --
+  // which is exactly what it did when this was first measured.
+  //
+  // The answer is not to relax the ownership rule for a directory that happens
+  // to look empty. It is to own a directory that nothing else creates:
+  //
+  //   <appData>/Logseq OG F27 Pilot/            product dir, Electron may create
+  //     Crashpad/                               Electron's, before we run
+  //     pilot-state/                            ROOT -- created only by us
+  //
+  // Everything the pilot writes still lives under one pilot-named top-level
+  // directory, so rollback still moves exactly one directory, and the ownership
+  // rule at ROOT stays strict with no exception carved into it.
+  const productDir = path.join(appDataReal, ID.PRODUCT_NAME);
+  let productStat = null;
+  try {
+    productStat = fs.lstatSync(productDir);
+  } catch (e) {
+    if (e.code !== 'ENOENT') {
+      throw new Refusal('product-dir-unstattable', `${productDir}: ${e.code || e.message}`);
+    }
+  }
+  if (productStat && productStat.isSymbolicLink()) {
+    throw new Refusal('product-dir-is-symlink', `${productDir} is a symbolic link`);
+  }
+  if (productStat && !productStat.isDirectory()) {
+    throw new Refusal('product-dir-not-a-directory', `${productDir} is not a directory`);
+  }
+  if (!productStat) {
+    try {
+      fs.mkdirSync(productDir, { recursive: false });
+    } catch (e) {
+      throw new Refusal('product-dir-uncreatable', `${productDir}: ${e.code || e.message}`);
+    }
+  }
+
+  const ROOT = path.join(productDir, ID.STATE_DIR);
+  step('product-dir', `${productDir} (${productStat ? 'pre-existing' : 'created'})`);
   step('root-resolved', ROOT);
 
   // ---- 3. ownership: claim only what is genuinely new --------------------
@@ -178,8 +221,12 @@ function establish(opts) {
     throw new Refusal('root-not-canonical',
       `${ROOT} resolves to ${rootReal}; refusing a relocated root`);
   }
-  if (!(rootReal === appDataReal || rootReal.startsWith(appDataReal + path.sep))) {
-    throw new Refusal('root-outside-appdata', `${rootReal} is not inside ${appDataReal}`);
+  const productReal = fs.realpathSync(productDir);
+  if (!rootReal.startsWith(productReal + path.sep)) {
+    throw new Refusal('root-outside-product-dir', `${rootReal} is not inside ${productReal}`);
+  }
+  if (!productReal.startsWith(appDataReal + path.sep)) {
+    throw new Refusal('root-outside-appdata', `${productReal} is not inside ${appDataReal}`);
   }
   step('root-canonical', rootReal);
 
@@ -320,6 +367,7 @@ function establish(opts) {
     pilotBuildId: opts.pilotBuildId || null,
     at: new Date().toISOString(),
     root: rootReal,
+    productDir: productReal,
     ownership,
     realOsIdentity: {
       osUserInfoHome: preOverride.osUserInfoHome,

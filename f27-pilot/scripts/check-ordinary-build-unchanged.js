@@ -30,7 +30,18 @@ const A_OUT = path.join(REPO, 'tmp', 'ordinary-from-pilot-branch.js');
 const B_OUT = path.join(REPO, 'tmp', 'ordinary-from-accepted.js');
 
 const git = (...a) => execFileSync('git', a, { cwd: REPO, encoding: 'utf8' }).trim();
-const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+
+// The two builds must be written to different files, so their trailing
+// `//# sourceMappingURL=` comment necessarily names a different file. That one
+// line -- and nothing else -- is normalised away before comparing. The raw
+// hashes are printed too, so the normalisation is visible rather than implied.
+const SOURCE_MAP_COMMENT = /^\/\/# sourceMappingURL=.*$/m;
+function normalised(p) {
+  const text = fs.readFileSync(p, 'utf8');
+  const stripped = text.replace(SOURCE_MAP_COMMENT, '//# sourceMappingURL=<normalised>');
+  return { raw: text, stripped, lines: text.split('\n').length };
+}
+const hash = (t) => crypto.createHash('sha256').update(t).digest('hex');
 
 function buildTo(outAbs) {
   fs.mkdirSync(path.dirname(outAbs), { recursive: true });
@@ -52,7 +63,6 @@ function main() {
 
   console.log('[ordinary-build] A: building from ' + git('rev-parse', '--short', 'HEAD'));
   buildTo(A_OUT);
-  const a = sha256(A_OUT);
 
   let restored = false;
   try {
@@ -71,19 +81,34 @@ function main() {
     process.exit(2);
   }
 
-  const b = sha256(B_OUT);
-  console.log('  from pilot branch : ' + a);
-  console.log('  from accepted     : ' + b);
+  const A = normalised(A_OUT);
+  const B = normalised(B_OUT);
 
-  if (a !== b) {
-    console.error('\n[ordinary-build] DIFFERENT: the pilot source change alters ordinary builds.\n');
+  console.log('  from pilot branch : raw ' + hash(A.raw));
+  console.log('  from accepted     : raw ' + hash(B.raw));
+  console.log('  normalised        : ' + hash(A.stripped) + ' / ' + hash(B.stripped));
+
+  if (A.stripped !== B.stripped) {
+    // Report exactly where, rather than only that they differ.
+    const al = A.stripped.split('\n'), bl = B.stripped.split('\n');
+    const diffs = [];
+    for (let i = 0; i < Math.max(al.length, bl.length) && diffs.length < 5; i++) {
+      if (al[i] !== bl[i]) diffs.push(`line ${i + 1}`);
+    }
+    console.error('\n[ordinary-build] DIFFERENT: the pilot source change alters ordinary ' +
+                  'builds (' + diffs.join(', ') + ').\n');
     process.exit(1);
   }
-  console.log('\n[ordinary-build] IDENTICAL: an ordinary build is byte-for-byte unchanged ' +
-              'by the pilot source edits.\n');
+
+  console.log('\n[ordinary-build] IDENTICAL: apart from the sourceMappingURL comment naming ' +
+              'each output file, an ordinary build of the pilot branch is byte-for-byte the ' +
+              'same program as one built from the accepted sources.\n');
   fs.writeFileSync(path.join(REPO, 'tmp', 'ordinary-build-equivalence.json'),
     JSON.stringify({ acceptedCommit: ACCEPTED, pilotCommit: git('rev-parse', 'HEAD'),
-                     sha256: a, identical: true, at: new Date().toISOString() }, null, 2) + '\n');
+                     normalisedSha256: hash(A.stripped),
+                     rawSha256: { pilotBranch: hash(A.raw), accepted: hash(B.raw) },
+                     normalisation: 'the trailing //# sourceMappingURL= comment only',
+                     identical: true, at: new Date().toISOString() }, null, 2) + '\n');
 }
 
 main();

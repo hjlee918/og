@@ -46,7 +46,9 @@ function scratch() {
   const home = path.join(dir, 'home');
   fs.mkdirSync(appData);
   fs.mkdirSync(home);
-  return { dir, appData, home, root: path.join(appData, ID.PRODUCT_NAME) };
+  return { dir, appData, home,
+           productDir: path.join(appData, ID.PRODUCT_NAME),
+           root: path.join(appData, ID.PRODUCT_NAME, ID.STATE_DIR) };
 }
 
 function establish(s, opts = {}) {
@@ -123,7 +125,7 @@ test('adopts a root it previously created, without rewriting the marker', () => 
 
 test('refuses an unknown existing directory and writes nothing into it', () => {
   const s = scratch();
-  fs.mkdirSync(s.root);
+  fs.mkdirSync(s.root, { recursive: true });
   fs.writeFileSync(path.join(s.root, 'someone-elses-data.txt'), 'do not touch\n');
   refuses(s, 'unknown-existing-directory');
   assert.deepStrictEqual(fs.readdirSync(s.root), ['someone-elses-data.txt'],
@@ -132,7 +134,7 @@ test('refuses an unknown existing directory and writes nothing into it', () => {
 
 test('refuses an ownership marker belonging to something else', () => {
   const s = scratch();
-  fs.mkdirSync(s.root);
+  fs.mkdirSync(s.root, { recursive: true });
   fs.writeFileSync(path.join(s.root, ID.OWNERSHIP_MARKER), JSON.stringify({
     schema: ID.SCHEMA, productName: 'Logseq OG', bundleId: 'com.logseq.logseq-og',
   }));
@@ -142,7 +144,7 @@ test('refuses an ownership marker belonging to something else', () => {
 
 test('refuses a malformed ownership marker', () => {
   const s = scratch();
-  fs.mkdirSync(s.root);
+  fs.mkdirSync(s.root, { recursive: true });
   fs.writeFileSync(path.join(s.root, ID.OWNERSHIP_MARKER), 'not json at all');
   refuses(s, 'ownership-marker-unparseable');
 });
@@ -151,6 +153,7 @@ test('refuses a symlinked pilot root', () => {
   const s = scratch();
   const elsewhere = path.join(s.dir, 'elsewhere');
   fs.mkdirSync(elsewhere);
+  fs.mkdirSync(s.productDir);
   fs.symlinkSync(elsewhere, s.root);
   refuses(s, 'root-is-symlink');
   assert.deepStrictEqual(fs.readdirSync(elsewhere), [],
@@ -159,6 +162,7 @@ test('refuses a symlinked pilot root', () => {
 
 test('refuses when the root exists as a file', () => {
   const s = scratch();
+  fs.mkdirSync(s.productDir);
   fs.writeFileSync(s.root, 'not a directory');
   refuses(s, 'root-not-a-directory');
 });
@@ -214,4 +218,27 @@ test('the audit covers every documented Electron path name', () => {
   // paths the pilot deliberately does not relocate are reported, not hidden
   assert.strictEqual(rep.audit.documents.overridden, false);
   assert.strictEqual(rep.audit.downloads.overridden, false);
+});
+
+test('a product directory pre-created by Chromium does not block a first start', () => {
+  // Chromium's crash handler creates <appData>/<productName>/Crashpad before
+  // the entry script runs. That must not be mistaken for someone else's data,
+  // and it must not be claimed either: the owned root is a level deeper.
+  const s = scratch();
+  fs.mkdirSync(path.join(s.productDir, 'Crashpad'), { recursive: true });
+  const out = establish(s);
+  assert.strictEqual(out.report.ownership.state, 'created');
+  assert.strictEqual(out.root, s.root);
+  assert.ok(fs.existsSync(path.join(s.productDir, 'Crashpad')),
+    'the pre-existing Crashpad directory was disturbed');
+  assert.ok(!fs.existsSync(path.join(s.productDir, ID.OWNERSHIP_MARKER)),
+    'an ownership marker was written into the product directory');
+});
+
+test('refuses a symlinked product directory', () => {
+  const s = scratch();
+  const elsewhere = path.join(s.dir, 'elsewhere2');
+  fs.mkdirSync(elsewhere);
+  fs.symlinkSync(elsewhere, s.productDir);
+  refuses(s, 'product-dir-is-symlink');
 });
