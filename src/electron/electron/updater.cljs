@@ -1,6 +1,7 @@
 (ns electron.updater
   (:require [electron.utils :refer [mac? win32? prod? open fetch *win]]
             [electron.logger :as logger]
+            [electron.pilot :as pilot]
             [frontend.version :refer [version]]
             [clojure.string :as string]
             [promesa.core :as p]
@@ -138,7 +139,24 @@
 
           (debug "Skip remote version [ahead of pre-release]" remote-version))))))
 
-(defn init-updater
+(defn- init-pilot-refusing-updater
+  "G3 (pilot only). The automatic updater is never initialised, and BOTH manual
+   IPC channels are registered with handlers that refuse instead of the real
+   listeners. The channels still exist, so a renderer that invokes them gets a
+   stated refusal rather than a hang. Nothing here contacts a remote endpoint."
+  []
+  (pilot/record! :updater-auto "skipped init-auto-updater")
+  (let [check-channel   "check-for-updates"
+        install-channel "install-updates"]
+    (.handle ipcMain check-channel
+             (fn [_e & _args] (pilot/refuse-js :updater-check check-channel)))
+    (.handle ipcMain install-channel
+             (fn [_e & _args] (pilot/refuse-js :updater-install install-channel)))
+    #(do
+       (.removeHandler ipcMain install-channel)
+       (.removeHandler ipcMain check-channel))))
+
+(defn- init-ordinary-updater
   [{:keys [repo ^js _win] :as opts}]
   (and prod? (not= false (cfgs/get-item :auto-update)) (init-auto-updater repo))
   (let [check-channel "check-for-updates"
@@ -159,3 +177,9 @@
        (.removeHandler ipcMain install-channel)
        (.removeHandler ipcMain check-channel)
        (reset! *update-pending nil))))
+
+(defn init-updater
+  [{:keys [repo ^js _win] :as opts}]
+  (if pilot/PILOT
+    (init-pilot-refusing-updater)
+    (init-ordinary-updater opts)))

@@ -7,6 +7,7 @@
              :as utils]
             [electron.url :refer [logseq-url-handler]]
             [electron.logger :as logger]
+            [electron.pilot :as pilot]
             [electron.server :as server]
             [clojure.string :as string]
             [promesa.core :as p]
@@ -60,7 +61,13 @@
       (logseq-url-handler win parsed-url))))
 
 (defn setup-interceptor! [^js app]
-  (.setAsDefaultProtocolClient app LSP_SCHEME)
+  ;; G1 (pilot only): never claim the OS handler for the upstream scheme, so the
+  ;; pilot cannot take `logseq-og:` links away from the installed application.
+  ;; The internal file protocols registered below are unaffected.
+  (if pilot/PILOT
+    (pilot/record! :os-protocol-client
+                   (str "skipped setAsDefaultProtocolClient " LSP_SCHEME))
+    (.setAsDefaultProtocolClient app LSP_SCHEME))
 
   (.registerFileProtocol
    protocol FILE_ASSETS_SCHEME
@@ -261,7 +268,11 @@
                                           :supportFetchAPI false}}]))
 
       (set-app-menu!)
-      (setup-deeplink!)
+      ;; G2 (pilot only): do not construct Deeplink at all, so electron-deeplink
+      ;; never initialises and never writes a `com.deeplink.*` preference.
+      (if pilot/PILOT
+        (pilot/record! :deeplink "skipped Deeplink construction")
+        (setup-deeplink!))
 
       (.on app "second-instance"
            (fn [_event _commandLine _workingDirectory]

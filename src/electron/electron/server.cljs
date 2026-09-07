@@ -10,6 +10,7 @@
             [electron.utils :as utils]
             [camel-snake-kebab.core :as csk]
             [electron.logger :as logger]
+            [electron.pilot :as pilot]
             [electron.configs :as cfgs]
             [electron.window :as window]))
 
@@ -160,12 +161,21 @@
 
 (defn do-server!
   [action]
-  (case (keyword action)
-    :start (when (contains? #{nil :closed :error} (:status @*state))
-             (start!))
-    :stop (close!)
-    :restart (start!)
-    :else :dune))
+  (let [action (keyword action)]
+    ;; G4 (pilot only): the HTTP API server never starts. `:stop` and status
+    ;; reporting keep working, so the renderer's indicator still reflects real
+    ;; state. The renderer fires `:server/do :restart` about two seconds after
+    ;; mount whenever `[:electron/server :autostart]` is truthy, so refusing in
+    ;; the main process is what actually prevents a listening socket -- not a
+    ;; configuration value that might read as nil.
+    (if (and pilot/PILOT (contains? #{:start :restart} action))
+      (pilot/refuse-js :api-server (name action))
+      (case action
+        :start (when (contains? #{nil :closed :error} (:status @*state))
+                 (start!))
+        :stop (close!)
+        :restart (start!)
+        :else :dune))))
 
 (defn setup!
   [^js win]
