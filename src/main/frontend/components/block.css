@@ -1272,6 +1272,8 @@ html.is-mac {
   -webkit-box-decoration-break: clone;
 }
 
+/* Chrome, not preview text: the mark and the truncation notice sit OUTSIDE
+   `.f27-body-ref-text`, which is what the character budget governs. */
 .f27-body-ref-mark {
   color: var(--ls-secondary-text-color);
   margin-right: 0.2rem;
@@ -1305,6 +1307,13 @@ html.is-mac {
 .f27-body-ref-cut {
   color: var(--ls-secondary-text-color);
   font-style: italic;
+}
+
+/* A preview whose opening content could not be shortened without damaging its
+   markup falls back to the target's compact label. It is a name, not a quote,
+   so it does not borrow the quoted-text styling. */
+.f27-body-ref-fallback {
+  color: var(--ls-secondary-text-color);
 }
 
 /* The source control on a chip: small, but a real button with a real focus

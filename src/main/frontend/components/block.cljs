@@ -2635,11 +2635,15 @@
 
   A referring block's raw text is largely `((uuid))` by definition, so inline
   reference markup is first reduced to what a person reads, then block-level
-  prefixes are split off, and only then is it truncated on grapheme boundaries."
-  [entity]
-  (let [content (f27-display-content (:block/format entity) (:block/content entity))
-        {:keys [text]} (f27ctx/split-block-prefix (f27in/plain-label content))]
-    (f27b/compact-label text)))
+  prefixes are split off, and only then is it truncated on grapheme boundaries.
+
+  The cap is explicit so the same label can serve as a preview's fallback
+  without exceeding what that preview was allowed to spend."
+  ([entity] (f27-ref-label entity f27b/max-label-chars))
+  ([entity max-len]
+   (let [content (f27-display-content (:block/format entity) (:block/content entity))
+         {:keys [text]} (f27ctx/split-block-prefix (f27in/plain-label content))]
+     (f27b/compact-label text max-len))))
 
 (defn- f27-ref-source-button
   "The source control carried by every chip that HAS a source.
@@ -2709,16 +2713,25 @@
         ;; on every chip. `↗` is the SOURCE CONTROL and nothing else, which
         ;; keeps it distinct from the `↗` a compact label already uses to say
         ;; "a reference is written here".
-        chip (fn [kind mark body title source?]
+        ;;
+        ;; `.f27-body-ref-text` holds the PREVIEW TEXT and nothing else. The
+        ;; mark, the structure badges, the `…` that says a preview was cut and
+        ;; the source control are fixed chrome: constant in size, and what makes
+        ;; a bound honest rather than silent. They sit outside that span so the
+        ;; distinction is in the markup and not merely in a docstring — the
+        ;; budget governs exactly what is inside it.
+        chip (fn [kind mark badges body cut? title source?]
                [:span.f27-body-ref {:class kind :title title}
                 (when mark [:span.f27-body-ref-mark {:aria-hidden "true"} mark])
+                badges
                 [:span.f27-body-ref-text body]
+                (when cut? [:span.f27-body-ref-cut {:aria-hidden "true"} "…"])
                 (when source? (f27-ref-source-button id text-label))])]
     (case outcome
       ;; Nothing resolved. The author's own label, if they wrote one, is still
       ;; their text and is kept; the identifier never becomes the label.
       :unresolved
-      (chip "is-unresolved" "⚠"
+      (chip "is-unresolved" "⚠" nil
             (if labelled?
               ;; The author's own words are kept, rendered with THIS renderer
               ;; still installed. Dropping the hook here would have let a
@@ -2726,51 +2739,68 @@
               ;; the very hole this contract closes.
               (vec (map-inline config label))
               [:span.f27-body-ref-missing (t :f27/body-ref-unavailable)])
+            false
             (t :f27/body-ref-unavailable)
             false)
 
       ;; The author wrote what this reference means. Show that, not a preview of
       ;; the target, and charge it nothing.
       :label
-      (chip "is-label" nil
+      (chip "is-label" nil nil
             (vec (map-inline config label))
+            false
             (t :f27/body-ref-preview)
             true)
 
       ;; Already being rendered above this point — a cycle, or the same block
       ;; twice. This is the case that used to fill the panel.
       :repeat
-      (chip "is-repeat" "↻" named (t :f27/children-cycle) true)
+      (chip "is-repeat" "↻" nil named false (t :f27/children-cycle) true)
 
       ;; Below the one preview level this contract expands.
       :depth
-      (chip "is-closed" "⋯" named (t :f27/body-ref-depth) true)
+      (chip "is-closed" "⋯" nil named false (t :f27/body-ref-depth) true)
 
       ;; This body has shown as many previews as it may.
       :budget
       (do (when *budget (vswap! *budget f27b/withhold))
-          (chip "is-closed" "⋯" named
+          (chip "is-closed" "⋯" nil named false
                 (t :f27/body-ref-budget f27b/max-expansions) true))
 
       ;; One bounded preview of the target's own text, rendered through the same
       ;; parser and renderer — with this same function still installed, so a
       ;; reference INSIDE the preview is named, never followed.
       (let [{:keys [heading marker text]} (f27ctx/split-block-prefix content)
+            allowance (f27b/preview-allowance budget)
             ast (gp-mldoc/inline->edn (or text "") (gp-mldoc/default-config format))
-            {:keys [nodes used truncated?]} (f27b/take-nodes ast (f27b/preview-allowance budget))
+            {:keys [nodes used truncated?]} (f27b/take-nodes ast allowance)
             inner (assoc config
                          :f27/ref-level (inc level)
                          :f27/ref-trail (f27b/push-trail trail k))
+            ;; Nothing of the target's text could be shortened to fit — an
+            ;; opening node that is atomic and larger than the allowance. The
+            ;; answer is a compact label capped by that same allowance, with the
+            ;; source control beside it. It is NOT to emit the node anyway:
+            ;; doing that is how a formatted target escaped this bound.
+            ;; The compact label carries its own ellipsis; the chip supplies
+            ;; the one truncation mark, so a fallback never reads "……".
+            fallback (when (and (empty? nodes) (not (string/blank? text)))
+                       (or (some-> (f27-ref-label entity (min f27b/max-label-chars allowance))
+                                   (string/replace #"…+$" ""))
+                           (t :f27/body-ref-untitled)))
             ;; Forced, not lazy: the budget must be spent in the order the
             ;; reader sees, and read back correctly after the body is built.
-            body (vec (map-inline inner nodes))]
-        (when *budget (vswap! *budget f27b/spend used truncated?))
+            body (if fallback
+                   [:span.f27-body-ref-fallback fallback]
+                   (vec (map-inline inner nodes)))
+            spent (if fallback (f27b/text-size fallback) used)]
+        (when *budget (vswap! *budget f27b/spend spent (or truncated? (some? fallback))))
         (chip "is-preview" nil
               [:<>
                (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
-               (when marker [:span.f27-ctx-badge.is-task marker])
-               body
-               (when truncated? [:span.f27-body-ref-cut "…"])]
+               (when marker [:span.f27-ctx-badge.is-task marker])]
+              body
+              (boolean (or truncated? fallback))
               (t :f27/body-ref-preview)
               true)))))
 
