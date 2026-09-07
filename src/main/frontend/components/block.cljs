@@ -23,6 +23,7 @@
             [frontend.date :as date]
             [frontend.db :as db]
             [frontend.db.model :as model]
+            [frontend.db.f27-page :as f27p]
             [frontend.db-mixins :as db-mixins]
             [frontend.extensions.highlight :as highlight]
             [frontend.extensions.latex :as latex]
@@ -67,6 +68,7 @@
             [frontend.util.f27-inbound :as f27in]
             [frontend.util.f27-inert :as f27i]
             [frontend.util.f27-embed :as f27e]
+            [frontend.util.f27-page-embed :as f27pe]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -3110,38 +3112,47 @@
 
   The block's CHILDREN are not read. Only its own text is, bounded by the same
   `displayed-length`/`take-nodes` the preview bound uses — graphemes, formatting
-  included, an atomic node refused rather than half-emitted."
-  [config entity trail-key]
-  (let [level (or (:f27/ref-level config) 0)
-        trail (or (:f27/ref-trail config) #{})
-        format (or (:block/format entity) :markdown)
-        content (f27-display-content format (:block/content entity))
-        {:keys [heading marker text]} (f27ctx/split-block-prefix content)
-        ast (gp-mldoc/inline->edn (or text "") (gp-mldoc/default-config format))
-        {:keys [nodes truncated?]} (f27b/take-nodes ast f27e/max-embed-chars)
-        ;; Nothing of the target's text could be shortened to fit — an opening
-        ;; node that is atomic and larger than the allowance, or one whose size
-        ;; was never established, such as a block that BEGINS with a macro. The
-        ;; answer is the target's compact label, exactly as a bounded preview
-        ;; answers it, and never a claim that the block has no text.
-        fallback (when (and (empty? nodes) (not (string/blank? text)))
-                   (or (some-> (f27-ref-label entity f27b/max-label-chars)
-                               (string/replace #"…+$" ""))
-                       (t :f27/body-ref-untitled)))
-        inner (assoc config
-                     :f27/ref-level (max f27b/max-preview-level (inc level))
-                     ;; The SAME identity the trail compares, so a reference
-                     ;; inside the expansion that points back at this target is
-                     ;; recognised as the repeat it is.
-                     :f27/ref-trail (f27b/push-trail trail trail-key))
-        ;; Forced, not lazy: what is emitted must be built here, under this
-        ;; config, and not later under whatever config happens to be current.
-        body (vec (map-inline inner nodes))]
-    {:heading heading
-     :marker marker
-     :body (when (seq nodes) body)
-     :fallback fallback
-     :truncated? (boolean truncated?)}))
+  included, an atomic node refused rather than half-emitted.
+
+  The page-embed slice renders each block of an excerpt through this same
+  function, which is why `max-chars` and the trail keys are parameters: a page
+  excerpt pushes the PAGE's identity as well as the block's, so a reference
+  inside it that points back at either is recognised as the repeat it is. The
+  block-embed arity below passes exactly what it always passed."
+  ([config entity trail-key]
+   (f27-embed-expansion config entity f27e/max-embed-chars [trail-key]))
+  ([config entity max-chars trail-keys]
+   (let [level (or (:f27/ref-level config) 0)
+         trail (or (:f27/ref-trail config) #{})
+         format (or (:block/format entity) :markdown)
+         content (f27-display-content format (:block/content entity))
+         {:keys [heading marker text]} (f27ctx/split-block-prefix content)
+         ast (gp-mldoc/inline->edn (or text "") (gp-mldoc/default-config format))
+         {:keys [nodes truncated?]} (f27b/take-nodes ast max-chars)
+         ;; Nothing of the target's text could be shortened to fit — an opening
+         ;; node that is atomic and larger than the allowance, or one whose size
+         ;; was never established, such as a block that BEGINS with a macro. The
+         ;; answer is the target's compact label, exactly as a bounded preview
+         ;; answers it, and never a claim that the block has no text.
+         fallback (when (and (empty? nodes) (not (string/blank? text)))
+                    (or (some-> (f27-ref-label entity f27b/max-label-chars)
+                                (string/replace #"…+$" ""))
+                        (t :f27/body-ref-untitled)))
+         inner (assoc config
+                      :f27/ref-level (max f27b/max-preview-level (inc level))
+                      ;; The SAME identities the trail compares, so a reference
+                      ;; inside the expansion that points back at this target —
+                      ;; or, for a page excerpt, at the page itself — is
+                      ;; recognised as the repeat it is.
+                      :f27/ref-trail (reduce f27b/push-trail trail (remove nil? trail-keys)))
+         ;; Forced, not lazy: what is emitted must be built here, under this
+         ;; config, and not later under whatever config happens to be current.
+         body (vec (map-inline inner nodes))]
+     {:heading heading
+      :marker marker
+      :body (when (seq nodes) body)
+      :fallback fallback
+      :truncated? (boolean truncated?)})))
 
 (rum/defcs f27-embed-chip < (rum/local false ::open?)
   "One `{{embed ((block-id))}}` the reader may open in place.
@@ -3201,6 +3212,121 @@
                    :title (t :f27/embed-hide)})
          (t :f27/embed-hide)]])]))
 
+;; ---------------------------------------------------------------------------
+;; F27 page-embed slice — `{{embed [[Page]]}}` as an EXCERPT the reader opens.
+;;
+;; The block-embed slice above closed half of checklist C2 and deliberately left
+;; a page embed named and source-only, because OG's own page embed renders the
+;; page through the ordinary block pipeline — every block, at every depth, with
+;; `:link-depth` incremented.
+;;
+;; An excerpt is the bounded answer: the page's TOP-LEVEL blocks only, in OG
+;; outline order, five per request, twenty retained at most, each bounded to 420
+;; displayed characters by the same limiter every other F27 bound uses. The
+;; blocks are rendered by `f27-embed-expansion`, so every guard the block-embed
+;; expansion has applies here unchanged, and the reading is a bounded sibling
+;; walk in `frontend.db.f27-page` rather than a fetch of the page.
+;; ---------------------------------------------------------------------------
+
+(defn- f27-page-excerpt-row
+  "ONE top-level block of a page excerpt.
+
+  Its own text, bounded, with its structure badges — and, when it has children,
+  the FACT that it has them. Their subtrees are never walked and they are never
+  counted: `has-children?` stops at the first child datom."
+  [config page-id label k {:keys [block children?]}]
+  (let [{:keys [heading marker body fallback truncated?]}
+        (f27-embed-expansion config block f27pe/max-block-chars
+                             [page-id (f27-ref-key (:block/uuid block))])]
+    [:span.f27-page-embed-row {:key k}
+     [:span.f27-embed-head
+      (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
+      (when marker [:span.f27-ctx-badge.is-task marker])]
+     (cond
+       body [:span.f27-embed-text body]
+       fallback [:span.f27-embed-text [:span.f27-embed-fallback fallback]]
+       :else [:span.f27-embed-text
+              [:span.f27-embed-empty (t :f27/page-embed-block-empty)]])
+     (when truncated? [:span.f27-embed-cut {:aria-hidden "true"} "…"])
+     (when children?
+       [:span.f27-page-embed-children (t :f27/page-embed-children)])
+     (when (or truncated? (and (nil? body) fallback))
+       [:span.f27-embed-note (t :f27/page-embed-bounded label)])]))
+
+(rum/defcs f27-page-embed-chip < (rum/local 0 ::shown)
+  "One `{{embed [[Page]]}}` the reader may open as an excerpt.
+
+  Closed — `::shown` 0 — it is byte-for-byte the inert chip this panel already
+  showed: the `{{embed}}` badge, the page's name and the `↗` control that opens
+  it. Nothing of the page is read beyond the one keyed lookup that established
+  it exists.
+
+  Open, it shows the page's top-level blocks and says, in words, that it is an
+  excerpt and what its bounds are. `::shown` is how many are retained; it never
+  exceeds `max-page-blocks`, and the walk that fills it is bounded, cycle-guarded
+  and re-run from the page on every render, so nothing is cached across a graph
+  that may have changed underneath it."
+  [state config repo page-entity page-id label]
+  (let [shown @(::shown state)
+        open? (pos? shown)
+        want (f27pe/wanted shown)
+        {:keys [blocks more? walk]} (when open?
+                                      (f27p/top-level-excerpt repo page-entity want))
+        ;; A walk that stopped on a bound or a cycle is malformed data, not the
+        ;; end of the page. It is said out loud rather than looking like the
+        ;; page simply ended.
+        stopped? (and open? (f27pe/walk-failed? walk))
+        capped? (not (f27pe/more-retainable? shown))]
+    [:<>
+     [:span.f27-inert.is-embed.is-page {:class (when open? "is-open")
+                                        :title (t :f27/page-embed-openable)}
+      [:span.f27-ctx-badge.is-inert "{{embed}}"]
+      [:span.f27-inert-text label]
+      [:button.f27-embed-toggle.f27-btn
+       (f27-btn (fn [] (swap! (::shown state)
+                              (fn [n] (if (pos? n) 0 f27pe/blocks-per-request))))
+                {:aria-expanded (if open? "true" "false")
+                 :aria-label (if open?
+                               (t :f27/page-embed-hide-of label)
+                               (t :f27/page-embed-show-of label))
+                 :title (if open? (t :f27/page-embed-hide) (t :f27/page-embed-show))})
+       (if open? "▾" "▸")]
+      (f27-inert-page-button (:block/original-name page-entity) label)]
+     (when open?
+       [:span.f27-page-embed-body {:role "group"
+                                   :aria-label (t :f27/page-embed-open-of label)}
+        ;; An excerpt says what it is BEFORE it says anything the page contains,
+        ;; so a reader never mistakes a bounded selection for the page.
+        [:span.f27-page-embed-title
+         (t :f27/page-embed-excerpt label (count blocks))]
+        [:span.f27-page-embed-limits
+         (t :f27/page-embed-limits f27pe/max-page-blocks f27pe/max-block-chars)]
+        ;; The key lives in the element's own props: these are plain hiccup
+        ;; vectors, not rum components, so `rum/with-key` is not what keys them.
+        (map-indexed
+         (fn [i b]
+           (f27-page-excerpt-row config page-id label
+                                 (str "f27-pe-" (:db/id (:block b)) "-" i) b))
+         blocks)
+        (when stopped? [:span.f27-embed-note (t :f27/page-embed-stopped)])
+        (when (and more? capped?)
+          [:span.f27-embed-note (t :f27/page-embed-capped f27pe/max-page-blocks)])
+        (when (and more? (not capped?))
+          [:span.f27-embed-note (t :f27/page-embed-has-more)])
+        (when (and more? (not capped?) (not stopped?))
+          [:button.f27-page-embed-more.f27-btn
+           (f27-btn (fn [] (reset! (::shown state) (f27pe/next-wanted shown)))
+                    {:aria-label (t :f27/page-embed-more-of f27pe/blocks-per-request label)
+                     :title (t :f27/page-embed-more f27pe/blocks-per-request)})
+           (t :f27/page-embed-more f27pe/blocks-per-request)])
+        ;; Repeated at the end of the content, like every other F27 panel's
+        ;; collapse control.
+        [:button.f27-embed-collapse.f27-btn
+         (f27-btn (fn [] (reset! (::shown state) 0))
+                  {:aria-label (t :f27/page-embed-hide-of label)
+                   :title (t :f27/page-embed-hide)})
+         (t :f27/page-embed-hide)]])]))
+
 (defn- f27-inert-macro
   "One macro, named rather than run.
 
@@ -3210,7 +3336,13 @@
   control every other F27 chip carries — and, on the surface the reader
   explicitly opened, with one more control that shows the target's own text in
   place. Everything else stays inert: reading a label is a lookup, and nothing
-  here runs a program to fill a slot."
+  here runs a program to fill a slot.
+
+  An `{{embed [[Page]]}}` is the same shape one construct further along: on that
+  same surface it offers an EXCERPT of the page's top-level blocks. Its planning
+  is a sibling of the block one rather than a change to it — `f27e/plan-embed`
+  keeps its exact outcomes — and the two share only the per-body ledger, because
+  the four-offer budget is shared between them by design."
   [config options]
   (let [repo (:f27/ref-repo config)
         {:keys [name arguments]} options
@@ -3226,8 +3358,21 @@
         ;; question about CONTENT; this asks the same question the same way.
         content (when entity (f27-display-content (:block/format entity) (:block/content entity)))
         text-label (when content (f27-ref-label entity))
+        ;; A PAGE embed is the only macro whose page argument this slice plans.
+        ;; `{{query [[X]]}}` and any other macro that happens to name a page keep
+        ;; exactly the placeholder and the control they already had.
+        page-embed? (and embed? (= :page kind))
+        pk (when page-embed? (f27pe/page-key value))
+        ;; One keyed lookup, the same class of read every block embed already
+        ;; does for its label. It never creates a page: `{{embed [[Ghost]]}}`
+        ;; makes `Ghost` an ENTITY by itself, which is exactly why `:file?`,
+        ;; not `some?`, is what says a page is there to be read.
+        lookup (when page-embed? (f27p/page-lookup repo value))
+        page-entity (:entity lookup)
         shown (or text-label
-                  (when (= :page kind) (f27c/preview-text value f27b/max-label-chars))
+                  (when (= :page kind)
+                    (f27c/preview-text (or (:block/original-name page-entity) value)
+                                       f27b/max-label-chars))
                   args)
         title (if embed? (t :f27/inert-embed) (t :f27/inert-macro name))
         k (f27-ref-key value)
@@ -3241,6 +3386,25 @@
                                     :compact? (:f27/compact? config)
                                     :trail (or (:f27/ref-trail config) #{})
                                     :ledger ledger}))
+        page-surface (when page-embed?
+                       (f27pe/surface-outcome {:kind kind
+                                               :id pk
+                                               :entity? (:entity? lookup)
+                                               :file? (:file? lookup)
+                                               :read-error? (:error lookup)
+                                               :level (or (:f27/ref-level config) 0)
+                                               :compact? (:f27/compact? config)
+                                               :trail (or (:f27/ref-trail config) #{})
+                                               :ledger ledger}))
+        ;; The ONE bounded probe that separates a page with something to show
+        ;; from an empty one, and it runs only where an excerpt could be
+        ;; offered — never on a breadcrumb, a bounded preview, a repeat or a
+        ;; body that has spent its budget. `want` 1: one block plus the
+        ;; lookahead, which is two steps of the sibling walk.
+        page-probe (when (= :may-excerpt page-surface)
+                     (f27p/top-level-excerpt repo page-entity 1))
+        page-outcome (when page-embed?
+                       (f27pe/excerpt-outcome page-surface page-probe))
         ;; A mark MEANS something is not ordinary, exactly as it does on a
         ;; reference chip: `↻` a repeat that is not opened again, `⋯` a surface
         ;; that does not expand anything, `⚠` a target that is not there.
@@ -3248,21 +3412,50 @@
                :repeat "↻"
                (:closed :budget) "⋯"
                :unavailable "⚠"
-               nil)
+               (case page-outcome
+                 :repeat "↻"
+                 (:closed :budget) "⋯"
+                 (:unnamed :missing :uncreated :error) "⚠"
+                 nil))
+        page-note (case page-outcome
+                    :unnamed (t :f27/page-embed-unnamed)
+                    :missing (t :f27/page-embed-missing)
+                    :uncreated (t :f27/page-embed-uncreated)
+                    :empty (t :f27/page-embed-empty)
+                    :error (t :f27/page-embed-error)
+                    nil)
         embed-title (case outcome
                       :repeat (t :f27/embed-repeat)
                       :closed (t :f27/embed-closed)
                       :budget (t :f27/embed-budget f27e/max-embeds)
                       :unavailable (t :f27/embed-unavailable)
-                      title)]
-    (if (f27e/expandable? outcome)
+                      (case page-outcome
+                        :repeat (t :f27/page-embed-repeat)
+                        :closed (t :f27/page-embed-closed)
+                        :budget (t :f27/page-embed-budget f27e/max-embeds)
+                        (:unnamed :missing :uncreated :empty :error) page-note
+                        title))]
+    (cond
+      (f27e/expandable? outcome)
       (do
         ;; Recorded in the order the reader sees, during the same forced walk
         ;; that builds the body, so a second copy of one block is told it is a
         ;; second copy and the per-body cap means what it says.
         (when *ledger (vswap! *ledger f27e/record k))
         (f27-embed-chip config entity value k shown))
-      [:span.f27-inert {:class (if embed? "is-embed" "is-macro")
+
+      (f27pe/expandable? page-outcome)
+      (do
+        ;; The SAME ledger the block embeds spend, so four is four across both.
+        (when *ledger (vswap! *ledger f27e/record pk))
+        (f27-page-embed-chip config repo page-entity pk shown))
+
+      :else
+      ;; `is-page` marks a page embed in EVERY state, not only the openable one,
+      ;; so what the chip IS and whether it happens to be expandable here are two
+      ;; separate questions on screen as well as in the code.
+      [:span.f27-inert {:class (str (if embed? "is-embed" "is-macro")
+                                    (when page-embed? " is-page"))
                         :title (if embed? embed-title title)}
        (when mark [:span.f27-inert-mark {:aria-hidden "true"} mark])
        ;; The macro's NAME is the badge, `{{embed}}` rather than `{{}}` beside a
@@ -3281,6 +3474,17 @@
          (= :unavailable outcome)
          [:span.f27-inert-missing (t :f27/embed-unavailable)]
 
+         ;; A page embed that cannot be opened as an excerpt says WHY, and the
+         ;; four reasons read differently: no name, nothing by that name, a name
+         ;; nobody has written a page for, a page with nothing in it, and a read
+         ;; that failed. `{{embed [[]]}}` has no name to show at all.
+         (and page-note (= :unnamed page-outcome))
+         [:span.f27-inert-missing page-note]
+
+         page-note
+         [:<> [:span.f27-inert-text shown]
+          [:span.f27-inert-missing page-note]]
+
          shown [:span.f27-inert-text shown]
          :else nil)
        (case kind
@@ -3288,7 +3492,16 @@
          ;; does not exist is named in words and offers nothing.
          :block (when (and entity (not= :unavailable outcome))
                   (f27-ref-source-button value text-label))
-         :page (f27-inert-page-button value shown)
+         ;; A page embed withholds the control in exactly the two states where
+         ;; nothing in the graph carries the name: a blank argument, and a name
+         ;; the graph has never heard of. Everywhere else — including a page
+         ;; nobody has created yet, which OG itself already knows as a link
+         ;; target — the control opens what OG would open. Nothing here writes,
+         ;; and no page is created to preview it.
+         :page (if page-embed?
+                 (when-not (contains? #{:unnamed :missing} page-outcome)
+                   (f27-inert-page-button (or (:block/original-name page-entity) value) shown))
+                 (f27-inert-page-button value shown))
          nil)])))
 
 (defn- f27-inert-markup
@@ -3328,20 +3541,33 @@
   Seeds the render trail with the host block itself, so a block that references
   itself is a repeat by construction rather than a special case, and creates
   this body's budget. The budget is a volatile created fresh on every render of
-  this body, so it is per-render bookkeeping, not shared mutable state."
+  this body, so it is per-render bookkeeping, not shared mutable state.
+
+  It seeds the host's own PAGE too, for the same reason one construct along: a
+  block that embeds the page it lives on would otherwise offer an excerpt whose
+  blocks include this very block's own ancestor. That is the self case, and it
+  is marked `↻` rather than opened. One keyed lookup per rendered body."
   [config repo host-uuid]
-  (assoc config
-         :f27/ref-render f27-ref-render
-         :f27/media-render f27-asset-render
-         :f27/inert-render f27-inert-render
-         :f27/ref-repo repo
-         :f27/ref-level 0
-         :f27/ref-trail (f27b/push-trail #{} (f27-ref-key host-uuid))
-         :f27/ref-budget (volatile! (f27b/new-budget))
-         ;; Separate from the preview budget on purpose: an embed the reader
-         ;; opens is not a preview the body produced on its own, and nothing
-         ;; here may change what the existing bound does.
-         :f27/embed-ledger (volatile! (f27e/new-ledger))))
+  (let [host-page-key (some-> (f27-ref-target repo host-uuid)
+                              :block/page
+                              :block/name
+                              f27pe/page-key)
+        trail (cond-> (f27b/push-trail #{} (f27-ref-key host-uuid))
+                host-page-key (f27b/push-trail host-page-key))]
+    (assoc config
+           :f27/ref-render f27-ref-render
+           :f27/media-render f27-asset-render
+           :f27/inert-render f27-inert-render
+           :f27/ref-repo repo
+           :f27/ref-level 0
+           :f27/ref-trail trail
+           :f27/ref-budget (volatile! (f27b/new-budget))
+           ;; Separate from the preview budget on purpose: an embed the reader
+           ;; opens is not a preview the body produced on its own, and nothing
+           ;; here may change what the existing bound does. Block embeds and
+           ;; page embeds SHARE this one ledger, so four offers is four across
+           ;; both kinds.
+           :f27/embed-ledger (volatile! (f27e/new-ledger)))))
 
 (defn- f27-breadcrumb-config
   "Rendering config for the ONE-LINE path an F27 row shows above its content.

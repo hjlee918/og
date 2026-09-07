@@ -1534,6 +1534,67 @@ html.is-mac {
 
 .f27-embed-collapse:hover { color: var(--ls-link-text-hover-color); }
 
+/* ---------------------------------------------------------------------------
+   F27 page-embed slice — {{embed [[Page]]}} as an EXCERPT the reader opens.
+
+   An excerpt is not the page, so it does not look like one. It is ruled and
+   indented like a block-embed expansion, says what it is and what its bounds
+   are before any content, and separates its top-level blocks from one another
+   so a reader can see where one ends and the next begins.
+   --------------------------------------------------------------------------- */
+
+.f27-page-embed-body {
+  display: block;
+  margin: 0.25rem 0 0.35rem 0.5rem;
+  padding: 0.2rem 0 0.2rem 0.6rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+}
+
+.f27-page-embed-title {
+  display: block;
+  font-size: 0.9em;
+  font-weight: 600;
+  color: var(--ls-secondary-text-color);
+}
+
+.f27-page-embed-limits {
+  display: block;
+  font-size: 0.85em;
+  font-style: italic;
+  color: var(--ls-secondary-text-color);
+  margin-bottom: 0.25rem;
+}
+
+/* One top-level block. Separated rather than run together, because an excerpt
+   of several blocks that reads as one paragraph would misrepresent the page. */
+.f27-page-embed-row {
+  display: block;
+  padding: 0.15rem 0;
+  border-top: 1px solid var(--ls-quaternary-background-color);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.f27-page-embed-row:first-of-type { border-top: 0; }
+
+/* Children exist and are not shown. Stated, never traversed and never counted. */
+.f27-page-embed-children {
+  margin-left: 0.3rem;
+  font-size: 0.85em;
+  font-style: italic;
+  color: var(--ls-secondary-text-color);
+}
+
+.f27-page-embed-more {
+  display: inline-block;
+  margin: 0.25rem 0.6rem 0 0;
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.f27-page-embed-more:hover { color: var(--ls-link-text-hover-color); }
+
 /* Repeated collapse / Back controls, at the end of the content they close. */
 .f27-ctx-end,
 .f27-desc-end,
