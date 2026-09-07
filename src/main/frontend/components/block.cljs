@@ -66,6 +66,7 @@
             [frontend.util.f27-children :as f27ch]
             [frontend.util.f27-inbound :as f27in]
             [frontend.util.f27-inert :as f27i]
+            [frontend.util.f27-embed :as f27e]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -2734,31 +2735,6 @@
 ;; sets, so OG's ordinary asset rendering is untouched.
 ;; ---------------------------------------------------------------------------
 
-(defn- f27-asset-open-button
-  "Reveal ONE local asset where it is stored.
-
-  The same call OG's own image action bar makes for a local asset —
-  `openFileInFolder` on the normalised path — and deliberately not OG's PDF
-  viewer, which is the excluded annotation project, nor a `file://` anchor with
-  `target=\"_blank\"`, which is what a plain markdown link to an asset renders as
-  today. A native button, so Tab reaches it and Enter or Space activates it.
-
-  Outside Electron there is no such handling, so there is no control rather than
-  a control that does nothing."
-  [abs-path label]
-  (when (and (util/electron?) (string? abs-path) (not (string/blank? abs-path)))
-    [:button.f27-asset-open.f27-btn
-     (f27-btn (fn []
-                ;; The VALIDATED path, exactly as the graph's own asset listing
-                ;; reported it. Not the href, and not a path recovered from the
-                ;; display URL: a control that reveals a file must dispatch the
-                ;; path that was authorised, or the authorisation means nothing.
-                (try (ipc/ipc "openFileInFolder" abs-path)
-                     (catch :default _ nil)))
-              {:aria-label (if label (t :f27/asset-open-of label) (t :f27/asset-open))
-               :title (t :f27/asset-open)})
-     "↗"]))
-
 (def ^:private f27-asset-index-ttl
   "How long one graph's asset listing is reused, in milliseconds.
 
@@ -2768,17 +2744,62 @@
   this boundary is meant to fail in."
   5000)
 
+(def ^:private f27-asset-root-ttl
+  "How long a PASSING asset-root check is reused, in milliseconds.
+
+  The root check reads the whole graph directory, and the asset listing reads
+  only `assets/` — measured on a synthetic 20,300-file tree, about 40 ms against
+  about 1 ms. Whether `assets` is a real directory changes far less often than
+  what is inside it, so a pass is reused for a minute rather than for five
+  seconds, and a large graph is not walked every time a panel re-renders.
+
+  A REFUSAL is deliberately NOT cached this long — it is cached for
+  `f27-asset-index-ttl` like the listing — so a graph whose asset directory is
+  created or filled later recovers exactly as quickly as it did before."
+  60000)
+
 (defonce ^:private *f27-asset-index (atom {}))
+(defonce ^:private *f27-asset-root (atom {}))
 
-(defn- f27-nfc
-  "One spelling of a name, for comparison only.
+(defn- f27-asset-root-real?
+  "Is `<graph>/assets` a real directory of this graph, rather than a symbolic
+  link pointing out of it?
 
-  macOS hands back a Korean filename decomposed while a name decoded from a note
-  is composed. Without this the same file has two names and one of them is never
-  found."
-  [s]
-  (let [s (str s)]
-    (try (.normalize s "NFC") (catch :default _ s))))
+  This is the gate the boundary was missing. `logseq.common.graph/readdir`
+  removes symbolic links among the entries it FINDS, but it seeds its walk with
+  `[true root-dir]` and never asks whether the directory it was handed is itself
+  a link. F27 hands it `<graph>/assets` directly, so an assets directory that is
+  a symbolic link was walked and everything behind it was listed as though it
+  were inside the graph — and every path under it is lexically contained, so the
+  pure gate passed it too.
+
+  The authority is unchanged and no capability is added to the main process. It
+  is applied ONE LEVEL UP: a symlinked `assets` is removed among the graph
+  root's own children, so nothing under `<root>/assets/` appears in the graph's
+  own listing, and F27 refuses the directory before descending into it.
+
+  Fails closed. A directory that cannot be read, a blank graph path and a
+  listing with nothing under `assets/` all answer false, and a refusal is not
+  cached beyond the listing's own lifetime."
+  [repo {:keys [force?]}]
+  (let [dir (config/get-repo-dir repo)
+        root (f27a/graph-root dir)
+        now (js/Date.now)
+        cached (get @*f27-asset-root root)]
+    (cond
+      (nil? root) (p/resolved false)
+      (and (not force?) cached
+           (< (- now (:at cached)) (if (:ok? cached) f27-asset-root-ttl f27-asset-index-ttl)))
+      (p/resolved (:ok? cached))
+
+      :else
+      (-> (p/let [files (fs/readdir root)]
+            (let [ok? (f27a/asset-root-real? root files)]
+              (swap! *f27-asset-root assoc root {:at now :ok? ok?})
+              ok?))
+          (p/catch (fn [_]
+                     (swap! *f27-asset-root assoc root {:at now :ok? false})
+                     false))))))
 
 (defn- f27-asset-listing
   "Every REAL file inside this graph's own asset directory: a map from the
@@ -2791,37 +2812,40 @@
   so it is never authorised, and this batch adds no new capability to the main
   process to achieve that.
 
+  The asset ROOT is checked first, because this listing cannot speak for the
+  directory it starts from. With that gate refused, nothing is listed at all.
+
   Membership answers three questions at once: the file exists, it is inside the
   asset directory, and it is a real file rather than a way out of one."
-  [repo]
+  [repo opts]
   (let [dir (config/get-repo-dir repo)
-        root (when-not (string/blank? (str dir))
-               (str (string/replace (str dir) #"/+$" "") "/"))
-        adir (when root (str root gp-config/local-assets-dir))
+        adir (f27a/asset-dir dir)
         now (js/Date.now)
         cached (get @*f27-asset-index adir)]
     (cond
       (nil? adir) (p/resolved {})
-      (and cached (< (- now (:at cached)) f27-asset-index-ttl)) (p/resolved (:files cached))
+      (and (not (:force? opts)) cached (< (- now (:at cached)) f27-asset-index-ttl))
+      (p/resolved (:files cached))
+
       :else
-      (-> (p/let [files (fs/readdir adir)]
-            (let [m (reduce (fn [acc abs]
-                              (let [abs (str abs)]
-                                (if (string/starts-with? abs root)
-                                  (assoc acc (f27-nfc (subs abs (count root))) abs)
-                                  acc)))
-                            {}
-                            (or files []))]
-              (swap! *f27-asset-index assoc adir {:at now :files m})
-              m))
-          ;; A directory that cannot be read authorises nothing, and is not
-          ;; cached, so a graph whose assets appear later is not stuck.
-          (p/catch (fn [_] {}))))))
+      (p/let [root-ok? (f27-asset-root-real? repo opts)]
+        (if-not root-ok?
+          ;; The asset directory is not provably a real directory of this graph.
+          ;; Nothing behind it is authorised, and the refusal is not cached as a
+          ;; listing, so the cheap gate above is re-asked on its own schedule.
+          (p/resolved {})
+          (-> (p/let [files (fs/readdir adir)]
+                (let [m (f27a/asset-index dir files)]
+                  (swap! *f27-asset-index assoc adir {:at now :files m})
+                  m))
+              ;; A directory that cannot be read authorises nothing, and is not
+              ;; cached, so a graph whose assets appear later is not stuck.
+              (p/catch (fn [_] {}))))))))
 
 (defn- f27-asset-locate
   "The absolute path this asset is stored under, or nil.
 
-  Two gates, in order, and both must pass:
+  Three gates, in order, and all three must pass:
 
     1. **Containment**, purely, before any filesystem call at all. OG's
        `local-asset?` is a prefix recogniser: it calls
@@ -2829,27 +2853,77 @@
        `../assets-other/x.png` local. A spelling that is not provably inside the
        asset directory yields no candidates, so nothing is probed, loaded or
        revealed for it.
-    2. **The graph's own asset listing**, which excludes symbolic links, so a
+    2. **The asset root**, read from the graph's own listing one level up, so an
+       `assets` directory that is ITSELF a symbolic link is refused before it is
+       descended into.
+    3. **The graph's own asset listing**, which excludes symbolic links, so a
        path that is lexically contained but leaves through a link is refused
        too.
 
   The answer is the path the FILESYSTEM reported, not the spelling the author
   typed — a live run showed that resolving from the typed spelling produced an
   address the asset protocol could not open. Both spellings of an encoded name
-  are still tried, decoded first."
-  [repo href]
-  (let [rels (f27a/contained-paths href)]
-    (if (empty? rels)
-      (p/resolved nil)
-      (p/let [idx (f27-asset-listing repo)]
-        (some (fn [rel]
-                (when-let [abs (get idx (f27-nfc rel))]
-                  {:rel rel :abs abs}))
-              rels)))))
+  are still tried, decoded first.
+
+  `:force?` bypasses both caches. It is what the reveal control uses, so an
+  authorisation is re-asked at the moment it is acted on rather than trusted
+  from whenever the panel happened to mount."
+  ([repo href] (f27-asset-locate repo href nil))
+  ([repo href opts]
+   (let [rels (f27a/contained-paths href)]
+     (if (empty? rels)
+       (p/resolved nil)
+       (p/let [idx (f27-asset-listing repo opts)]
+         (some (fn [rel]
+                 (when-let [abs (get idx (f27a/normalize-name rel))]
+                   {:rel rel :abs abs}))
+               rels))))))
+
+(defn- f27-asset-open-button
+  "Reveal ONE local asset where it is stored.
+
+  The same call OG's own image action bar makes for a local asset —
+  `openFileInFolder` on the path the graph's own listing reported — and
+  deliberately not OG's PDF viewer, which is the excluded annotation project,
+  nor a `file://` anchor with `target=\"_blank\"`, which is what a plain markdown
+  link to an asset renders as today. A native button, so Tab reaches it and
+  Enter or Space activates it.
+
+  **The authorisation is re-asked here, not trusted.** A listing is a statement
+  about the past: the mounted path was authorised whenever the panel rendered,
+  and the file may since have been replaced, removed or turned into a link out
+  of the graph. Activating this control re-runs all three gates with both caches
+  bypassed and dispatches only what the fresh listing reports; when the file is
+  no longer authorised nothing is dispatched and `on-refused` turns the chip
+  into its `(file not found)` state.
+
+  A race remains between that check and the main process opening the path, and
+  it is recorded rather than papered over: closing it would mean opening the
+  file by handle in the main process, which is a new capability and not this
+  batch's business.
+
+  Outside Electron there is no such handling, so there is no control rather than
+  a control that does nothing."
+  [repo href label on-refused]
+  (when (util/electron?)
+    [:button.f27-asset-open.f27-btn
+     (f27-btn (fn []
+                (-> (p/let [found (f27-asset-locate repo href {:force? true})]
+                      (if-let [abs (:abs found)]
+                        ;; The VALIDATED path, exactly as the graph's own asset
+                        ;; listing reported it a moment ago. Not the href, and
+                        ;; not a path recovered from the display URL: a control
+                        ;; that reveals a file must dispatch the path that was
+                        ;; authorised, or the authorisation means nothing.
+                        (ipc/ipc "openFileInFolder" abs)
+                        (when on-refused (on-refused))))
+                    (p/catch (fn [_] (when on-refused (on-refused))))))
+              {:aria-label (if label (t :f27/asset-open-of label) (t :f27/asset-open))
+               :title (t :f27/asset-open)})
+     "↗"]))
 
 (rum/defcs f27-local-asset < rum/reactive
   (rum/local nil ::src)
-  (rum/local nil ::abs)
   (rum/local nil ::exists?)
   (rum/local false ::broken?)
   {:will-mount
@@ -2861,19 +2935,19 @@
      ;; network request.
      (let [[_config href _kind _name _label] (:rum/args state)
            *src (::src state)
-           *exists? (::exists? state)
-           *abs (::abs state)]
+           *exists? (::exists? state)]
        (try
          (p/let [found (f27-asset-locate (state/get-current-repo) href)]
            (reset! *exists? (some? found))
            (when found
-             ;; The reveal control dispatches THIS path — the one the filesystem
-             ;; reported for an authorised file — not a path derived from the
-             ;; href or from the display URL.
-             (reset! *abs (:abs found))
              ;; Resolved from the spelling found on disk, not the one the author
              ;; happened to type, so an encoded name and a literal one produce
              ;; the same working address.
+             ;;
+             ;; The path this resolves is used to DISPLAY a thumbnail and for
+             ;; nothing else. The reveal control deliberately does not keep it:
+             ;; it re-asks the gates when it is pressed, because what was
+             ;; authorised at mount is not what is on disk now.
              (p/let [url (editor-handler/make-asset-url
                           (config/get-local-asset-absolute-path (:rel found)))]
                (reset! *src url))))
@@ -2915,7 +2989,12 @@
       (when badge [:span.f27-ctx-badge.is-asset badge])
       [:span.f27-asset-name shown]
       (when missing? [:span.f27-asset-missing (t :f27/asset-missing)])
-      (when-not missing? (f27-asset-open-button @(::abs state) shown))]
+      ;; The control re-asks the three gates when it is pressed, so a file that
+      ;; stopped being authorised since this mounted is refused there and turns
+      ;; this chip into its missing state rather than opening anything.
+      (when-not missing?
+        (f27-asset-open-button (state/get-current-repo) href shown
+                               (fn [] (reset! (::exists? state) false))))]
      (when image?
        [:span.f27-asset-figure
         [:img.f27-asset-img
@@ -3013,43 +3092,204 @@
              :title (t :f27/inert-open-page)})
    "↗"])
 
+(defn- f27-embed-expansion
+  "The target block's own text, as an EXPANDED embed shows it.
+
+  Rendered by the same guarded F27 renderer the panel already uses, with two
+  changes to the config it is handed:
+
+    * `:f27/ref-level` becomes `max-preview-level`, and
+    * `:f27/ref-trail` gains this target.
+
+  Those two lines are the whole safety argument, because every guard already
+  written then applies to the expanded content without a new rule: a `((uuid))`
+  inside it is a closed `⋯` chip, one pointing back at the host or at this
+  target is `↻`, an image is a compact named indicator rather than a thumbnail,
+  remote media is named and never fetched, a nested `{{embed}}` is inert, and a
+  macro, a query, inline HTML and Hiccup are inert placeholders.
+
+  The block's CHILDREN are not read. Only its own text is, bounded by the same
+  `displayed-length`/`take-nodes` the preview bound uses — graphemes, formatting
+  included, an atomic node refused rather than half-emitted."
+  [config entity trail-key]
+  (let [level (or (:f27/ref-level config) 0)
+        trail (or (:f27/ref-trail config) #{})
+        format (or (:block/format entity) :markdown)
+        content (f27-display-content format (:block/content entity))
+        {:keys [heading marker text]} (f27ctx/split-block-prefix content)
+        ast (gp-mldoc/inline->edn (or text "") (gp-mldoc/default-config format))
+        {:keys [nodes truncated?]} (f27b/take-nodes ast f27e/max-embed-chars)
+        ;; Nothing of the target's text could be shortened to fit — an opening
+        ;; node that is atomic and larger than the allowance, or one whose size
+        ;; was never established, such as a block that BEGINS with a macro. The
+        ;; answer is the target's compact label, exactly as a bounded preview
+        ;; answers it, and never a claim that the block has no text.
+        fallback (when (and (empty? nodes) (not (string/blank? text)))
+                   (or (some-> (f27-ref-label entity f27b/max-label-chars)
+                               (string/replace #"…+$" ""))
+                       (t :f27/body-ref-untitled)))
+        inner (assoc config
+                     :f27/ref-level (max f27b/max-preview-level (inc level))
+                     ;; The SAME identity the trail compares, so a reference
+                     ;; inside the expansion that points back at this target is
+                     ;; recognised as the repeat it is.
+                     :f27/ref-trail (f27b/push-trail trail trail-key))
+        ;; Forced, not lazy: what is emitted must be built here, under this
+        ;; config, and not later under whatever config happens to be current.
+        body (vec (map-inline inner nodes))]
+    {:heading heading
+     :marker marker
+     :body (when (seq nodes) body)
+     :fallback fallback
+     :truncated? (boolean truncated?)}))
+
+(rum/defcs f27-embed-chip < (rum/local false ::open?)
+  "One `{{embed ((block-id))}}` the reader may open in place.
+
+  Closed, it is byte-for-byte the inert chip this panel already showed: the
+  `{{embed}}` badge, the target's compact label and the `↗` source control, with
+  no part of the target's content emitted and nothing read beyond the one lookup
+  that produced the label.
+
+  Open, it shows the target block's own text — never OG's embed renderer, which
+  would render the target AND its children through the ordinary block pipeline
+  with `:link-depth` incremented.
+
+  Collapsing returns it to exactly its closed state and reads nothing."
+  [state config entity id trail-key label]
+  (let [open? @(::open? state)
+        {:keys [heading marker body fallback truncated?]}
+        (when open? (f27-embed-expansion config entity trail-key))]
+    [:<>
+     [:span.f27-inert.is-embed {:class (when open? "is-open")
+                                ;; Not `:f27/inert-embed` — this chip CAN be
+                                ;; opened, so saying it is never rendered would
+                                ;; be false about the control beside it.
+                                :title (t :f27/embed-openable)}
+      [:span.f27-ctx-badge.is-inert "{{embed}}"]
+      [:span.f27-inert-text label]
+      [:button.f27-embed-toggle.f27-btn
+       (f27-btn (fn [] (swap! (::open? state) not))
+                {:aria-expanded (if open? "true" "false")
+                 :aria-label (if open?
+                               (t :f27/embed-hide-of label)
+                               (t :f27/embed-show-of label))
+                 :title (if open? (t :f27/embed-hide) (t :f27/embed-show))})
+       (if open? "▾" "▸")]
+      (f27-ref-source-button id label)]
+     (when open?
+       [:span.f27-embed-body {:role "group"
+                              :aria-label (t :f27/embed-open-of label)}
+        [:span.f27-embed-head
+         (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
+         (when marker [:span.f27-ctx-badge.is-task marker])]
+        (cond
+          body [:span.f27-embed-text body]
+          fallback [:span.f27-embed-text [:span.f27-embed-fallback fallback]]
+          :else [:span.f27-embed-text [:span.f27-embed-empty (t :f27/embed-empty)]])
+        ;; The fallback carries its own ellipsis, so the chip supplies the one
+        ;; truncation mark and an expansion never reads "……".
+        (when truncated? [:span.f27-embed-cut {:aria-hidden "true"} "…"])
+        (when (or truncated? (nil? body))
+          [:span.f27-embed-note (t :f27/embed-bounded)])
+        ;; Repeated at the end of the content, like every other F27 panel's
+        ;; collapse control, so a long expansion does not leave the reader
+        ;; scrolling back to close it.
+        [:button.f27-embed-collapse.f27-btn
+         (f27-btn (fn [] (reset! (::open? state) false))
+                  {:aria-label (t :f27/embed-hide-of label)
+                   :title (t :f27/embed-hide)})
+         (t :f27/embed-hide)]])]))
+
 (defn- f27-inert-macro
   "One macro, named rather than run.
 
   An `{{embed ((uuid))}}` is the case that matters most: it is the construct
   most likely to reintroduce the recursive substitution this panel was built to
-  stop, so it is shown as the target's own compact label with the same source
-  control every other F27 chip carries. Reading the target's label is a lookup,
-  not a rendering: no part of the target's content is emitted here."
+  stop. It is shown as the target's own compact label with the same source
+  control every other F27 chip carries — and, on the surface the reader
+  explicitly opened, with one more control that shows the target's own text in
+  place. Everything else stays inert: reading a label is a lookup, and nothing
+  here runs a program to fill a slot."
   [config options]
   (let [repo (:f27/ref-repo config)
         {:keys [name arguments]} options
         {:keys [kind value]} (f27i/macro-target name arguments)
         args (f27i/macro-label name arguments f27b/max-label-chars)
-        embed? (= "embed" name)
+        embed? (f27e/embed-macro? name)
         entity (when (= :block kind) (f27-ref-target repo value))
-        text-label (when entity (f27-ref-label entity))
+        ;; RESOLVED means there is something to read, not merely that an entity
+        ;; came back. A `((uuid))` that names no block still creates an entity
+        ;; carrying only that uuid — the parser records the reference — so an
+        ;; embed of a block that does not exist looked ordinary and offered a
+        ;; source control that went nowhere. `plan-ref` has always asked this
+        ;; question about CONTENT; this asks the same question the same way.
+        content (when entity (f27-display-content (:block/format entity) (:block/content entity)))
+        text-label (when content (f27-ref-label entity))
         shown (or text-label
                   (when (= :page kind) (f27c/preview-text value f27b/max-label-chars))
                   args)
-        title (if embed? (t :f27/inert-embed) (t :f27/inert-macro name))]
-    [:span.f27-inert {:class (if embed? "is-embed" "is-macro") :title title}
-     ;; The macro's NAME is the badge, `{{embed}}` rather than `{{}}` beside a
-     ;; separate word: a live screen showed the two spans running together and
-     ;; reading as "embedFocus is a skill…" and "youtubehttps://…".
-     [:span.f27-ctx-badge.is-inert
-      (str "{{" (f27c/preview-text (str name) f27i/max-badge-name-chars) "}}")]
-     (cond
-       (= :url kind)
-       [:a.f27-inert-text {:href value :target "_blank" :rel "noreferrer"}
-        (or shown value)]
+        title (if embed? (t :f27/inert-embed) (t :f27/inert-macro name))
+        k (f27-ref-key value)
+        *ledger (:f27/embed-ledger config)
+        ledger (if *ledger @*ledger (f27e/new-ledger))
+        outcome (when embed?
+                  (f27e/plan-embed {:kind kind
+                                    :resolved? (some? content)
+                                    :id k
+                                    :level (or (:f27/ref-level config) 0)
+                                    :compact? (:f27/compact? config)
+                                    :trail (or (:f27/ref-trail config) #{})
+                                    :ledger ledger}))
+        ;; A mark MEANS something is not ordinary, exactly as it does on a
+        ;; reference chip: `↻` a repeat that is not opened again, `⋯` a surface
+        ;; that does not expand anything, `⚠` a target that is not there.
+        mark (case outcome
+               :repeat "↻"
+               (:closed :budget) "⋯"
+               :unavailable "⚠"
+               nil)
+        embed-title (case outcome
+                      :repeat (t :f27/embed-repeat)
+                      :closed (t :f27/embed-closed)
+                      :budget (t :f27/embed-budget f27e/max-embeds)
+                      :unavailable (t :f27/embed-unavailable)
+                      title)]
+    (if (f27e/expandable? outcome)
+      (do
+        ;; Recorded in the order the reader sees, during the same forced walk
+        ;; that builds the body, so a second copy of one block is told it is a
+        ;; second copy and the per-body cap means what it says.
+        (when *ledger (vswap! *ledger f27e/record k))
+        (f27-embed-chip config entity value k shown))
+      [:span.f27-inert {:class (if embed? "is-embed" "is-macro")
+                        :title (if embed? embed-title title)}
+       (when mark [:span.f27-inert-mark {:aria-hidden "true"} mark])
+       ;; The macro's NAME is the badge, `{{embed}}` rather than `{{}}` beside a
+       ;; separate word: a live screen showed the two spans running together and
+       ;; reading as "embedFocus is a skill…" and "youtubehttps://…".
+       [:span.f27-ctx-badge.is-inert
+        (str "{{" (f27c/preview-text (str name) f27i/max-badge-name-chars) "}}")]
+       (cond
+         (= :url kind)
+         [:a.f27-inert-text {:href value :target "_blank" :rel "noreferrer"}
+          (or shown value)]
 
-       shown [:span.f27-inert-text shown]
-       :else nil)
-     (case kind
-       :block (when entity (f27-ref-source-button value text-label))
-       :page (f27-inert-page-button value shown)
-       nil)]))
+         ;; A block embed whose target is gone says so in words. The identifier
+         ;; is never the label, and there is no control, because there is no
+         ;; source to open.
+         (= :unavailable outcome)
+         [:span.f27-inert-missing (t :f27/embed-unavailable)]
+
+         shown [:span.f27-inert-text shown]
+         :else nil)
+       (case kind
+         ;; No control when there is no source to open. An embed whose target
+         ;; does not exist is named in words and offers nothing.
+         :block (when (and entity (not= :unavailable outcome))
+                  (f27-ref-source-button value text-label))
+         :page (f27-inert-page-button value shown)
+         nil)])))
 
 (defn- f27-inert-markup
   "Inline HTML or Hiccup, shown as the characters the note contains.
@@ -3097,7 +3337,11 @@
          :f27/ref-repo repo
          :f27/ref-level 0
          :f27/ref-trail (f27b/push-trail #{} (f27-ref-key host-uuid))
-         :f27/ref-budget (volatile! (f27b/new-budget))))
+         :f27/ref-budget (volatile! (f27b/new-budget))
+         ;; Separate from the preview budget on purpose: an embed the reader
+         ;; opens is not a preview the body produced on its own, and nothing
+         ;; here may change what the existing bound does.
+         :f27/embed-ledger (volatile! (f27e/new-ledger))))
 
 (defn- f27-breadcrumb-config
   "Rendering config for the ONE-LINE path an F27 row shows above its content.

@@ -9,15 +9,18 @@
   fetches it. None of that belongs in a read-only reference-context panel that
   the reader opened to read text.
 
-  This namespace decides three things and nothing else:
+  This namespace decides four things and nothing else:
 
     * is this node a GRAPH-LOCAL asset, a REMOTE one, or neither;
     * what is the file's readable name;
-    * which of three kinds it is — `:image`, `:pdf` or `:file`.
+    * which of three kinds it is — `:image`, `:pdf` or `:file`;
+    * what a directory listing the caller already holds PROVES about the graph's
+      asset directory and the files in it.
 
   It is PURE. It reads no database and no filesystem, resolves no URL, renders
   nothing and writes nothing. Existence is a question for the caller, which owns
-  the read; this only says what a name and a kind are.
+  the read; this only says what a name and a kind are, and what a listing the
+  caller hands it means.
 
   Audio and video are deliberately `:file` here. F27 names an attachment; it
   does not play one, and a classification that had an `:audio` kind would be the
@@ -169,6 +172,90 @@
   [href]
   (boolean (and (string? href)
                 (re-find #"(?i)^(https?:|data:)" href))))
+
+;; ---------------------------------------------------------------------------
+;; The asset ROOT. Containment above decides what a SPELLING may name; this
+;; decides whether the directory that spelling is anchored to is a real
+;; directory of this graph at all.
+;; ---------------------------------------------------------------------------
+
+(defn normalize-name
+  "One spelling of a name, for comparison only.
+
+  macOS hands back a Korean filename decomposed while a name decoded from a note
+  is composed. Without this the same file has two names and one of them is never
+  found. Comparison only: nothing displayed goes through here."
+  [s]
+  (let [s (str s)]
+    (try (.normalize s "NFC") (catch :default _ s))))
+
+(defn graph-root
+  "The graph directory with exactly one trailing separator, or nil.
+
+  Every path below is compared by prefix, so the separator has to be there
+  exactly once: without it `/g/assets2` would read as a path inside `/g/assets`."
+  [dir]
+  (let [d (some-> dir str string/trim)]
+    (when-not (string/blank? d)
+      (str (string/replace d #"/+$" "") "/"))))
+
+(defn asset-dir
+  "This graph's asset directory, with no trailing separator, or nil."
+  [dir]
+  (when-let [root (graph-root dir)]
+    (str root gp-config/local-assets-dir)))
+
+(defn asset-prefix
+  "The prefix every path inside this graph's asset directory begins with."
+  [dir]
+  (when-let [root (graph-root dir)]
+    (str root gp-config/local-assets-dir "/")))
+
+(defn asset-root-real?
+  "Does the GRAPH'S OWN listing prove that `<graph>/assets` is a real directory
+  of this graph, rather than a symbolic link pointing out of it?
+
+  `logseq.common.graph/readdir` removes symbolic links among the entries it
+  FINDS, but it seeds its walk with `[true root-dir]` and never asks whether the
+  directory it was handed is itself a link. F27 hands it `<graph>/assets`
+  directly, so a symlinked asset directory was walked and everything behind it
+  was listed as though it were inside the graph — and every path under it is
+  lexically contained, so the pure gate passes it too.
+
+  The authority does not change; it is applied ONE LEVEL UP. A symlinked
+  `assets` is removed among the graph root's own children, so nothing under
+  `<root>/assets/` appears in the graph's listing at all.
+
+  `paths` is that listing. Fails closed: an unreadable directory, a blank graph
+  path and a listing with nothing under `assets/` all answer false.
+
+  A real but EMPTY asset directory also answers false, and that is not a false
+  refusal: it contributes no file, so there was no file for the listing gate to
+  authorise either."
+  [dir paths]
+  (boolean
+   (when-let [prefix (asset-prefix dir)]
+     (some #(string/starts-with? (str %) prefix) paths))))
+
+(defn asset-index
+  "The listing of `<graph>/assets`, as a map from the graph-relative path to the
+  absolute path the filesystem reported.
+
+  Membership in it answers three questions at once: the file exists, it is
+  inside the asset directory, and it is a real file rather than a way out of
+  one. Anything the listing reports from outside the graph root is dropped
+  rather than trusted — the walker is recursive, so a path that does not begin
+  at the root is not a path this graph is describing."
+  [dir paths]
+  (if-let [root (graph-root dir)]
+    (reduce (fn [acc p]
+              (let [abs (str p)]
+                (if (string/starts-with? abs root)
+                  (assoc acc (normalize-name (subs abs (count root))) abs)
+                  acc)))
+            {}
+            (or paths []))
+    {}))
 
 ;; ---------------------------------------------------------------------------
 ;; What the file is called

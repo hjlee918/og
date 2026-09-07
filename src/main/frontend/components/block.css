@@ -1460,6 +1460,80 @@ html.is-mac {
 
 .f27-ctx-badge.is-inert { letter-spacing: 0.02em; }
 
+/* A mark on an inert placeholder means the same thing it means on a reference
+   chip: something is not ordinary. An embed that repeats, one on a surface that
+   does not expand, one whose target is gone. An ordinary placeholder has none. */
+.f27-inert-mark {
+  color: var(--ls-secondary-text-color);
+  flex: 0 0 auto;
+  font-size: 0.9em;
+}
+
+.f27-inert-missing {
+  color: var(--ls-secondary-text-color);
+  font-style: italic;
+  font-size: 0.9em;
+}
+
+/* ---------------------------------------------------------------------------
+   F27 block-embed slice — {{embed ((block-id))}} the reader may open in place.
+
+   Closed, this is the inert chip above and nothing else. Open, the target
+   block's own text is shown in its own bounded region, indented and ruled so it
+   is visibly a quotation of another block rather than part of the sentence that
+   contains it.
+   --------------------------------------------------------------------------- */
+
+.f27-embed-toggle {
+  margin-left: 0.15rem;
+  padding: 0 0.15rem;
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.f27-embed-toggle:hover { color: var(--ls-link-text-hover-color); }
+
+.f27-embed-body {
+  display: block;
+  margin: 0.25rem 0 0.35rem 0.5rem;
+  padding: 0.2rem 0 0.2rem 0.6rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+}
+
+.f27-embed-head:not(:empty) { margin-right: 0.3rem; }
+
+.f27-embed-text {
+  display: inline;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.f27-embed-fallback,
+.f27-embed-empty,
+.f27-embed-cut,
+.f27-embed-note {
+  color: var(--ls-secondary-text-color);
+  font-size: 0.9em;
+}
+
+.f27-embed-note {
+  display: block;
+  font-style: italic;
+  margin-top: 0.2rem;
+}
+
+.f27-embed-collapse {
+  display: inline-block;
+  margin-top: 0.25rem;
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.f27-embed-collapse:hover { color: var(--ls-link-text-hover-color); }
+
 /* Repeated collapse / Back controls, at the end of the content they close. */
 .f27-ctx-end,
 .f27-desc-end,

@@ -217,3 +217,89 @@
   (testing "and neither is something that is not a payload map at all"
     (is (false? (a/local-asset-node? nil)))
     (is (false? (a/local-asset-node? "../assets/pic.png")))))
+
+;; ---------------------------------------------------------------------------
+;; The asset ROOT gate.
+;;
+;; `logseq.common.graph/readdir` filters symbolic links among the entries it
+;; FINDS, but it seeds its walk with `[true root-dir]` and never checks that
+;; root. F27 hands it `<graph>/assets`, so an assets directory that is ITSELF a
+;; symbolic link was walked and everything behind it was listed as though it
+;; were inside the graph.
+;;
+;; These pin the pure half of the fix: what the graph's own listing, taken one
+;; level up, PROVES about the asset directory. A symlinked `assets` is removed
+;; among the root's own children, so it contributes nothing to that listing.
+;; ---------------------------------------------------------------------------
+
+(deftest the-graph-root-is-normalised-to-exactly-one-separator
+  (testing "so a prefix comparison cannot read `/g/assets2` as inside `/g/assets`"
+    (is (= "/g/" (a/graph-root "/g")))
+    (is (= "/g/" (a/graph-root "/g/")))
+    (is (= "/g/" (a/graph-root "/g///")))
+    (is (= "/g/" (a/graph-root "  /g/  "))))
+  (testing "and a graph with no directory has no root, no asset dir and no prefix"
+    (is (nil? (a/graph-root nil)))
+    (is (nil? (a/graph-root "")))
+    (is (nil? (a/graph-root "   ")))
+    (is (nil? (a/asset-dir nil)))
+    (is (nil? (a/asset-prefix nil)))))
+
+(deftest the-asset-directory-and-its-prefix-are-derived-from-the-graph-root
+  (is (= "/g/assets" (a/asset-dir "/g")))
+  (is (= "/g/assets" (a/asset-dir "/g/")))
+  (is (= "/g/assets/" (a/asset-prefix "/g"))))
+
+(deftest a-listing-that-contains-a-file-under-assets-proves-the-root-is-real
+  (testing "the graph's own recursive listing carries the asset directory's files"
+    (is (true? (a/asset-root-real? "/g" ["/g/pages/A.md" "/g/assets/pic.png"])))
+    (is (true? (a/asset-root-real? "/g/" ["/g/assets/nested/deep.png"]))))
+  (testing "a name that merely starts the same way proves nothing"
+    (is (false? (a/asset-root-real? "/g" ["/g/assets-other/x.png"])))
+    (is (false? (a/asset-root-real? "/g" ["/g/assets.old/x.png"])))
+    (is (false? (a/asset-root-real? "/g" ["/g/assets"])))))
+
+(deftest a-symlinked-asset-directory-contributes-nothing-so-the-root-is-refused
+  (testing "this is the whole gate: OG's walker removes a symlinked `assets`
+            among the graph root's own children, so nothing under it is listed"
+    (is (false? (a/asset-root-real? "/g" ["/g/pages/A.md" "/g/journals/B.md"]))))
+  (testing "and the files behind that link are not inside this graph, however
+            they are spelled"
+    (is (false? (a/asset-root-real? "/g" ["/elsewhere/assets/pic.png"
+                                          "/elsewhere/pic.png"])))))
+
+(deftest the-root-gate-fails-closed
+  (testing "an unreadable directory, a blank graph path and an empty listing"
+    (is (false? (a/asset-root-real? "/g" [])))
+    (is (false? (a/asset-root-real? "/g" nil)))
+    (is (false? (a/asset-root-real? nil ["/g/assets/pic.png"])))
+    (is (false? (a/asset-root-real? "" ["/g/assets/pic.png"]))))
+  (testing "a real but EMPTY asset directory is refused too, and that refuses
+            nothing the listing gate could have authorised: it holds no file"
+    (is (false? (a/asset-root-real? "/g" ["/g/pages/A.md"])))))
+
+;; ---------------------------------------------------------------------------
+;; The listing itself
+;; ---------------------------------------------------------------------------
+
+(deftest the-listing-becomes-a-map-from-the-graph-relative-path-to-what-was-found
+  (is (= {"assets/pic.png" "/g/assets/pic.png"
+          "assets/sub/deep.png" "/g/assets/sub/deep.png"}
+         (a/asset-index "/g" ["/g/assets/pic.png" "/g/assets/sub/deep.png"])))
+  (testing "a path the walker reported from outside the graph root is dropped
+            rather than trusted"
+    (is (= {} (a/asset-index "/g" ["/elsewhere/assets/pic.png"]))))
+  (testing "and a graph with no directory indexes nothing"
+    (is (= {} (a/asset-index nil ["/g/assets/pic.png"])))))
+
+(deftest a-korean-filename-is-indexed-under-one-spelling
+  (testing "macOS reports a decomposed name while a note writes a composed one;
+            without one spelling the same file has two names and neither is found"
+    (let [composed "집중 노트.png"
+          decomposed (.normalize composed "NFD")
+          idx (a/asset-index "/g" [(str "/g/assets/" decomposed)])]
+      (is (not= composed decomposed))
+      (is (= 1 (count idx)))
+      (is (contains? idx (a/normalize-name (str "assets/" composed))))
+      (is (= (str "/g/assets/" decomposed)
+             (get idx (a/normalize-name (str "assets/" composed))))))))
