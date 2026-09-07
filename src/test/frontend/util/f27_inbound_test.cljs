@@ -489,6 +489,25 @@
   (is (= "tagged #씨앗 ✨" (f27in/plain-label "tagged #씨앗 ✨"))
       "a tag and an emoji are already readable and are left alone"))
 
+(deftest a-label-names-an-image-instead-of-echoing-its-markup
+  ;; A live run showed a Crystal chip reading `!wide diagram and after the …`.
+  ;; The link reduction matched the `[alt](path)` part and left the `!` behind,
+  ;; and an image written with no alt text — the common case — reduced to a bare
+  ;; `!` naming nothing at all.
+  (testing "the author's own alt text is the name, without the markup"
+    (is (= "Before the picture wide diagram and after"
+           (f27in/plain-label "Before the picture ![wide diagram](../assets/wide-diagram.png) and after"))))
+  (testing "with no alt text the FILE's name is the name"
+    (is (= "사진 집중 노트.png 과 함께"
+           (f27in/plain-label "사진 ![](../assets/집중 노트.png) 과 함께"))))
+  (testing "and an encoded name reads as the name the user gave it"
+    (is (= "집중 노트.png"
+           (f27in/plain-label "![](../assets/%EC%A7%91%EC%A4%91%20%EB%85%B8%ED%8A%B8.png)"))))
+  (testing "a remote picture is named by its own file too"
+    (is (= "remote.png" (f27in/plain-label "![](https://example.invalid/remote.png)"))))
+  (testing "an ordinary link is still reduced to its link text, not its file"
+    (is (= "the manual" (f27in/plain-label "[the manual](https://example.invalid/x)")))))
+
 (deftest a-label-with-several-references-reduces-each-one
   (let [raw "M refers to N ((6a9c0000-0000-4000-8000-0000000005a2)) and to the target ((6a9c0000-0000-4000-8000-0000000005f0))"]
     (is (= (str "M refers to N " f27in/block-ref-marker " and to the target " f27in/block-ref-marker)

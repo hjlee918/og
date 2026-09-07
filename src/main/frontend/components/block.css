@@ -1333,6 +1333,82 @@ html.is-mac {
   margin-top: 0.15rem;
 }
 
+/* ---------------------------------------------------------------------------
+   F27 local-asset slice — a file inside a panel body.
+
+   OG's own asset rendering puts an image in at its natural size, hangs a
+   delete/copy/maximize bar on it and gives it a resize handle that writes the
+   block. Inside a read-only reference-context panel an asset is instead a
+   NAMED chip, and — only in full context, and only for a graph-local image —
+   a thumbnail whose size is bounded HERE, in F27's own class, rather than by
+   the author's stored width.
+   --------------------------------------------------------------------------- */
+
+.f27-asset {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.15rem;
+  max-width: 100%;
+  padding: 0 0.15rem;
+  border-radius: 3px;
+  border: 1px solid var(--ls-quaternary-background-color);
+  vertical-align: baseline;
+}
+
+.f27-asset-name {
+  /* A long file name wraps inside the panel rather than widening it, which is
+     what keeps the control beside it reachable in a small window. */
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.f27-asset-mark {
+  color: var(--ls-warning-text-color, var(--ls-secondary-text-color));
+  font-size: 0.9em;
+}
+
+.f27-asset.is-missing {
+  border-style: dashed;
+  border-color: var(--ls-warning-text-color, var(--ls-quaternary-background-color));
+}
+
+.f27-asset-missing {
+  color: var(--ls-secondary-text-color);
+  font-style: italic;
+  font-size: 0.9em;
+}
+
+/* The one control an asset carries: reveal the file where it is stored. Small,
+   but a real button with a real focus ring, like every other F27 control. */
+.f27-asset-open {
+  margin-left: 0.15rem;
+  padding: 0 0.15rem;
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.f27-asset-open:hover { color: var(--ls-link-text-hover-color); }
+
+/* The thumbnail. `max-height` is the bound this slice promises; `max-width`
+   keeps it inside the panel on a narrow window, and `height: auto` keeps its
+   aspect ratio while both apply. It is a sibling of the chip, so the words
+   before and after the asset still read as one sentence. */
+.f27-asset-figure {
+  display: block;
+  margin: 0.25rem 0;
+}
+
+.f27-asset-img {
+  display: block;
+  max-height: 10rem;
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  border-radius: 3px;
+}
+
 /* Repeated collapse / Back controls, at the end of the content they close. */
 .f27-ctx-end,
 .f27-desc-end,

@@ -27,6 +27,7 @@
   every decision is taken over OG's own inline AST, and truncation drops AST
   nodes rather than rewriting markup with regular expressions."
   (:require [clojure.string :as string]
+            [frontend.util.f27-assets :as f27a]
             [frontend.util.f27-crystal :as f27c]))
 
 ;; ---------------------------------------------------------------------------
@@ -69,16 +70,31 @@
   back to a label still had room for one."
   24)
 
-(def ^:const unmeasured-weight
-  "What one node costs when its rendered text is NOT in its payload and cannot
-  be derived from it.
+(def unmeasurable
+  "The measure of a node whose displayed size cannot be established from the
+  node itself.
 
-  A node whose display is driven by a data map — a link with no label, a macro,
-  an inline source block — must never measure as nothing, because a node that
-  measures as nothing is emitted whole however large it renders. That is exactly
-  how a formatted target escaped the preview bound. `max-label-chars` is used
-  because it is also the bound on every compact label this contract renders."
-  max-label-chars)
+  Deliberately NOT a number of characters. This contract used to answer 40 here
+  — `max-label-chars`, on the reasoning that a node must never measure as
+  nothing. That fixed the under-charge of zero and introduced a worse error: 40
+  is a MINIMUM cost, and a budget test reads whatever it is given as a MAXIMUM.
+  Unknown size is not a proven upper bound. A subtree deeper than this walk
+  goes, or a node that renders from a data map, can put any amount of text on
+  screen while answering 40, and 40 fits every budget this contract uses — which
+  is exactly how a 5,000-character subtree passed a budget of 160.
+
+  Infinity is the honest answer: no size was established, so no allowance can
+  hold it, and every comparison below refuses the node instead of admitting it."
+  ##Inf)
+
+(defn unmeasurable?
+  "True when a measurement is not a real, finite count of displayed characters.
+
+  Anything that is not a finite number — including a NaN produced by malformed
+  input — is treated as unmeasurable, so an unusable measurement can only ever
+  make this contract show less."
+  [n]
+  (not (and (number? n) (< n unmeasurable))))
 
 (def ^:const measure-limit
   "Above this many code units a string is measured by code units rather than by
@@ -227,43 +243,39 @@
     (<= (count s) measure-limit) (count (f27c/segments s))
     :else (count s)))
 
-(def ^:private hidden-map-keys
-  "Payload-map keys that never reach the screen: the source markup, the
-  destination and the tooltip. Everything else in a payload map might."
-  #{:url :full_text :title :metadata})
-
 (declare displayed-length)
 
 (defn- map-displayed-length
   "How much text a payload MAP puts on screen.
 
-  In order:
-    * `:label` is what renders when the author wrote one;
+  Four modelled shapes, then a refusal:
+    * a GRAPH-LOCAL ASSET renders as F27's compact asset chip, which shows the
+      file's own name bounded by `max-label-chars`. It is charged that, not the
+      author's alt text: the alt text is usually shorter and often empty, and
+      charging it would let a body fill with asset chips;
+    * `:label` is what renders when the author wrote one — including a remote
+      link, whose label is exactly what F27 shows for it;
     * with no label, a BLOCK reference renders a compact label, which this
-      contract bounds at `max-label-chars`, and a page reference or search
-      renders its own destination text;
-    * anything else is charged every string it carries that is not source
-      markup, and never less than `unmeasured-weight`.
+      contract bounds at `max-label-chars` and renders at that bound;
+    * a page reference or search renders its own destination text.
 
-  The floor is the point. A map this function cannot model must not measure as
-  nothing, because a node that measures as nothing is emitted whole however
-  large it renders."
+  Anything else — a macro, an inline source block, a timestamp, a future node
+  type — is `unmeasurable`. Its rendered text is produced by code this function
+  cannot see, so no number here would be a proven maximum. Summing the strings
+  the map happens to carry, with a floor of 40, was such a number: a macro that
+  carries no text at all answered 40 and was then emitted whole into a preview
+  that had 160 to spend."
   [m depth]
-  (let [lbl (displayed-length (:label m) depth)]
-    (if (pos? lbl)
-      lbl
-      (let [[kind payload] (:url m)]
-        (cond
-          (= "Block_ref" kind) max-label-chars
-          (string? payload) (max 1 (text-size payload))
-          :else
-          (max unmeasured-weight
-               (reduce-kv (fn [acc k v]
-                            (+ acc (if (contains? hidden-map-keys k)
-                                     0
-                                     (displayed-length v (inc depth)))))
-                          0
-                          (if (map? m) m {}))))))))
+  (if (f27a/local-asset-node? m)
+    max-label-chars
+    (let [lbl (displayed-length (:label m) depth)]
+      (if (pos? lbl)
+        lbl
+        (let [[kind payload] (:url m)]
+          (cond
+            (= "Block_ref" kind) max-label-chars
+            (string? payload) (max 1 (text-size payload))
+            :else unmeasurable))))))
 
 (defn displayed-length
   "Characters of text one inline AST node — or a list of them — puts on screen.
@@ -279,9 +291,10 @@
   ([node] (displayed-length node 0))
   ([node depth]
    (if (>= depth walk-limit)
-     ;; Deeper than this is not measured, so it is not emitted either: the
-     ;; caller charges an unmeasurable subtree rather than letting it through.
-     unmeasured-weight
+     ;; The walk stops here, so nothing below this point was measured. Answering
+     ;; a small number would claim a size this function never established, and
+     ;; the caller would then admit the whole unmeasured subtree.
+     unmeasurable
      (cond
        (nil? node) 0
        (string? node) (text-size node)
@@ -348,7 +361,9 @@
     label with source access.
 
   There is deliberately no 'take it anyway' branch. That branch is what let a
-  single bold node of 5,000 characters through a budget of 160."
+  single bold node of 5,000 characters through a budget of 160. The depth guard
+  is the same refusal for the same reason: below it nothing can be measured, so
+  nothing below it may be emitted."
   [node budget depth]
   (when (and (pos? budget) (< depth walk-limit))
     (cond
@@ -374,8 +389,14 @@
 (defn- shrink-nodes
   "Take nodes in order until `budget` characters of text have been emitted.
 
-  A node that fits is taken whole. The first node that does not fit is
-  shortened if it can be, and rendering then stops — later nodes are not
+  A node whose size was never established is REFUSED outright and rendering
+  stops there. It is not shortened either: shortening walks into a subtree this
+  measure could not reach, so whatever came back could not be shown to fit
+  either. Refusing is what keeps one invariant true — everything emitted was
+  measured, from the same root, against the allowance it was given.
+
+  Otherwise a node that fits is taken whole, and the first node that does not
+  fit is shortened if it can be. Rendering then stops: later nodes are not
   reached over, because reordering a sentence is not truncating it."
   [nodes budget depth]
   (let [budget (max 0 (or budget 0))
@@ -386,8 +407,14 @@
         (let [n (nth nodes i)
               w (displayed-length n)
               left (- budget used)]
-          (if (<= w left)
+          (cond
+            (unmeasurable? w)
+            {:nodes out :used used :truncated? true}
+
+            (<= w left)
             (recur (inc i) (+ used w) (conj out n))
+
+            :else
             (if-let [{:keys [node] :as shrunk} (shrink-node n left depth)]
               {:nodes (conj out node) :used (+ used (:used shrunk)) :truncated? true}
               {:nodes out :used used :truncated? true})))))))
@@ -398,9 +425,14 @@
   Returns {:nodes [...] :used n :truncated? bool}.
 
   `:nodes` may be EMPTY with `:truncated?` true — an opening node that cannot be
-  shortened, or no allowance left. That is not a failure and it is not an
-  invitation to emit the node anyway: the caller shows a compact label with a
-  source control instead, which is bounded by construction.
+  shortened, one whose size was never established, or no allowance left. That is
+  not a failure and it is not an invitation to emit the node anyway: the caller
+  shows a compact label with a source control instead, which is bounded by
+  construction.
+
+  The guarantee is on what comes back, not on the estimate: every node in
+  `:nodes` was measured from this same root and measures, together, no more than
+  `budget`.
 
   Truncation is always reported. The caller shows `…` and the body offers the
   source block."

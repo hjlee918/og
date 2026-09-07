@@ -59,6 +59,7 @@
             [frontend.util.clock :as clock]
             [frontend.util.drawer :as drawer]
             [frontend.util.f27-ref-overview :as f27]
+            [frontend.util.f27-assets :as f27a]
             [frontend.util.f27-body :as f27b]
             [frontend.util.f27-crystal :as f27c]
             [frontend.util.f27-context :as f27ctx]
@@ -435,7 +436,7 @@
 
 ;; TODO: safe encoding asciis
 ;; TODO: image link to another link
-(defn image-link [config url href label metadata full_text]
+(defn- image-link* [config url href label metadata full_text]
   (let [metadata (if (string/blank? metadata)
                    nil
                    (gp-util/safe-read-string metadata))
@@ -463,6 +464,18 @@
                       (assets-handler/normalize-asset-resource-url href)
                       (get-file-absolute-path config href)))]
          (resizable-image config title href metadata full_text false))))))
+
+(defn image-link
+  "F27 local-asset slice: inside an F27 panel body an asset is presented by
+  F27's own bounded renderer — a size-constrained thumbnail for a graph-local
+  image, a readable name for everything else, and nothing fetched for a remote
+  or inline-data source. `:f27/media-render` is set ONLY by that renderer, so
+  with the key absent this calls straight through and behaves byte-for-byte as
+  it always has."
+  [config url href label metadata full_text]
+  (if-let [f27-media (:f27/media-render config)]
+    (f27-media config href label full_text)
+    (image-link* config url href label metadata full_text)))
 
 
 (def timestamp-to-string export-common-handler/timestamp-to-string)
@@ -1050,7 +1063,7 @@
                    (get-file-absolute-path config href)))]
       (audio-cp href))))
 
-(defn- media-link
+(defn- media-link*
   [config url s label metadata full_text]
   (let [ext (keyword (util/get-file-ext s))
         label-text (get-label-text label)]
@@ -1085,6 +1098,17 @@
       :else
       (asset-reference config label s))))
 
+(defn- media-link
+  "F27 local-asset slice — the same guarded hook as `image-link`. This is the
+  branch that reaches `resizable-image` (an asset at its natural size, carrying
+  OG's delete/copy/maximize action bar and a resize handle that writes the
+  block) and `asset-reference`/`audio-cp` (playback). None of those belong in a
+  read-only reference-context panel."
+  [config url s label metadata full_text]
+  (if-let [f27-media (:f27/media-render config)]
+    (f27-media config s label full_text)
+    (media-link* config url s label metadata full_text)))
+
 (defn- search-link-cp
   [config url s label title metadata full_text]
   (cond
@@ -1108,6 +1132,14 @@
       (if-let [f27-render (:f27/ref-render config)]
         (f27-render config id label)
         (block-reference config id label)))
+
+    ;; F27 local-asset slice. A markdown link to a graph-local file written
+    ;; WITHOUT a leading `!` never satisfies `show-link?`, so it falls through to
+    ;; the electron branch below and renders as a bare `file://` anchor with
+    ;; `target="_blank"`. Inside an F27 panel it is presented as a named
+    ;; attachment instead. Guarded on the same key, so nothing changes elsewhere.
+    (and (:f27/media-render config) (f27a/graph-local? s))
+    ((:f27/media-render config) config s label full_text)
 
     (not (string/includes? s "."))
     (page-reference (:html-export? config) s config label)
@@ -2660,6 +2692,200 @@
              :title (t :f27/inbound-open-source)})
    "↗"])
 
+;; ---------------------------------------------------------------------------
+;; F27 local-asset slice — how an ASSET is presented inside a panel body.
+;;
+;; Until now the panels rendered assets with OG's own path, which inside a
+;; read-only reference-context panel produced four separate problems:
+;;
+;;   * an image at its natural size (or the author's stored `:width`) filled the
+;;     panel the reader opened to read text;
+;;   * `resizable-image` hung OG's action bar on it — DELETE ASSET with a
+;;     physical-delete checkbox, copy, maximize — and a resize handle whose
+;;     mouse-up calls `editor-handler/resize-image!`, which WRITES the block.
+;;     That was the one path from a read-only panel to a graph write;
+;;   * an `http` source was FETCHED, so opening a context panel issued network
+;;     requests for whatever the referenced blocks happened to link to;
+;;   * a missing file said nothing at all: a broken image icon, or a dead link.
+;;
+;; The contract here (F27_ASSET_DISPLAY_CONTRACT.md):
+;;
+;;   full context   a graph-local image is a thumbnail bounded by CSS; every
+;;                  other asset is its readable NAME with one open control
+;;   preview        a compact indicator only, charged to the preview budget
+;;   remote/data    named, never fetched, never decoded
+;;   missing        said in words, with no control that cannot work
+;;
+;; Installed through `:f27/media-render`, a config key only `f27-body-config`
+;; sets, so OG's ordinary asset rendering is untouched.
+;; ---------------------------------------------------------------------------
+
+(defn- f27-asset-open-button
+  "Reveal ONE local asset where it is stored.
+
+  The same call OG's own image action bar makes for a local asset —
+  `openFileInFolder` on the normalised path — and deliberately not OG's PDF
+  viewer, which is the excluded annotation project, nor a `file://` anchor with
+  `target=\"_blank\"`, which is what a plain markdown link to an asset renders as
+  today. A native button, so Tab reaches it and Enter or Space activates it.
+
+  Outside Electron there is no such handling, so there is no control rather than
+  a control that does nothing."
+  [src label]
+  (when (and (util/electron?) (string? src) (not (string/blank? src)))
+    [:button.f27-asset-open.f27-btn
+     (f27-btn (fn []
+                (try (ipc/ipc "openFileInFolder" (fs/asset-path-normalize src))
+                     (catch :default _ nil)))
+              {:aria-label (if label (t :f27/asset-open-of label) (t :f27/asset-open))
+               :title (t :f27/asset-open)})
+     "↗"]))
+
+(defn- f27-asset-locate
+  "The graph-relative path this asset is actually stored under, or nil.
+
+  A read, and the only filesystem question this slice asks. It probes RELATIVE
+  TO THE GRAPH DIRECTORY rather than round-tripping the resolved `assets://` URL
+  back into a path, and it answers with the spelling that was FOUND rather than
+  a bare true/false.
+
+  Both of those matter, and a live run showed why. A picture written
+  `../assets/%EC%A7%91%EC%A4%91%20...png` is the same file as one written
+  `../assets/집중 노트.png`. Probing the written spelling reported it missing;
+  and even with the probe corrected, building the display URL from the written
+  spelling produced an address the asset protocol could not resolve, so the
+  image failed to load and the chip said \"file not found\" about a file that was
+  right there. Resolving from the spelling that exists fixes both at once.
+
+  Each candidate is tried in order, and a failed probe is a nil rather than an
+  exception that would leave a chip saying nothing at all."
+  [dir paths]
+  (if (or (string/blank? (str dir)) (empty? paths))
+    (p/resolved nil)
+    (reduce (fn [acc rel]
+              (p/then acc (fn [found]
+                            (if found
+                              found
+                              (p/then (p/catch (fs/file-exists? dir rel) (fn [_] false))
+                                      (fn [ok] (when ok rel)))))))
+            (p/resolved nil)
+            paths)))
+
+(rum/defcs f27-local-asset < rum/reactive
+  (rum/local nil ::src)
+  (rum/local nil ::exists?)
+  (rum/local false ::broken?)
+  {:will-mount
+   (fn [state]
+     ;; Resolve and probe ONCE, on mount, rather than on every render. Both are
+     ;; reads: `make-asset-url` is OG's own resolution, and the probe is OG's own
+     ;; `file-exists?` against the graph directory. Nothing here writes, and
+     ;; nothing here fetches: a local file is not a network request.
+     (let [[_config href _kind _name _label] (:rum/args state)
+           *src (::src state)
+           *exists? (::exists? state)]
+       (try
+         (p/let [found (f27-asset-locate (config/get-repo-dir (state/get-current-repo))
+                                         (f27a/repo-relative-paths href))]
+           (reset! *exists? (some? found))
+           (when found
+             ;; Resolved from the spelling that was found on disk, not the one
+             ;; the author happened to type, so an encoded name and a literal
+             ;; one produce the same working address.
+             (p/let [url (editor-handler/make-asset-url
+                          (config/get-local-asset-absolute-path found))]
+               (reset! *src url))))
+         (catch :default _ (reset! *exists? false)))
+       state))}
+  "One graph-local asset, as an F27 panel shows it.
+
+  `kind` and `name` come from the pure classifier, so this component only
+  resolves, probes and renders. An image is shown only in FULL context and only
+  when the file is there; everywhere else the file is named. A name is never a
+  path, and a missing file never carries a control that cannot work."
+  [state config href kind name' label]
+  (let [level (or (:f27/ref-level config) 0)
+        src @(::src state)
+        exists? @(::exists? state)
+        broken? @(::broken? state)
+        ;; nil means "not answered yet", which is not the same as "not there".
+        ;; Only a definite `false`, or an image the browser could not decode,
+        ;; is reported as missing.
+        missing? (or broken? (false? exists?))
+        alt (get-label-text label)
+        badge (f27a/asset-badge href)
+        shown (or name' (t :f27/asset-unnamed))
+        title (cond missing? (t :f27/asset-missing)
+                    (and (= :image kind) (pos? level)) (t :f27/asset-image-compact)
+                    :else (t :f27/asset-local))
+        ;; A thumbnail belongs to the surface the reader explicitly opened. In a
+        ;; bounded reference preview the asset is a compact indicator, because
+        ;; that preview has a text budget and an image has no place in it.
+        image? (and (= :image kind)
+                    (zero? level)
+                    (some? src)
+                    (not missing?))]
+    [:<>
+     [:span.f27-asset {:class (str "is-" (name kind) (when missing? " is-missing"))
+                       :title (if (string/blank? alt) title (str alt " — " title))}
+      (when missing? [:span.f27-asset-mark {:aria-hidden "true"} "⚠"])
+      (when badge [:span.f27-ctx-badge.is-asset badge])
+      [:span.f27-asset-name shown]
+      (when missing? [:span.f27-asset-missing (t :f27/asset-missing)])
+      (when-not missing? (f27-asset-open-button src shown))]
+     (when image?
+       [:span.f27-asset-figure
+        [:img.f27-asset-img
+         {:src src
+          :alt (if (string/blank? alt) shown alt)
+          :loading "lazy"
+          :referrerPolicy "no-referrer"
+          ;; The file may be listed and still not be readable as an image. The
+          ;; chip above then says so, instead of leaving a broken icon.
+          :on-error (fn [_] (reset! (::broken? state) true))}]])]))
+
+(defn- f27-asset-render
+  "Present ONE asset found inside an F27 panel body.
+
+  Called by `image-link`, `media-link` and `search-link-cp` in place of OG's own
+  asset rendering, and only when `:f27/media-render` is set — which only
+  `f27-body-config` does.
+
+  Every branch is display-only, and no branch loads anything the reader did not
+  already have on disk."
+  [config href label full-text]
+  (let [href (str href)
+        name' (f27a/asset-name href f27b/max-label-chars)]
+    (cond
+      ;; Nothing is fetched and nothing is decoded. The author's own words, or
+      ;; the address itself, name what is there; an ordinary external link is
+      ;; how OG presents every other outward address, so that is what this is.
+      (f27a/remote? href)
+      (let [data? (string/starts-with? (string/lower-case href) "data:")
+            text (or (get-label-text label) (when-not data? href))
+            shown (or (f27c/preview-text (or text "") f27b/max-label-chars)
+                      (t :f27/asset-embedded))]
+        [:span.f27-asset.is-remote {:title (if data?
+                                             (t :f27/asset-embedded)
+                                             (t :f27/asset-remote))}
+         [:span.f27-ctx-badge.is-asset (if data? "DATA" "WEB")]
+         (if data?
+           [:span.f27-asset-name shown]
+           [:a.f27-asset-name {:href href :target "_blank" :rel "noreferrer"} shown])])
+
+      (f27a/graph-local? href)
+      (f27-local-asset config href (f27a/asset-kind href) name' label)
+
+      ;; Neither in this graph's assets nor an address: a path this panel cannot
+      ;; resolve and must not guess at. It is named, and nothing is offered.
+      :else
+      [:span.f27-asset.is-external {:title (t :f27/asset-external)}
+       (when-let [b (f27a/asset-badge href)] [:span.f27-ctx-badge.is-asset b])
+       [:span.f27-asset-name (or name'
+                                 (f27c/preview-text (or (get-label-text label) full-text "")
+                                                    f27b/max-label-chars)
+                                 (t :f27/asset-unnamed))]])))
+
 (declare f27-ref-render)
 
 (defn- f27-body-config
@@ -2672,6 +2898,7 @@
   [config repo host-uuid]
   (assoc config
          :f27/ref-render f27-ref-render
+         :f27/media-render f27-asset-render
          :f27/ref-repo repo
          :f27/ref-level 0
          :f27/ref-trail (f27b/push-trail #{} (f27-ref-key host-uuid))

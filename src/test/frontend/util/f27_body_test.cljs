@@ -267,12 +267,117 @@
   (let [nodes (ast "[my label](((7f271000-0000-4000-8000-000000000001)))")]
     (is (= (count "my label") (b/displayed-length nodes)))))
 
-(deftest an-unmodelled-payload-map-is-never-charged-nothing
-  (testing "a map with no label and no simple destination still costs"
-    (is (>= (b/displayed-length ["Some_Future_Node" {:opaque "x"}])
-            b/unmeasured-weight)))
-  (testing "and a node deeper than the walk limit is charged, not waved through"
-    (is (= b/unmeasured-weight (b/displayed-length ["Plain" "x"] b/walk-limit)))))
+(deftest an-unmodelled-payload-map-has-no-proven-size
+  (testing "a map with no label and no simple destination is UNMEASURABLE"
+    ;; It used to be charged an arbitrary minimum of 40. A minimum is not a
+    ;; maximum: a macro renders whatever it expands to, and none of that is in
+    ;; the node, so any finite charge lets it through a budget that size.
+    (is (b/unmeasurable? (b/displayed-length ["Some_Future_Node" {:opaque "x"}]))))
+  (testing "and a node deeper than the walk limit is unmeasurable too"
+    (is (b/unmeasurable? (b/displayed-length ["Plain" "x"] b/walk-limit)))))
+
+;; --- unknown size is not a proven upper bound -------------------------------
+;;
+;; These read what actually came back, not what the estimator says about it: the
+;; estimator is the thing under suspicion. `retained` concatenates every string
+;; the emitted nodes carry, so a payload that slipped through whole is counted
+;; where it would actually reach a renderer.
+
+(defn- retained
+  "Every string the emitted nodes actually carry — read out of the RESULT."
+  [x]
+  (cond
+    (string? x) x
+    (map? x) (apply str (map retained (vals x)))
+    (coll? x) (apply str (map retained x))
+    :else ""))
+
+(defn- retained-count
+  "How many of one payload character survived into the emitted nodes."
+  [nodes ch]
+  (count (filter #(= ch %) (retained nodes))))
+
+(defn- wrap
+  "`n` nested bold wrappers around one node, in OG's own Emphasis shape."
+  [n node]
+  (nth (iterate (fn [x] ["Emphasis" [["Bold"] [x]]]) node) n))
+
+(deftest a-subtree-too-deep-to-measure-is-refused-not-emitted-whole
+  ;; The supervisor's reproduction: ["Plain" "x" x5000] inside 40 Emphasis
+  ;; wrappers, budget 160. `displayed-length` stopped walking at its depth limit
+  ;; and answered 40; 40 fits 160, so the whole unmeasured subtree was taken.
+  (let [payload (apply str (repeat 5000 "x"))
+        deep (wrap 40 ["Plain" payload])
+        r (b/take-nodes [deep] 160)]
+    (is (b/unmeasurable? (b/displayed-length deep))
+        "its size was never established, so no budget can hold it")
+    (is (true? (:truncated? r)))
+    (is (<= (:used r) 160))
+    (is (not (string/includes? (retained (:nodes r)) payload))
+        "REGRESSION: the whole 5,000-character subtree was emitted")
+    (is (<= (retained-count (:nodes r) \x) 160)
+        "characters actually retained, counted in the result")
+    (is (within? r 160))))
+
+(deftest a-measurable-nesting-depth-is-still-shortened-normally
+  ;; The refusal above must not become a blanket refusal of nested formatting.
+  (let [payload (apply str (repeat 5000 "x"))
+        shallow (wrap 3 ["Plain" payload])
+        r (b/take-nodes [shallow] 160)]
+    (is (false? (b/unmeasurable? (b/displayed-length shallow))))
+    (is (true? (:truncated? r)))
+    (is (= 160 (retained-count (:nodes r) \x)))
+    (is (= "Emphasis" (ffirst (:nodes r))) "and it is still bold")
+    (is (within? r 160))))
+
+(deftest an-unknown-node-is-refused-rather-than-charged-a-guessed-minimum
+  (testing "a payload map that carries none of the text it renders"
+    (let [node ["Macro" {:name "big" :arguments []}]
+          r (b/take-nodes [node] 160)]
+      (is (b/unmeasurable? (b/displayed-length node)))
+      (is (empty? (:nodes r)) "not emitted at all")
+      (is (true? (:truncated? r)))))
+  (testing "text before an unknown node is still emitted, and the cut reported"
+    (let [r (b/take-nodes [["Plain" "readable text"]
+                           ["Macro" {:name "big" :arguments []}]
+                           ["Plain" " more"]] 160)]
+      (is (= [["Plain" "readable text"]] (:nodes r)))
+      (is (true? (:truncated? r)))
+      (is (= 13 (:used r)))))
+  (testing "an unmeasurable node cannot be admitted by a large budget either"
+    (doseq [budget [0 24 160 420 100000]]
+      (let [r (b/take-nodes [["Macro" {:name "big" :arguments []}]] budget)]
+        (is (empty? (:nodes r)) (str "budget " budget))))))
+
+(deftest an-unmeasurable-node-inside-a-shortened-wrapper-is-also-refused
+  (let [node ["Emphasis" [["Bold"] [["Plain" "start "]
+                                    ["Macro" {:name "big" :arguments []}]]]]
+        r (b/take-nodes [node] 160)]
+    (is (b/unmeasurable? (b/displayed-length node)))
+    (is (empty? (:nodes r))
+        "the wrapper has no proven size either, so it is refused whole")
+    (is (true? (:truncated? r)))))
+
+(deftest a-graph-local-asset-is-charged-what-its-chip-shows
+  ;; Inside a bounded preview an asset becomes a compact chip showing the FILE's
+  ;; name, capped at `max-label-chars`. Charging the author's alt text — often
+  ;; empty, and never what the chip shows — is an under-charge of exactly the
+  ;; class the limiter correction removed.
+  (testing "the alt text is not what is charged"
+    (is (= b/max-label-chars (b/displayed-length (ast "![집중](../assets/집중 노트.png)")))))
+  (testing "and neither is the path, when the author wrote no alt text"
+    (is (= b/max-label-chars (b/displayed-length (ast "![](../assets/pic.png)")))))
+  (testing "a plain link to an attachment is the same node to the budget"
+    (is (= b/max-label-chars (b/displayed-length (ast "[report](../assets/report.pdf)")))))
+  (testing "so one preview cannot be filled with asset chips"
+    (let [r (b/take-nodes (ast (apply str (repeat 20 "![](../assets/pic.png) "))) 160)]
+      (is (within? r 160))
+      (is (true? (:truncated? r)))))
+  (testing "a remote link is still charged the label it renders"
+    ;; Nothing is fetched for it, and what reaches the screen is the author's
+    ;; own label, so the existing charge is already what it displays.
+    (is (= (count "remote pic")
+           (b/displayed-length (ast "![remote pic](https://example.com/a.png)"))))))
 
 (deftest many-block-references-cannot-all-be-emitted
   (let [nodes (ast (apply str (repeat 20 "((7f271000-0000-4000-8000-000000000001)) ")))

@@ -467,6 +467,12 @@
   "`((uuid))` — an inline reference to another block."
   #"\(\(\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*\)\)")
 
+(def ^:private md-image-re
+  "`![alt](path)` — a markdown image. The leading `!` is the only thing that
+  distinguishes it from a link, and it is exactly the character the link
+  reduction below used to leave stranded in a label."
+  #"!\[([^\[\]]*)\]\(([^()]*)\)")
+
 (def ^:private md-link-re #"\[([^\[\]]*)\]\(([^()]*)\)")
 (def ^:private page-ref-re #"\[\[([^\[\]]+)\]\]")
 
@@ -475,6 +481,28 @@
   character, so it says a reference is there without spending the whole label
   saying it."
   "↗")
+
+(defn- image-name
+  "What a markdown image is reduced to in a compact label.
+
+  The author's own alt text, or — when they wrote none, which is the common
+  case — the file's own name, percent-decoded so a Korean or spaced filename
+  reads as it was given. A live run showed a Crystal chip reading
+  `!wide diagram and after the …`, and an image written with no alt text
+  reducing to a bare `!` that named nothing.
+
+  `frontend.util.f27-assets` owns the richer naming used for a RENDERED asset
+  chip; this is the reduction of raw markup inside a compact label, and it
+  cannot call that namespace without a require cycle. The two agree on the only
+  thing that matters here: a name is never a path and never markup."
+  [alt href]
+  (let [alt (string/trim (or alt ""))]
+    (if-not (string/blank? alt)
+      alt
+      (let [p (string/replace (or href "") #"[?#].*$" "")
+            base (when-not (string/ends-with? p "/") (last (string/split p #"/")))
+            base (try (js/decodeURIComponent (or base "")) (catch :default _ base))]
+        (string/trim (or base ""))))))
 
 (defn plain-label
   "A readable compact label for a block: a path breadcrumb entry, or a control's
@@ -486,9 +514,9 @@
   target ((6a9c0000-0000-4…\"` names nothing.
 
   Inline reference markup is therefore reduced to what a person reads: a page
-  reference keeps its page name, a markdown link keeps its link text, and a
-  block reference — whose target text is not available to a pure function —
-  becomes a single marker.
+  reference keeps its page name, a markdown link keeps its link text, an image
+  becomes its alt text or its file's name, and a block reference — whose target
+  text is not available to a pure function — becomes a single marker.
 
   This affects ONLY compact labels. The block itself is never altered, and the
   row's own text is still rendered in full by OG's inline renderer, block
@@ -497,5 +525,8 @@
   (when (string? content)
     (-> content
         (string/replace block-ref-re block-ref-marker)
+        ;; Images first: `![alt](path)` is also a link with a `!` in front of
+        ;; it, so reducing links first leaves the `!` behind.
+        (string/replace md-image-re (fn [[_ alt href]] (image-name alt href)))
         (string/replace md-link-re "$1")
         (string/replace page-ref-re "$1"))))
