@@ -59,6 +59,7 @@
             [frontend.util.clock :as clock]
             [frontend.util.drawer :as drawer]
             [frontend.util.f27-ref-overview :as f27]
+            [frontend.util.f27-body :as f27b]
             [frontend.util.f27-crystal :as f27c]
             [frontend.util.f27-context :as f27ctx]
             [frontend.util.f27-children :as f27ch]
@@ -1100,7 +1101,13 @@
 
     (block-ref/block-ref? s)
     (let [id (block-ref/get-block-ref-id s)]
-      (block-reference config id label))
+      ;; F27 readable-context batch: inside an F27 panel body, a block reference
+      ;; is presented by F27's own bounded renderer instead of being substituted
+      ;; recursively. `:f27/ref-render` is set ONLY by that renderer, so with the
+      ;; key absent this is byte-for-byte the behaviour it has always had.
+      (if-let [f27-render (:f27/ref-render config)]
+        (f27-render config id label)
+        (block-reference config id label)))
 
     (not (string/includes? s "."))
     (page-reference (:html-export? config) s config label)
@@ -1144,13 +1151,22 @@
       (let [label* (if (seq (mldoc/plain->text label)) label nil)
             {:keys [link-depth]} config
             link-depth (or link-depth 0)]
-        (if (> link-depth max-depth-of-links)
-          [:p.warning.text-sm "Block ref nesting is too deep"]
-          (block-reference (assoc config
-                                  :reference? true
-                                  :link-depth (inc link-depth)
-                                  :block/uuid id)
-                           id label*)))
+        ;; F27 readable-context batch. Inside an F27 panel body the reference is
+        ;; presented by F27's own bounded renderer: one preview level, a cycle
+        ;; reported as a cycle, and a budget — instead of substituting the whole
+        ;; target block one `:link-depth` further down until OG's ceiling prints
+        ;; "Block ref nesting is too deep" in every branch. The key is set only
+        ;; by that renderer; absent, everything below is unchanged, and OG's
+        ;; global `max-depth-of-links` is not touched.
+        (if-let [f27-render (:f27/ref-render config)]
+          (f27-render config id label*)
+          (if (> link-depth max-depth-of-links)
+            [:p.warning.text-sm "Block ref nesting is too deep"]
+            (block-reference (assoc config
+                                    :reference? true
+                                    :link-depth (inc link-depth)
+                                    :block/uuid id)
+                             id label*))))
 
       ["Page_ref" page]
       (let [format (get-in config [:block :block/format])]
@@ -2568,6 +2584,220 @@
                              (on-activate))))}
          extra))
 
+;; ---------------------------------------------------------------------------
+;; F27 readable-context batch — how a block's TEXT is rendered inside a panel.
+;;
+;; Until now the panels called `inline-text`, which is OG's ordinary inline
+;; renderer. For a `((uuid))` that renderer reaches `block-reference`, which
+;; renders the whole target block — including the references inside IT — one
+;; `:link-depth` further down. Two blocks that reference each other therefore
+;; substituted each other's text repeatedly until OG's ceiling was passed, and
+;; every branch printed "Block ref nesting is too deep". That is what filled the
+;; user's panels; the inbound navigator's cycle guard could not see it, because
+;; it guards navigation steps, not body rendering.
+;;
+;; The contract here (F27_BODY_DISPLAY_CONTRACT.md):
+;;   * the block's own text is rendered in full, by OG's own parser and
+;;     renderer, so emphasis, page links, tags, headings, tasks, Korean and
+;;     emoji are untouched;
+;;   * a reference inside it shows ONE bounded preview of what it points at;
+;;   * a reference inside THAT preview is not followed — it is named compactly
+;;     and left for explicit navigation;
+;;   * a repeat or a cycle is said to be a repeat, an unresolvable target is
+;;     said to be unavailable, and neither is ever shown as a raw identifier.
+;;
+;; It is installed through `:f27/ref-render`, a config key only this code sets,
+;; so OG's ordinary rendering — and its global `max-depth-of-links` — are
+;; unchanged. Read-only throughout: entity lookups and pure functions.
+;; ---------------------------------------------------------------------------
+
+(defn- f27-ref-key
+  "One reference identity, in the single form the render trail compares.
+
+  Identities arrive both as parsed strings from the AST and as uuid objects from
+  an entity; a trail that mixed the two would never detect the cycle it exists
+  for."
+  [id]
+  (let [s (some-> id str string/trim string/lower-case)]
+    (when-not (string/blank? s) s)))
+
+(defn- f27-ref-target
+  "Resolve a block reference's target for display. A read; never a write.
+
+  A malformed identifier and a deleted block both resolve to nil, and the caller
+  says so in words rather than showing the identifier."
+  [repo id]
+  (when-let [u (try (parse-uuid (str id)) (catch :default _ nil))]
+    (try (db/entity repo [:block/uuid u]) (catch :default _ nil))))
+
+(defn- f27-ref-label
+  "A compact, readable name for a reference target — never an identifier.
+
+  A referring block's raw text is largely `((uuid))` by definition, so inline
+  reference markup is first reduced to what a person reads, then block-level
+  prefixes are split off, and only then is it truncated on grapheme boundaries."
+  [entity]
+  (let [content (f27-display-content (:block/format entity) (:block/content entity))
+        {:keys [text]} (f27ctx/split-block-prefix (f27in/plain-label content))]
+    (f27b/compact-label text)))
+
+(defn- f27-ref-source-button
+  "The source control carried by every chip that HAS a source.
+
+  A native button, so Tab reaches it and Enter or Space activates it, with an
+  accessible name that says which block it opens. It goes to the same place
+  OG's own block-reference click goes."
+  [id label]
+  [:button.f27-body-ref-src.f27-btn
+   (f27-btn (fn [] (route-handler/redirect-to-page! (str id)))
+            {:aria-label (if label
+                           (t :f27/inbound-open-source-of label)
+                           (t :f27/inbound-open-source))
+             :title (t :f27/inbound-open-source)})
+   "↗"])
+
+(declare f27-ref-render)
+
+(defn- f27-body-config
+  "Rendering config for ONE block's text inside an F27 panel.
+
+  Seeds the render trail with the host block itself, so a block that references
+  itself is a repeat by construction rather than a special case, and creates
+  this body's budget. The budget is a volatile created fresh on every render of
+  this body, so it is per-render bookkeeping, not shared mutable state."
+  [config repo host-uuid]
+  (assoc config
+         :f27/ref-render f27-ref-render
+         :f27/ref-repo repo
+         :f27/ref-level 0
+         :f27/ref-trail (f27b/push-trail #{} (f27-ref-key host-uuid))
+         :f27/ref-budget (volatile! (f27b/new-budget))))
+
+(defn- f27-ref-render
+  "Present ONE block reference found inside an F27 panel body.
+
+  Called by `link-cp`/`search-link-cp` in place of `block-reference`, and only
+  when `:f27/ref-render` is set — which only `f27-body-config` does.
+
+  Every branch is display-only. Nothing here follows a reference automatically
+  beyond the single preview level the contract allows, so no amount of mutual
+  referencing can produce recursion or a depth warning."
+  [config id label]
+  (let [repo (:f27/ref-repo config)
+        level (or (:f27/ref-level config) 0)
+        trail (or (:f27/ref-trail config) #{})
+        *budget (:f27/ref-budget config)
+        budget (if *budget @*budget (f27b/new-budget))
+        k (f27-ref-key id)
+        entity (f27-ref-target repo id)
+        format (or (:block/format entity) :markdown)
+        content (f27-display-content format (:block/content entity))
+        labelled? (boolean (seq (mldoc/plain->text label)))
+        outcome (f27b/plan-ref {:id k
+                                :resolved? (some? content)
+                                :labelled? labelled?
+                                :level level
+                                :trail trail
+                                :budget budget})
+        text-label (f27-ref-label entity)
+        ;; A chip that cannot show the target's text still names it. Only when
+        ;; there is genuinely nothing readable does it say so in words.
+        named (or text-label (t :f27/body-ref-untitled))
+        ;; `mark` is nil for an ordinary reference. A mark here MEANS something
+        ;; is not ordinary — a repeat, a bound, a target that is not there — so
+        ;; the three that matter stay legible instead of competing with a glyph
+        ;; on every chip. `↗` is the SOURCE CONTROL and nothing else, which
+        ;; keeps it distinct from the `↗` a compact label already uses to say
+        ;; "a reference is written here".
+        chip (fn [kind mark body title source?]
+               [:span.f27-body-ref {:class kind :title title}
+                (when mark [:span.f27-body-ref-mark {:aria-hidden "true"} mark])
+                [:span.f27-body-ref-text body]
+                (when source? (f27-ref-source-button id text-label))])]
+    (case outcome
+      ;; Nothing resolved. The author's own label, if they wrote one, is still
+      ;; their text and is kept; the identifier never becomes the label.
+      :unresolved
+      (chip "is-unresolved" "⚠"
+            (if labelled?
+              ;; The author's own words are kept, rendered with THIS renderer
+              ;; still installed. Dropping the hook here would have let a
+              ;; reference written inside a label reach OG's recursive path —
+              ;; the very hole this contract closes.
+              (vec (map-inline config label))
+              [:span.f27-body-ref-missing (t :f27/body-ref-unavailable)])
+            (t :f27/body-ref-unavailable)
+            false)
+
+      ;; The author wrote what this reference means. Show that, not a preview of
+      ;; the target, and charge it nothing.
+      :label
+      (chip "is-label" nil
+            (vec (map-inline config label))
+            (t :f27/body-ref-preview)
+            true)
+
+      ;; Already being rendered above this point — a cycle, or the same block
+      ;; twice. This is the case that used to fill the panel.
+      :repeat
+      (chip "is-repeat" "↻" named (t :f27/children-cycle) true)
+
+      ;; Below the one preview level this contract expands.
+      :depth
+      (chip "is-closed" "⋯" named (t :f27/body-ref-depth) true)
+
+      ;; This body has shown as many previews as it may.
+      :budget
+      (do (when *budget (vswap! *budget f27b/withhold))
+          (chip "is-closed" "⋯" named
+                (t :f27/body-ref-budget f27b/max-expansions) true))
+
+      ;; One bounded preview of the target's own text, rendered through the same
+      ;; parser and renderer — with this same function still installed, so a
+      ;; reference INSIDE the preview is named, never followed.
+      (let [{:keys [heading marker text]} (f27ctx/split-block-prefix content)
+            ast (gp-mldoc/inline->edn (or text "") (gp-mldoc/default-config format))
+            {:keys [nodes used truncated?]} (f27b/take-nodes ast (f27b/preview-allowance budget))
+            inner (assoc config
+                         :f27/ref-level (inc level)
+                         :f27/ref-trail (f27b/push-trail trail k))
+            ;; Forced, not lazy: the budget must be spent in the order the
+            ;; reader sees, and read back correctly after the body is built.
+            body (vec (map-inline inner nodes))]
+        (when *budget (vswap! *budget f27b/spend used truncated?))
+        (chip "is-preview" nil
+              [:<>
+               (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
+               (when marker [:span.f27-ctx-badge.is-task marker])
+               body
+               (when truncated? [:span.f27-body-ref-cut "…"])]
+              (t :f27/body-ref-preview)
+              true)))))
+
+(defn- f27-body-text
+  "One block's text as an F27 panel shows it.
+
+  Same parser and same renderer OG uses for the block itself — no second
+  grammar, no regular-expression rewriting of markup — with block references
+  presented under the F27 contract instead of substituted recursively.
+
+  The block's own text is never truncated: it is what the reader opened the
+  panel to read. Only reference previews are bounded, and when any of them was
+  shortened or left closed the body says so once, beside chips that each already
+  offer their source."
+  [config repo host-uuid format text]
+  (when (and (string? text) (not (string/blank? text)))
+    (let [cfg (f27-body-config config repo host-uuid)
+          *budget (:f27/ref-budget cfg)
+          ast (gp-mldoc/inline->edn text (gp-mldoc/default-config (or format :markdown)))
+          rendered (vec (map-inline cfg ast))
+          {:keys [truncated withheld] :as spent} @*budget]
+      [:<>
+       [:div.inline.mr-1 rendered]
+       (when (f27b/body-note-needed? spent)
+         [:div.f27-ctx-note.f27-body-note
+          (t :f27/body-bounded (+ (or truncated 0) (or withheld 0)))])])))
+
 (rum/defc f27-crystal-preview < rum/static
   [m]
   (let [raw (:content m)
@@ -2689,14 +2919,16 @@
 (rum/defc f27-context-line < rum/static
   "One ancestor or the referencing block itself, rendered read-only.
 
-  Uses OG's own inline renderer so emphasis, links, block refs, Korean and emoji
-  keep their meaning. `inline-text` renders markup only — it installs no editing
-  handler, creates no id, and cannot save.
+  Uses OG's own parser and renderer so emphasis, links, tags, Korean and emoji
+  keep their meaning, through `f27-body-text`, which renders markup only — it
+  installs no editing handler, creates no id, and cannot save — and presents a
+  block reference under the F27 contract instead of substituting the target
+  block's whole content recursively.
 
   A heading's leading `##` and a task's leading `TODO` are BLOCK-level markup an
   inline renderer echoes as literal characters, so they are split off and shown
   as structure instead. The block itself is not altered."
-  [config block self?]
+  [config repo block self?]
   (let [format (or (:block/format block) :markdown)
         content (f27-display-content format (f27ctx/block-label block))
         {:keys [heading marker text]} (f27ctx/split-block-prefix content)]
@@ -2710,7 +2942,7 @@
          (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
          (when marker [:span.f27-ctx-badge.is-task marker])
          (when-not (string/blank? text)
-           (inline-text config format text))])]]))
+           (f27-body-text config repo (:block/uuid block) format text))])]]))
 
 (defn- f27-children-fn
   "Immediate children of one block, in OG's canonical outline order.
@@ -2762,7 +2994,7 @@
   and report its own expanded state. Its accessible name says which block it
   opens, because identical names on every row tell a screen-reader user
   nothing."
-  [config row open? on-toggle]
+  [config repo row open? on-toggle]
   (let [{:keys [entity depth descend probe]} row
         content (f27-display-content (:block/format entity) (f27ch/node-label entity))
         format (or (:block/format entity) :markdown)
@@ -2809,7 +3041,7 @@
          (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
          (when marker [:span.f27-ctx-badge.is-task marker])
          (when-not (string/blank? text)
-           (inline-text config format text))])]]))
+           (f27-body-text config repo (:block/uuid entity) format text))])]]))
 
 (rum/defc f27-descendant-probe-note < rum/static
   "What a rendered row's OWN children probe found, when that is not an ordinary
@@ -2952,7 +3184,7 @@
             (fn [i row]
               (let [path (:path row)]
                 [:div.f27-desc-item {:key (str "d-" (string/join ">" (map str path)))}
-                 (f27-descendant-line config row (:open? row)
+                 (f27-descendant-line config repo row (:open? row)
                                       (fn [] (toggle-path! path)))
                  ;; The row's own probe outcome, shown on the row itself — no
                  ;; control has to be opened first to learn that a read failed.
@@ -2991,7 +3223,13 @@
            ;; offered a control that cannot progress.
            (when (or hiding? (some #(not= :ok (:descend %)) rows))
              [:button.f27-desc-source.f27-btn (f27-btn open-source! nil)
-              (t :f27/children-open-source)])])])]))
+              (t :f27/children-open-source)])
+           ;; The same collapse action as the control above the tree. A deep
+           ;; tree used to push its only one off the top of what was on screen.
+           [:div.f27-desc-end
+            [:button.f27-desc-toggle-all.f27-btn
+             (f27-btn #(reset! *open? false) {:aria-expanded "true"})
+             (t :f27/children-hide-all)]]])])]))
 
 ;; --- F27 slice 5 — chained inbound-reference exploration --------------------
 ;;
@@ -3055,10 +3293,11 @@
   "One block that REFERENCES the block at the current step.
 
   Shows that block's OWN source page and short ancestor path through OG's
-  existing `breadcrumb`, and its text through OG's inline renderer, so emphasis,
-  links, block refs, Korean and emoji keep their meaning. `inline-text` renders
-  markup only: it installs no editing handler, creates no id, and has no save
-  path — the same renderer audited in slices 3 and 4.
+  existing `breadcrumb`, and its text through `f27-body-text`, so emphasis,
+  links, tags, Korean and emoji keep their meaning while a block reference is
+  presented under the F27 contract rather than substituted recursively. It
+  renders markup only: it installs no editing handler, creates no id, and has no
+  save path — the same renderer audited in slices 3 and 4.
 
   A heading's leading `##` and a task's leading `TODO` are BLOCK-level markup an
   inline renderer would echo as literal characters, so they are shown as
@@ -3093,7 +3332,7 @@
          (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
          (when marker [:span.f27-ctx-badge.is-task marker])
          (when-not (string/blank? text)
-           (inline-text config format text))])]
+           (f27-body-text config repo (:block/uuid entity) format text))])]
      [:div.f27-in-actions
       ;; Exactly one relation earns a control that opens another level. The
       ;; others are explained where the control would have been, so the reader
@@ -3317,7 +3556,21 @@
                      (f27in/trail-full? trail)
                      (zero? (:shown-count page)))
              [:button.f27-in-source.f27-btn (f27-btn source-here! nil)
-              (t :f27/inbound-open-source)])])])]))
+              (t :f27/inbound-open-source)])])
+        ;; Back and the collapse control, repeated after the results.
+        ;; Exploration is driven from the top of this panel, but a reader who
+        ;; has just read a page of results is at the BOTTOM of it, and that is
+        ;; where the step they most likely want next has to be.
+        [:div.f27-in-end
+         (when (f27in/can-go-back? trail)
+           (let [prev (f27-row-label (:entity (nth (vec trail) (- (count trail) 2))))
+                 prev (if (string/blank? prev) (t :f27/inbound-origin) prev)]
+             [:button.f27-in-back.f27-btn
+              (f27-btn back! {:aria-label (t :f27/inbound-back-to prev)})
+              (t :f27/inbound-back)]))
+         [:button.f27-in-toggle.f27-btn
+          (f27-btn toggle! {:aria-expanded "true"})
+          (t :f27/inbound-hide)]]])]))
 
 (rum/defcs f27-row-context < rum/static
   (rum/local f27ctx/default-batch ::limit)
@@ -3337,8 +3590,14 @@
   raises the limit and the row re-renders.
 
   State is per component instance, so each row and each panel appearance
-  expands independently."
-  [state config repo ref-block]
+  expands independently.
+
+  `on-collapse` is the row's own collapse action, repeated at the END of the
+  panel. A context with a long body used to leave its only collapse control far
+  above whatever the reader had scrolled to; the control now sits on both sides
+  of the content, so it is reachable from either end without a sticky element
+  floating over the text."
+  [state config repo ref-block on-collapse]
   (let [*limit (::limit state)
         uuid' (:block/uuid ref-block)]
     [:div.f27-ctx {:on-click (fn [e] (util/stop-propagation e))}
@@ -3364,9 +3623,9 @@
             [:div.f27-ctx-note (t :f27/context-more-above)])
           [:div.f27-ctx-lines
            (for [a ancestors]
-             (rum/with-key (f27-context-line config a false)
+             (rum/with-key (f27-context-line config repo a false)
                (str "anc-" (or (:block/uuid a) (hash a)))))
-           (f27-context-line config ref-block true)]
+           (f27-context-line config repo ref-block true)]
           (when cycle?
             [:div.f27-ctx-note.f27-ctx-cycle (t :f27/context-cycle)])
           ;; A failed read keeps whatever was already loaded and says the chain
@@ -3386,7 +3645,14 @@
           ;; direction from the descendants above, and deliberately below them
           ;; so the two are never read as one list.
           (f27-row-inbound config repo ref-block
-                           (::inbound-open? state) (::inbound state))]))]))
+                           (::inbound-open? state) (::inbound state))
+          ;; The same collapse action as the control above this panel, repeated
+          ;; where a reader who has just finished reading actually is.
+          (when on-collapse
+            [:div.f27-ctx-end
+             [:button.f27-ctx-collapse.f27-btn
+              (f27-btn on-collapse {:aria-expanded "true"})
+              (t :f27/context-hide)]])]))]))
 
 (rum/defcs f27-ref-overview-row < rum/static
   (rum/local false ::ctx-open?)
@@ -3418,7 +3684,8 @@
           [:button.f27-ctx-toggle.f27-btn
            (f27-btn #(swap! *ctx not) {:aria-expanded (if @*ctx "true" "false")})
            (if @*ctx (t :f27/context-hide) (t :f27/context-show))]
-          (when @*ctx (f27-row-context config repo ref-block))])])))
+          (when @*ctx
+            (f27-row-context config repo ref-block #(reset! *ctx false)))])])))
 
 (rum/defc f27-ref-overview < rum/reactive
   [config repo block list-visible? *hide-block-refs? *show-ref-overview?]
@@ -3440,7 +3707,20 @@
      ;; stop-propagation, not stop: inner breadcrumb links must keep working.
      {:on-click (fn [e] (util/stop-propagation e))
       :on-mouse-down (fn [e] (util/stop-propagation e))}
-     [:div.f27-ref-overview-head (t :f27/incoming-references total)]
+     ;; The panel's own actions sit in the HEADING line, above the rows. A row
+     ;; whose context is open can be long, and the reader must never have to
+     ;; scroll past that content to find the way out of the panel. There is no
+     ;; sticky element: the controls come BEFORE the body that would bury them.
+     [:div.f27-ref-overview-head
+      [:span.f27-ref-overview-title (t :f27/incoming-references total)]
+      [:div.f27-ref-actions.is-head
+       [:button.f27-ref-action.f27-btn
+        (f27-btn #(swap! *hide-block-refs? not)
+                 {:aria-expanded (if list-visible? "true" "false")})
+        (if list-visible? (t :f27/hide-references) (t :f27/show-references total))]
+       [:button.f27-ref-action.f27-btn
+        (f27-btn #(reset! *show-ref-overview? false) nil)
+        (t :f27/close-overview)]]]
      [:div.f27-ref-rows
       (map-indexed (fn [idx r] (f27-ref-overview-row config repo r idx crystal-tag)) shown)]
      ;; Every incoming reference that is NOT visible above is explained. A row
@@ -3458,11 +3738,9 @@
      (when crystal-tag
        [:div.f27-ref-note.f27-crystal-scope (t :f27/crystal-scope)])
      (f27-crystal-selector repo)
-     [:div.f27-ref-actions
-      [:button.f27-ref-action.f27-btn
-       (f27-btn #(swap! *hide-block-refs? not)
-                {:aria-expanded (if list-visible? "true" "false")})
-       (if list-visible? (t :f27/hide-references) (t :f27/show-references total))]
+     ;; Repeated at the end, so the way out is next to the reader wherever they
+     ;; finished reading. Same action, same label — not a second, different one.
+     [:div.f27-ref-actions.is-end
       [:button.f27-ref-action.f27-btn
        (f27-btn #(reset! *show-ref-overview? false) nil)
        (t :f27/close-overview)]]]))

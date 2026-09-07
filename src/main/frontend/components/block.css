@@ -780,21 +780,34 @@ html.is-mac {
   font-size: 0.85em;
 }
 
+/* Heading and the panel's own actions on one line, ABOVE the rows. The reader
+   found no way out of a long panel while these sat only underneath it. */
 .f27-ref-overview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
   color: var(--ls-secondary-text-color);
   font-weight: 500;
   margin-bottom: 0.3rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--ls-quaternary-background-color);
 }
 
+.f27-ref-overview-title { min-width: 0; }
+
+/* NO inner scroller. The rows used to live in a 24rem box of their own, so a
+   row with its context open scrolled INSIDE the panel: the page could be at its
+   very top while "Hide context" was somewhere below the fold of a box the
+   reader could not see the edges of. The panel now grows with the page and
+   there is exactly one thing to scroll. The list is still bounded — by the row
+   cap and its "+N more" notice, which are honest about what is not shown. */
 .f27-ref-rows {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  /* Still bounded, so a block with many references cannot push the editor
-     around; raised from 14rem because an expanded ancestor chain needs room
-     before the list starts scrolling. */
-  max-height: 24rem;
-  overflow-y: auto;
+  min-width: 0;
 }
 
 /* A row stacks vertically: the breadcrumb line first, then the Crystal chips
@@ -832,10 +845,19 @@ html.is-mac {
 
 .f27-ref-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.75rem;
   margin-top: 0.4rem;
   padding-top: 0.35rem;
   border-top: 1px solid var(--ls-quaternary-background-color);
+}
+
+/* In the heading line the actions carry their own separator already. */
+.f27-ref-actions.is-head {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+  flex: 0 0 auto;
 }
 
 .f27-ref-action {
@@ -1226,4 +1248,109 @@ html.is-mac {
 
 .f27-crystal-clear.f27-btn {
   margin-top: 0.35rem;
+}
+
+/* ---------------------------------------------------------------------------
+   F27 readable-context batch.
+
+   1. Reference chips. A block reference inside a panel body is no longer
+      substituted with the whole target block; it is one compact chip that says
+      what it points at and how far it was followed. Display-only.
+   2. Controls that stay reachable while reading a long body: the collapse and
+      Back actions are repeated at the END of the content they belong to, with
+      no sticky positioning and no second scroll context anywhere.
+   --------------------------------------------------------------------------- */
+
+.f27-body-ref {
+  display: inline;
+  border-radius: 3px;
+  padding: 0 0.15rem;
+  /* Marked as quoted material, so the reader can tell the block's own words
+     from the words of something it points at. */
+  background: var(--ls-quaternary-background-color);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.f27-body-ref-mark {
+  color: var(--ls-secondary-text-color);
+  margin-right: 0.2rem;
+  font-size: 0.9em;
+}
+
+.f27-body-ref-text {
+  /* Long reference-heavy text must wrap inside the panel rather than widen it,
+     which is what keeps the controls beside it reachable in a small window. */
+  overflow-wrap: anywhere;
+}
+
+/* A reference that was NOT followed does not look like one that was. */
+.f27-body-ref.is-repeat,
+.f27-body-ref.is-closed {
+  background: transparent;
+  border: 1px dashed var(--ls-quaternary-background-color);
+}
+
+.f27-body-ref.is-repeat .f27-body-ref-mark,
+.f27-body-ref.is-closed .f27-body-ref-mark {
+  color: var(--ls-warning-text-color, var(--ls-secondary-text-color));
+}
+
+.f27-body-ref.is-unresolved {
+  background: transparent;
+  border: 1px dashed var(--ls-warning-text-color, var(--ls-quaternary-background-color));
+}
+
+.f27-body-ref-missing,
+.f27-body-ref-cut {
+  color: var(--ls-secondary-text-color);
+  font-style: italic;
+}
+
+/* The source control on a chip: small, but a real button with a real focus
+   ring, because it is the way out of every bounded case above. */
+.f27-body-ref-src {
+  margin-left: 0.2rem;
+  padding: 0 0.15rem;
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.f27-body-ref-src:hover { color: var(--ls-link-text-hover-color); }
+
+.f27-body-note {
+  margin-top: 0.15rem;
+}
+
+/* Repeated collapse / Back controls, at the end of the content they close. */
+.f27-ctx-end,
+.f27-desc-end,
+.f27-in-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  padding-top: 0.3rem;
+  border-top: 1px solid var(--ls-quaternary-background-color);
+}
+
+.f27-in-end .f27-in-back { margin-left: 0; }
+
+/* Small windows: the panel wraps rather than overflowing sideways, so nothing
+   is pushed out of reach horizontally either. */
+.f27-ref-overview,
+.f27-ctx,
+.f27-in-body,
+.f27-desc-body-wrap {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .f27-ref-overview { margin-left: 0.5rem; }
+  .f27-ctx-wrap { margin-left: 0.5rem; }
+  .f27-crystal-row { margin-left: 0.5rem; }
 }
