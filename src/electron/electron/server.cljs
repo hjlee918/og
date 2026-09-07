@@ -161,21 +161,24 @@
 
 (defn do-server!
   [action]
-  (let [action (keyword action)]
-    ;; G4 (pilot only): the HTTP API server never starts. `:stop` and status
-    ;; reporting keep working, so the renderer's indicator still reflects real
-    ;; state. The renderer fires `:server/do :restart` about two seconds after
-    ;; mount whenever `[:electron/server :autostart]` is truthy, so refusing in
-    ;; the main process is what actually prevents a listening socket -- not a
-    ;; configuration value that might read as nil.
-    (if (and pilot/PILOT (contains? #{:start :restart} action))
-      (pilot/refuse-js :api-server (name action))
-      (case action
-        :start (when (contains? #{nil :closed :error} (:status @*state))
-                 (start!))
-        :stop (close!)
-        :restart (start!)
-        :else :dune))))
+  ;; G4 (pilot only): the HTTP API server never starts. `:stop` and status
+  ;; reporting keep working, so the renderer's indicator still reflects real
+  ;; state. The renderer fires `:server/do :restart` about two seconds after
+  ;; mount whenever `[:electron/server :autostart]` is truthy, so refusing in
+  ;; the main process is what actually prevents a listening socket -- not a
+  ;; configuration value that might read as nil.
+  ;;
+  ;; The ordinary branch is left in its original shape on purpose: `PILOT` is
+  ;; false at compile time in every ordinary build, so the `if` folds away and
+  ;; the emitted function is the original one.
+  (if (and pilot/PILOT (contains? #{:start :restart} (keyword action)))
+    (pilot/refuse-js :api-server (name (keyword action)))
+    (case (keyword action)
+      :start (when (contains? #{nil :closed :error} (:status @*state))
+               (start!))
+      :stop (close!)
+      :restart (start!)
+      :else :dune)))
 
 (defn setup!
   [^js win]

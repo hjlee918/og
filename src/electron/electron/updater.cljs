@@ -139,47 +139,49 @@
 
           (debug "Skip remote version [ahead of pre-release]" remote-version))))))
 
-(defn- init-pilot-refusing-updater
-  "G3 (pilot only). The automatic updater is never initialised, and BOTH manual
-   IPC channels are registered with handlers that refuse instead of the real
-   listeners. The channels still exist, so a renderer that invokes them gets a
-   stated refusal rather than a hang. Nothing here contacts a remote endpoint."
-  []
-  (pilot/record! :updater-auto "skipped init-auto-updater")
-  (let [check-channel   "check-for-updates"
-        install-channel "install-updates"]
-    (.handle ipcMain check-channel
-             (fn [_e & _args] (pilot/refuse-js :updater-check check-channel)))
-    (.handle ipcMain install-channel
-             (fn [_e & _args] (pilot/refuse-js :updater-install install-channel)))
-    #(do
-       (.removeHandler ipcMain install-channel)
-       (.removeHandler ipcMain check-channel))))
-
-(defn- init-ordinary-updater
-  [{:keys [repo ^js _win] :as opts}]
-  (and prod? (not= false (cfgs/get-item :auto-update)) (init-auto-updater repo))
-  (let [check-channel "check-for-updates"
-        install-channel "install-updates"
-        check-listener (fn [_e & args]
-                         (when-not @*update-pending
-                           (reset! *update-pending true)
-                           (p/finally
-                             (check-for-updates (merge opts {:args args}))
-                             #(reset! *update-pending nil))))
-        install-listener (fn [_e quit-app?]
-                           (when-let [dest-file (:dest-file @*update-ready-to-install)]
-                             (open dest-file)
-                             (and quit-app? (js/setTimeout #(.quit app) 1000))))]
-    (.handle ipcMain check-channel check-listener)
-    (.handle ipcMain install-channel install-listener)
-    #(do
-       (.removeHandler ipcMain install-channel)
-       (.removeHandler ipcMain check-channel)
-       (reset! *update-pending nil))))
-
 (defn init-updater
   [{:keys [repo ^js _win] :as opts}]
+  ;; G3 (pilot only). The automatic updater is never initialised, and BOTH
+  ;; manual IPC channels are registered with handlers that refuse instead of the
+  ;; real listeners. The channels still exist, so a renderer that invokes them
+  ;; gets a stated refusal rather than a hang, and nothing contacts a remote
+  ;; endpoint. `prod?` gating in the ordinary branch below covers only automatic
+  ;; initialisation, which is why the manual handlers are replaced here rather
+  ;; than left to a user not pressing a button.
+  ;;
+  ;; Both branches live in this one function on purpose: `PILOT` is false at
+  ;; compile time in every ordinary build, so the `if` folds away and the
+  ;; emitted function is the original one. Splitting this into two top-level
+  ;; functions changed Closure's symbol allocation and so changed the ordinary
+  ;; bundle -- see f27-pilot/scripts/check-ordinary-build-unchanged.js.
   (if pilot/PILOT
-    (init-pilot-refusing-updater)
-    (init-ordinary-updater opts)))
+    (let [check-channel   "check-for-updates"
+          install-channel "install-updates"]
+      (pilot/record! :updater-auto "skipped init-auto-updater")
+      (.handle ipcMain check-channel
+               (fn [_e & _args] (pilot/refuse-js :updater-check check-channel)))
+      (.handle ipcMain install-channel
+               (fn [_e & _args] (pilot/refuse-js :updater-install install-channel)))
+      #(do
+         (.removeHandler ipcMain install-channel)
+         (.removeHandler ipcMain check-channel)))
+    (do
+      (and prod? (not= false (cfgs/get-item :auto-update)) (init-auto-updater repo))
+      (let [check-channel "check-for-updates"
+            install-channel "install-updates"
+            check-listener (fn [_e & args]
+                             (when-not @*update-pending
+                               (reset! *update-pending true)
+                               (p/finally
+                                 (check-for-updates (merge opts {:args args}))
+                                 #(reset! *update-pending nil))))
+            install-listener (fn [_e quit-app?]
+                               (when-let [dest-file (:dest-file @*update-ready-to-install)]
+                                 (open dest-file)
+                                 (and quit-app? (js/setTimeout #(.quit app) 1000))))]
+        (.handle ipcMain check-channel check-listener)
+        (.handle ipcMain install-channel install-listener)
+        #(do
+           (.removeHandler ipcMain install-channel)
+           (.removeHandler ipcMain check-channel)
+           (reset! *update-pending nil))))))
