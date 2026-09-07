@@ -18,6 +18,8 @@ const os = require('os');
 
 const preview = require('./preview.js');
 const gen = require('./make-preview-graph.js');
+const integrated = require('./make-integrated-graph.js');
+const identity = require('./build-identity.js');
 
 let pass = 0;
 let fail = 0;
@@ -68,8 +70,9 @@ function baseDeps(over = {}) {
   const deps = Object.assign(
     {
       log: (s) => logs.push(String(s)),
-      checkArtifacts: () => {},
+      checkBuild: () => ({ ok: true, revision: {} }),
       ensureGraph: () => '/double/graph',
+      demo: { key: 'double', title: 'a stand-in demonstration graph', generator: () => ({}), scenario: () => async () => {} },
       freshProfile: () => 'double-profile',
       launch: async (profile, opts) => {
         if (opts && typeof opts.onApp === 'function') opts.onApp(app);
@@ -318,7 +321,7 @@ async function lifecycleChecks() {
   // 11. Nothing to close is not an error.
   {
     const { deps, logs } = baseDeps({
-      checkArtifacts: () => {
+      checkBuild: () => {
         throw new preview.PreviewError('double: an artifact is missing', 'rebuild it');
       },
     });
@@ -483,12 +486,313 @@ function generatorChecks() {
   for (const d of made) fs.rmSync(d, { recursive: true, force: true });
 }
 
+
+// ---------------------------------------------------------------------------
+function integratedGeneratorChecks() {
+  console.log('Integrated demonstration graph (temporary synthetic directories)');
+  const made = [];
+
+  // 1. It writes the whole demonstration: notes AND the files they point at.
+  {
+    const root = tmpRoot('integrated');
+    made.push(root);
+    const r = integrated.build({ root });
+    const L = integrated.layout(root);
+    const marker = fs.existsSync(path.join(L.graph, integrated.MARKER));
+    const signed = fs.readFileSync(path.join(L.graph, 'logseq/config.edn'), 'utf8').includes(integrated.SIGNATURE);
+    const state = integrated.inspect(root);
+    check(
+      'the-integrated-graph-writes-its-notes-its-files-and-its-ownership-proof',
+      r.files.length === integrated.EXPECTED_PAGES &&
+        r.assets.length === integrated.EXPECTED_ASSETS &&
+        marker && signed && state.status === 'owned-complete',
+      `${r.files.length} pages, ${r.assets.length} files, marker=${marker}, signature=${signed}, status=${state.status}`
+    );
+
+    // The file a note points at but which is deliberately not there, and the
+    // sentinel that sits where a path climbing out of the graph would land.
+    const gone = fs.existsSync(path.join(L.graph, 'assets', integrated.GONE));
+    const sentinel = fs.existsSync(path.join(L.graphRoot, integrated.SENTINEL));
+    check(
+      'the-missing-file-is-really-missing-and-the-containment-sentinel-is-really-there',
+      !gone && sentinel,
+      `${integrated.GONE} on disk = ${gone} (a note points at it); ` +
+        `${integrated.SENTINEL} one level above the graph = ${sentinel}`
+    );
+
+    // Nine blocks refer to the one block the panel opens from.
+    const refs = fs
+      .readdirSync(path.join(L.graph, 'pages'))
+      .filter((f) => f.endsWith('.md'))
+      .filter((f) => fs.readFileSync(path.join(L.graph, 'pages', f), 'utf8').includes(`((${integrated.TARGET}))`));
+    check(
+      'nine-notes-refer-to-the-block-the-panel-opens-from',
+      refs.length === 9,
+      `${refs.length} page(s) reference the target block: ${JSON.stringify(refs.sort())}`
+    );
+  }
+
+  // 2. The same refusal, archive and foreign rules as the user graph — they
+  //    are literally the same code, and this proves the wiring.
+  {
+    const root = tmpRoot('integrated-reset');
+    made.push(root);
+    integrated.build({ root });
+    const L = integrated.layout(root);
+    const edited = path.join(L.graph, 'pages/Study Plan.md');
+    fs.writeFileSync(edited, '- edited before the reset\n', 'utf8');
+    let refused = null;
+    try {
+      integrated.build({ root });
+    } catch (e) {
+      refused = e;
+    }
+    const r = integrated.build({ root, reset: true });
+    const kept = r.archived && fs.readFileSync(path.join(r.archived, 'pages/Study Plan.md'), 'utf8');
+    check(
+      'the-integrated-graph-refuses-to-be-overwritten-and-archives-on-reset',
+      refused && refused.code === 'EXISTS' && !!r.archived && /edited before the reset/.test(kept || ''),
+      `refusal = ${refused && refused.code}; archived to ${r.archived && path.basename(r.archived)}; the edit is in the archive`
+    );
+  }
+
+  // 3. THE POINT OF THIS BATCH: preparing the new demonstration graph does not
+  //    touch the old one. Both live under one preview root here, exactly as
+  //    they do on disk.
+  {
+    const root = tmpRoot('both');
+    made.push(root);
+    gen.build({ root });
+    const U = gen.layout(root);
+    const mine = path.join(U.graph, 'pages/Deep Work.md');
+    fs.writeFileSync(mine, '- notes I typed into the OLD demonstration graph\n', 'utf8');
+    const beforeList = fs.readdirSync(path.join(U.graph, 'pages')).sort();
+
+    integrated.build({ root });
+    integrated.build({ root, reset: true }); // the most destructive thing it does
+
+    const afterList = fs.readdirSync(path.join(U.graph, 'pages')).sort();
+    const survived = fs.readFileSync(mine, 'utf8');
+    check(
+      'building-and-resetting-the-new-graph-leaves-the-old-one-untouched',
+      /notes I typed into the OLD/.test(survived) && JSON.stringify(beforeList) === JSON.stringify(afterList),
+      `the old graph still has ${afterList.length} page(s) and the edited note is unchanged`
+    );
+
+    // And each generator only ever recognises its OWN directory.
+    const crossed = integrated.inspect(root).graph !== gen.inspect(root).graph;
+    check(
+      'the-two-demonstration-graphs-are-separate-directories',
+      crossed,
+      `${path.basename(gen.inspect(root).graph)} and ${path.basename(integrated.inspect(root).graph)}`
+    );
+  }
+
+  // 4. An asset name is a plain file name, never a path.
+  {
+    const root = tmpRoot('assetname');
+    made.push(root);
+    let refused = null;
+    try {
+      const s = require('./graph-store.js').createStore({
+        dirName: 'name-check',
+        marker: '.name-check',
+        signature: ';; name check',
+        markerText: 'check\n',
+        config: ';; name check\n{}\n',
+        expectedPages: 0,
+        expectedAssets: 1,
+        write: ({ writeAsset }) => writeAsset('../escape.png', Buffer.from('x')),
+      });
+      s.build({ root });
+    } catch (e) {
+      refused = e;
+    }
+    check(
+      'an-asset-name-that-is-a-path-is-refused',
+      refused && refused.code === 'NAME' && !fs.existsSync(path.join(root, 'graph/escape.png')),
+      refused ? `refused with ${refused.code}` : 'IT DID NOT REFUSE'
+    );
+  }
+
+  for (const d of made) fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+function buildIdentityChecks() {
+  console.log('Build identity (doubles)');
+
+  // A stand-in checkout: four artifacts, one source file, and a git that says
+  // whatever the case under test needs it to say.
+  const scene = (over = {}) => {
+    const times = Object.assign(
+      { renderer: 2000, electron: 2000, css: 2000, electronBin: 1000, source: 1000 },
+      over.times
+    );
+    const files = {
+      '/r/static/js/main.js': { size: 100, mtimeMs: times.renderer, dir: false },
+      '/r/static/electron.js': { size: 10, mtimeMs: times.electron, dir: false },
+      '/r/static/css/style.css': { size: 10, mtimeMs: times.css, dir: false },
+      '/r/static/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron': {
+        size: 10, mtimeMs: times.electronBin, dir: false },
+      '/r/src/main': { dir: true, entries: ['a.cljs'] },
+      '/r/src/main/a.cljs': { size: 1, mtimeMs: times.source, dir: false },
+    };
+    for (const gone of over.missing || []) delete files[gone];
+    const head =
+      'var CLOSURE_DEFINES = {"frontend.config.REVISION":"' +
+      (over.builtRevision === undefined ? 'abc123' : over.builtRevision) +
+      '","goog.ENABLE_DEBUG_LOADER":false};';
+    const fsDouble = {
+      statSync(p) {
+        const f = files[p];
+        if (!f) throw new Error('ENOENT ' + p);
+        return { size: f.size || 0, mtimeMs: f.mtimeMs || 0, isDirectory: () => !!f.dir };
+      },
+      readdirSync(p) {
+        const f = files[p];
+        if (!f || !f.dir) throw new Error('ENOTDIR ' + p);
+        return f.entries;
+      },
+      openSync: () => 7,
+      closeSync: () => {},
+      readSync(fd, buf) {
+        return buf.write(head, 0, 'utf8');
+      },
+    };
+    const git = (args) => {
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return 'abc1230000000000000000000000000000000000';
+      if (args[0] === 'describe') return over.checkoutRevision === undefined ? 'abc123' : over.checkoutRevision;
+      if (args[0] === 'rev-parse' && args[1] === '--verify') {
+        if (over.unknownCommit) throw new Error('fatal: needed a single revision');
+        return 'a-commit';
+      }
+      if (args[0] === 'diff') {
+        // `git diff --quiet` exits non-zero when there IS a difference.
+        if (over.buildInputsDiffer) throw new Error('exit 1');
+        return '';
+      }
+      if (args[0] === 'rev-parse') return 'a-branch';
+      return 'a subject';
+    };
+    return identity.inspect('/r', { fs: fsDouble, git, inputs: ['src/main'] });
+  };
+
+  {
+    const r = scene();
+    check(
+      'a-build-whose-revision-matches-a-clean-checkout-is-accepted-and-provable',
+      r.ok === true && r.revision.matches === true && r.revision.provable === true && r.warnings.length === 0,
+      `ok=${r.ok}, built=${r.revision.built}, checkout=${r.revision.checkout}, provable=${r.revision.provable}`
+    );
+  }
+  {
+    const r = scene({ builtRevision: 'old999', buildInputsDiffer: true });
+    check(
+      'a-renderer-built-from-a-commit-whose-sources-differ-is-refused-by-name',
+      r.ok === false && /old999/.test(r.reason) && /abc123/.test(r.reason) && /gulp:build/.test(r.advice),
+      `ok=${r.ok}; reason = ${JSON.stringify(r.reason)}`
+    );
+  }
+  {
+    // The tooling in this repository sits beside the application, so a commit
+    // that touched only the tooling must not be reported as a stale build.
+    const r = scene({ builtRevision: 'old999' });
+    check(
+      'a-commit-that-changed-nothing-the-build-reads-is-accepted-and-said-so',
+      r.ok === true && r.revision.same_build_inputs === true &&
+        r.warnings.some((w) => /nothing the build reads differs/.test(w)),
+      `ok=${r.ok}; ${JSON.stringify(r.warnings)}`
+    );
+  }
+  {
+    const r = scene({ builtRevision: 'notinthisrepo', unknownCommit: true });
+    check(
+      'a-renderer-built-from-a-commit-this-checkout-does-not-have-is-refused',
+      r.ok === false && r.revision.same_build_inputs === false && /notinthisrepo/.test(r.reason),
+      `ok=${r.ok}; reason = ${JSON.stringify(r.reason)}`
+    );
+  }
+  {
+    const r = scene({ times: { source: 9999 } });
+    check(
+      'a-source-newer-than-every-compiled-output-is-refused',
+      r.ok === false && r.stale.length === 3 && /main\.js/.test(r.reason) && /electron\.js/.test(r.reason),
+      `${r.stale.length} stale artifact(s): ${JSON.stringify(r.stale)}`
+    );
+  }
+  {
+    const r = scene({ missing: ['/r/static/css/style.css'] });
+    check(
+      'a-missing-artifact-is-named-and-stops-the-run-before-anything-else-is-read',
+      r.ok === false && r.missing.length === 1 && /stylesheet/.test(r.reason) && r.git === null,
+      `missing = ${JSON.stringify(r.missing)}; the checkout was not consulted = ${r.git === null}`
+    );
+  }
+  {
+    const r = scene({ builtRevision: 'abc123-dirty', checkoutRevision: 'abc123-dirty' });
+    check(
+      'a-dirty-tree-is-reported-as-unprovable-rather-than-accepted-quietly',
+      r.ok === true && r.revision.matches === true && r.revision.provable === false &&
+        r.warnings.some((w) => /cannot be proved/.test(w)),
+      `provable=${r.revision.provable}; warnings = ${JSON.stringify(r.warnings)}`
+    );
+  }
+  {
+    const r = scene({ builtRevision: '' });
+    check(
+      'a-renderer-that-states-no-revision-is-reported-not-guessed-at',
+      r.revision.matches === null && r.warnings.some((w) => /no build revision/.test(w)),
+      `warnings = ${JSON.stringify(r.warnings)}`
+    );
+  }
+
+  // And the real checkout's revision is read from where it actually is.
+  {
+    const real = identity.revisionOf(path.join(preview.REPO, 'static/js/main.js'));
+    check(
+      'the-real-renderers-revision-is-readable-from-the-head-of-the-bundle',
+      typeof real.revision === 'string' && real.revision.length > 0,
+      `frontend.config.REVISION = ${JSON.stringify(real.revision)}${real.why ? ' — ' + real.why : ''}`
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+function demoSelectionChecks() {
+  console.log('Demonstration graph selection');
+  check(
+    'the-one-command-with-no-arguments-opens-the-integrated-graph',
+    preview.parseDemo([]).key === 'integrated' && preview.DEFAULT_DEMO === 'integrated',
+    `default = ${preview.parseDemo([]).key}`
+  );
+  check(
+    'the-original-user-graph-is-still-reachable-by-name',
+    preview.parseDemo(['--demo', 'user']).key === 'user' && preview.parseDemo(['--demo=user']).key === 'user',
+    'both --demo user and --demo=user select it'
+  );
+  let refused = null;
+  try {
+    preview.parseDemo(['--demo', 'personal']);
+  } catch (e) {
+    refused = e;
+  }
+  check(
+    'an-unknown-demonstration-graph-is-refused-rather-than-guessed-at',
+    !!refused && /no demonstration graph called "personal"/.test(refused.message),
+    refused ? refused.message : 'IT DID NOT REFUSE'
+  );
+}
+
 // ---------------------------------------------------------------------------
 (async () => {
   console.log('-'.repeat(72));
   console.log('F27 preview — lifecycle and generator checks (doubles, no real launch)');
   console.log('-'.repeat(72));
   generatorChecks();
+  integratedGeneratorChecks();
+  buildIdentityChecks();
+  demoSelectionChecks();
   await lifecycleChecks();
   console.log('-'.repeat(72));
   console.log(`RESULT ${JSON.stringify({ pass, fail })}`);

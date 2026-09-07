@@ -1,14 +1,19 @@
 # F27 preview tooling
 
-Three small scripts that make the accepted F27 slices easy to look at, using a
-synthetic demonstration graph. They are development tooling, not part of the
+Small scripts that make the accepted F27 work easy to look at, using synthetic
+demonstration graphs. They are development tooling, not part of the
 application, and nothing here ships in a build.
 
 | File | What it is |
 |---|---|
 | `preview.js` | the only supported way to start the preview |
-| `make-preview-graph.js` | creates the synthetic demonstration graph |
-| `lifecycle-check.js` | fast checks for shutdown and graph-preservation rules |
+| `build-identity.js` | which commit the preview is actually running |
+| `graph-store.js` | the ownership, refusal and archive rules, in one place |
+| `make-integrated-graph.js` | creates the INTEGRATED demonstration graph |
+| `make-preview-graph.js` | creates the original USER demonstration graph |
+| `walkthrough-integrated.js` | the consolidated scenario for the integrated graph |
+| `walkthrough-user.js` | the original five-action scenario, unchanged |
+| `lifecycle-check.js` | fast checks for shutdown, build identity and graph rules |
 
 ## Starting it
 
@@ -17,23 +22,74 @@ cd <your checkout>/development/f27-slice-1
 node f27-preview/preview.js
 ```
 
-`--reset` archives the existing demonstration graph and builds a fresh one.
-`--self-check` is a maintenance mode: it performs the guided walkthrough
-automatically, writes a result file and exits.
+That opens the **integrated** demonstration graph: one reference panel from
+which every accepted F27 slice can be seen — compact references and a Crystal
+marker, ancestors, children and inbound navigation, pictures and attachments, a
+block embed and a page excerpt, and the paths and constructs a panel refuses.
 
-The user-facing walkthrough — what to click and what you should see — lives in
-the project notes beside this checkout, not in this repository:
+- `--demo user` opens the ORIGINAL user demonstration graph instead. It is
+  preserved exactly as it was; nothing about the integrated graph resets,
+  overwrites or renames it.
+- `--reset` archives *the chosen* demonstration graph and builds a fresh one.
+- `--self-check` is a maintenance mode: it performs that graph's whole scenario
+  automatically, writes a result file and exits.
+
+The reader-facing guide — what to click and what you should see — lives in the
+project notes beside this checkout, not in this repository:
 `project-notes/F27_USER_PREVIEW_GUIDE.md`.
+
+## Build identity
+
+`preview.js` will not open a window whose code it cannot name.
+
+`shadow-cljs.edn` compiles `git describe --long --always --dirty` into the
+closure define `frontend.config.REVISION`, which lands near the top of
+`static/js/main.js`. Before anything is launched, `build-identity.js` reads it
+and compares it with what this checkout reports now, and compares every
+compiled artifact against the sources the build actually reads
+(`src/main`, `src/electron`, `src/resources`, `src/dev-cljs`, `deps`,
+`deps.edn`, `shadow-cljs.edn`, `externs.js`, the Tailwind inputs and
+`resources`). `src/test` is deliberately not among them: no test namespace is
+reachable from `frontend.core/init` or `electron.core/main`, so editing a test
+does not make a build stale.
+
+- a MISSING artifact stops the run and is named;
+- a renderer built from **another commit** stops the run and both revisions are
+  printed;
+- an artifact **older than a source the build reads** stops the run — this is
+  what covers `static/electron.js` and `static/css/style.css`, which carry no
+  revision of their own;
+- a **dirty working tree** does not stop the run, but is reported as
+  *unprovable*: `<sha>-dirty` names a commit and not a state, so two different
+  uncommitted trees describe identically.
+
+The rebuild command is printed with the refusal. The order matters — `gulp`
+cleans `static/js`, so it runs first:
+
+```
+yarn gulp:build
+clojure -M:cljs compile app electron
+```
+
+This is a **local test preview**. It is not an installer, not a release, and
+not a replacement for the application the user runs every day.
 
 ## Where things are
 
 Everything the preview generates is written **outside this repository**, so no
 profile, graph or binary can be committed by accident:
 
-- demonstration graph — `development/f27-preview/graph/f27-preview-demo`
+- integrated graph — `development/f27-preview/graph/f27-integrated-demo`
+- user graph — `development/f27-preview/graph/f27-preview-demo`
 - archived graphs — `development/f27-preview/graph-archive/<name>-<timestamp>`
 - launch profiles — `development/f27-evidence/preview-<timestamp>`
-- self-check results and screenshot — `development/f27-preview/`
+- self-check results and screenshots — `development/f27-preview/`
+
+One further file is written **one level above** the integrated graph:
+`development/f27-preview/graph/outside-sentinel.png`. It is a real, readable
+picture placed exactly where `../assets/../../…` resolves to, so "a path that
+climbs out of the graph never reaches the screen" is something the screen could
+contradict rather than a statement about an absent file.
 
 ## Lifecycle
 
@@ -64,27 +120,37 @@ application is launched:
 The application is closed and given time to settle **first**; only then is the
 demonstration graph hashed. A close that did not succeed is reported as a
 failure, and the byte reading taken after it is explicitly *not* presented as a
-preservation claim.
+preservation claim. A symbolic link inside the graph is recorded as the link it
+is rather than read through.
 
 The byte comparison is a report, not a guarantee: the F27 reference panels are
 read-only, but this launcher does not disable OG's ordinary editor, so the
 demonstration notes can legitimately change.
 
-## Demonstration graph — never deleted
+The window's own error log is reported too. Two kinds of noise are OG's own and
+predate this work — its startup network attempts, and any deprecation notice it
+prints — and they are named rather than folded into a "clean" claim.
 
-`make-preview-graph.js` has no delete path at all.
+## Demonstration graphs — never deleted
+
+Neither generator has a delete path at all, and both use the same rules
+(`graph-store.js`).
 
 - **Create** refuses if anything is already there.
 - **Reset** *renames* the existing graph into `graph-archive/` with a timestamp,
   then builds a fresh one.
-- An **incomplete** graph — for example one whose `logseq/config.edn` is missing
-  — is refused rather than rebuilt over, because the reader may have edited the
-  notes. (This is the case the previous version silently deleted.)
-- A directory that carries neither this generator's signature nor its
-  `.f27-preview-demo` marker is treated as **not ours** and is never moved or
-  removed, with or without `--reset`.
+- An **incomplete** graph — one whose `logseq/config.edn` is missing, or which
+  is short of its pages or its files — is refused rather than rebuilt over,
+  because the reader may have edited the notes.
+- A directory that carries neither its generator's signature nor its marker file
+  is treated as **not ours** and is never moved or removed, with or without
+  `--reset`.
 - Every write and every archive move first checks that the target is inside the
-  preview directory and is not reached through a symbolic link.
+  preview directory and is not reached through a symbolic link, and an asset
+  name must be a plain file name rather than a path.
+- **Preparing one graph never touches the other.** `lifecycle-check.js` builds
+  and resets the integrated graph over an edited user graph and asserts the
+  user graph is unchanged.
 
 ## Safety rules this tooling keeps
 
@@ -115,22 +181,11 @@ node f27-preview/lifecycle-check.js
 ```
 
 Runs in seconds using small doubles — a fake application handle, a fake launch,
-a fake digest — and temporary synthetic directories. It covers setup failure
-after launch, early cancellation, the deadline during startup and during
-`--self-check`, a failed close, a hanging close, idempotent cleanup, and the
-close-before-digest ordering; plus the generator's refusal, archive, foreign
-directory and symlink rules. It starts no application, so a real launch still
-has to be checked with the normal command or `--self-check`.
-
-## Build artifacts
-
-`preview.js` checks for the compiled renderer, the compiled main process, the
-stylesheet and the Electron binary before it launches, and stops with the
-rebuild command if any is missing. The order matters — `gulp` cleans
-`static/js`, so it runs first:
-
-```
-yarn gulp:build
-clojure -M:cljs compile app electron
-yarn cljs:test
-```
+a fake digest, a fake checkout — and temporary synthetic directories. It covers
+setup failure after launch, early cancellation, the deadline during startup and
+during `--self-check`, a failed close, a hanging close, idempotent cleanup and
+the close-before-digest ordering; both generators' refusal, archive, foreign,
+symlink and asset-name rules, and that neither graph disturbs the other; every
+build-identity verdict (missing, wrong commit, stale by time, dirty, silent);
+and the demonstration-graph selection. It starts no application, so a real
+launch still has to be checked with the normal command or `--self-check`.

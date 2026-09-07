@@ -2795,7 +2795,11 @@
       (p/resolved (:ok? cached))
 
       :else
-      (-> (p/let [files (fs/readdir root)]
+      ;; `:path-only? true` is the only non-deprecated spelling of this call:
+      ;; `frontend.fs/readdir` normalises the paths it returns either way, and
+      ;; the flag governs nothing but the deprecation notice it logs when the
+      ;; flag is absent. Passing it changes what is READ by nothing at all.
+      (-> (p/let [files (fs/readdir root :path-only? true)]
             (let [ok? (f27a/asset-root-real? root files)]
               (swap! *f27-asset-root assoc root {:at now :ok? ok?})
               ok?))
@@ -2836,7 +2840,9 @@
           ;; Nothing behind it is authorised, and the refusal is not cached as a
           ;; listing, so the cheap gate above is re-asked on its own schedule.
           (p/resolved {})
-          (-> (p/let [files (fs/readdir adir)]
+          ;; Same call, same containment authority, same normalised result;
+          ;; see the note on the root gate above.
+          (-> (p/let [files (fs/readdir adir :path-only? true)]
                 (let [m (f27a/asset-index dir files)]
                   (swap! *f27-asset-index assoc adir {:at now :files m})
                   m))

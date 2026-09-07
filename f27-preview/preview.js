@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 //
-// F27 user preview — the single, guarded way to start the development build
-// with the demonstration graph.
+// F27 preview — the single, guarded way to start the development build with a
+// demonstration graph.
 //
 // It launches ONLY through development/f27-evidence/isolated-launch.js. There is
 // no direct Electron or app-bundle launch here and no fallback: if the guarded
@@ -32,11 +32,24 @@
 // starts no background watcher and no auto-restart.
 //
 // Usage:
-//   node f27-preview/preview.js              start the preview
-//   node f27-preview/preview.js --reset      archive the demonstration graph and
-//                                            rebuild it before starting
-//   node f27-preview/preview.js --self-check maintenance: run the walkthrough
-//                                            automatically and exit
+//   node f27-preview/preview.js               start the integrated preview
+//   node f27-preview/preview.js --reset       archive this demonstration graph
+//                                             and rebuild it before starting
+//   node f27-preview/preview.js --demo user   start the ORIGINAL user
+//                                             demonstration graph instead
+//   node f27-preview/preview.js --self-check  maintenance: run the whole
+//                                             scenario automatically and exit
+//
+// BUILD IDENTITY. Before anything is launched, `build-identity.js` reads the
+// revision the renderer was actually compiled from and compares it with what
+// this checkout reports, and compares every compiled artifact against the
+// sources the build reads. A build that is missing, or that does not belong to
+// this checkout, stops the run with the rebuild command rather than opening a
+// window whose code nobody can name.
+//
+// TWO DEMONSTRATION GRAPHS, NEITHER OF WHICH IS EVER RESET TO PREPARE THE
+// OTHER. The integrated graph is new; the original user graph is untouched
+// beside it, and `--demo user` still opens it.
 //
 const path = require('path');
 const fs = require('fs');
@@ -46,9 +59,29 @@ const HERE = __dirname;
 const REPO = path.resolve(HERE, '..'); // development/f27-slice-1
 const EVIDENCE = path.resolve(REPO, '../f27-evidence');
 const PREVIEW_DIR = path.resolve(REPO, '../f27-preview');
-const GRAPH = path.join(PREVIEW_DIR, 'graph/f27-preview-demo');
-const GRAPH_NAME = path.basename(GRAPH);
 const GUARDED_LAUNCH = path.join(EVIDENCE, 'isolated-launch.js');
+const buildIdentity = require(path.join(HERE, 'build-identity.js'));
+
+// The demonstration graphs this launcher can open. Each is a separate
+// directory with its own generator, its own ownership proof and its own
+// scenario; preparing one NEVER touches the other.
+const DEMOS = {
+  integrated: {
+    key: 'integrated',
+    title: 'integrated preview — every accepted F27 slice in one panel',
+    generator: () => require(path.join(HERE, 'make-integrated-graph.js')),
+    scenario: () => require(path.join(HERE, 'walkthrough-integrated.js')).walkthroughIntegrated,
+    home: 'Deep Work',
+  },
+  user: {
+    key: 'user',
+    title: 'original user preview — the first five slices',
+    generator: () => require(path.join(HERE, 'make-preview-graph.js')),
+    scenario: () => require(path.join(HERE, 'walkthrough-user.js')).walkthroughUser,
+    home: 'Deep Work',
+  },
+};
+const DEFAULT_DEMO = 'integrated';
 
 // The project's existing per-session bound. It now covers the WHOLE run —
 // startup, the session itself and the self-check — not just the wait after the
@@ -258,46 +291,18 @@ function createLifecycle(deps) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Build artifacts
+// 1. Build identity — what code is this, and does it belong to this checkout?
 // ---------------------------------------------------------------------------
-function checkArtifacts(deps) {
+// The preview is a LOCAL TEST BUILD, not an installer, a release or a
+// replacement for the application the user runs every day. What it owes the
+// reader is an honest answer to "which commit am I looking at", and a refusal
+// when it cannot give one. See build-identity.js for how each fact is read.
+function checkBuild(deps) {
   const log = deps.log;
-  const needed = [
-    ['compiled renderer', path.join(REPO, 'static/js/main.js')],
-    ['compiled main process', path.join(REPO, 'static/electron.js')],
-    ['stylesheet', path.join(REPO, 'static/css/style.css')],
-    [
-      'Electron binary',
-      path.join(REPO, 'static/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'),
-    ],
-    ['guarded launch path', GUARDED_LAUNCH],
-  ];
-  const missing = [];
-  log('Build artifacts');
-  for (const [label, p] of needed) {
-    let st = null;
-    try {
-      st = fs.statSync(p);
-    } catch (e) {
-      /* reported below */
-    }
-    if (st) {
-      log(`  ok      ${label} — ${p} (${(st.size / 1024).toFixed(0)} KB, ${st.mtime.toISOString()})`);
-    } else {
-      log(`  MISSING ${label} — ${p}`);
-      missing.push(label);
-    }
-  }
-  if (missing.length) {
-    throw new PreviewError(
-      `${missing.length} build artifact(s) are missing: ${missing.join(', ')}.`,
-      'Rebuild in this order (gulp first, then the ClojureScript compile — the\n' +
-        'other order deletes the compiled output):\n' +
-        `  cd ${REPO}\n` +
-        '  yarn gulp:build\n' +
-        '  clojure -M:cljs compile app electron'
-    );
-  }
+  const report = buildIdentity.inspect(REPO);
+  for (const l of buildIdentity.lines(report)) log(l);
+  if (!report.ok) throw new PreviewError(report.reason, report.advice);
+  return report;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +316,11 @@ function manifest(dir) {
       .sort((a, b) => a.name.localeCompare(b.name))) {
       if (e.name === '.DS_Store') continue;
       const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
+      // A symbolic link is recorded as the link it is. Reading through one
+      // would hash something outside the graph, and a dangling one would throw
+      // where a report is wanted.
+      if (e.isSymbolicLink()) out.push([path.relative(dir, p), 'symlink:' + fs.readlinkSync(p)]);
+      else if (e.isDirectory()) walk(p);
       else out.push([path.relative(dir, p), crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')]);
     }
   })(dir);
@@ -332,9 +341,12 @@ const digest = (d) =>
 // moved into a dated archive first. Anything incomplete or unrecognised is
 // refused rather than overwritten, because the demonstration notes are editable
 // and the reader may have changed them.
+//
+// The demo whose graph this is comes from `deps.demo`; the OTHER demonstration
+// graph is never inspected, moved or written on this path.
 function ensureGraph(deps) {
   const log = deps.log;
-  const gen = require(path.join(HERE, 'make-preview-graph.js'));
+  const gen = deps.demo.generator();
   let state;
   try {
     state = gen.inspect();
@@ -345,7 +357,11 @@ function ensureGraph(deps) {
   const create = (reason) => {
     const r = gen.build({ reset: deps.reset });
     if (r.archived) log(`Previous demonstration graph archived to: ${r.archived}`);
-    log(`Demonstration graph ${reason}: ${r.graph} (${r.files.length} pages)`);
+    log(
+      `Demonstration graph ${reason}: ${r.graph} (${r.files.length} pages` +
+        (r.assets && r.assets.length ? `, ${r.assets.length} files` : '') +
+        ')'
+    );
   };
 
   if (deps.reset) {
@@ -375,7 +391,7 @@ function ensureGraph(deps) {
       'It will NOT be overwritten or deleted — it may contain notes you changed.\n' +
         'Run the command again with --reset to move it into a dated archive beside\n' +
         'it and build a fresh one:\n' +
-        '  node f27-preview/preview.js --reset'
+        `  node f27-preview/preview.js --demo ${deps.demo.key} --reset`
     );
   } else {
     throw new PreviewError(
@@ -503,235 +519,6 @@ async function markWindow(page, graph, profile) {
 }
 
 // ---------------------------------------------------------------------------
-// Maintenance walkthrough — the five actions the guide asks the reader to do,
-// performed against this same launch path so the guide can be trusted.
-// ---------------------------------------------------------------------------
-async function walkthrough(page, out) {
-  const checks = out.checks;
-  const check = (id, ok, detail) => {
-    checks.push({ id, result: ok ? 'PASS' : 'FAIL', detail });
-    line(`  [${ok ? 'PASS' : 'FAIL'}] ${id} — ${detail}`);
-  };
-  const away = async () => {
-    await page.mouse.move(4, 4);
-    await sleep(350);
-  };
-  const rows = () =>
-    page.evaluate(() =>
-      Array.from(document.querySelectorAll('.f27-ref-row')).map((r) =>
-        ((r.querySelector('.f27-ref-crumb') || {}).innerText || '').replace(/\n/g, ' > ').trim()
-      )
-    );
-  const rowIdx = async (needle) => (await rows()).findIndex((c) => c.includes(needle));
-  const row = (i) => page.locator('.f27-ref-row').nth(i);
-  const inItems = (i) =>
-    page.evaluate((n) => {
-      const r = document.querySelectorAll('.f27-ref-row')[n];
-      const body = r && r.querySelector('.f27-in-body');
-      const txt = (e) => ((e && e.innerText) || '').trim();
-      if (!body) return null;
-      return {
-        head: txt(body.querySelector('.f27-in-head')),
-        direction: txt(body.querySelector('.f27-in-direction')),
-        count: txt(body.querySelector('.f27-in-count')),
-        notes: Array.from(body.querySelectorAll('.f27-ctx-note')).map(txt),
-        path: Array.from(body.querySelectorAll('.f27-in-path-step')).map(txt),
-        back: !!body.querySelector('.f27-in-back'),
-        items: Array.from(body.querySelectorAll('.f27-in-item')).map((e) => ({
-          crumb: txt(e.querySelector('.f27-in-crumb')),
-          text: txt(e.querySelector('.f27-in-text')),
-          stop: !!e.querySelector('.f27-in-mark.is-stop'),
-          mark: txt(e.querySelector('.f27-in-mark')),
-          explore: !!e.querySelector('.f27-in-explore'),
-        })),
-      };
-    }, i);
-  const openCtx = async (i) => {
-    await away();
-    await row(i).locator('.f27-ctx-toggle').click();
-    await sleep(1200);
-  };
-  const openInbound = async (i) => {
-    await away();
-    await row(i).locator('.f27-in-toggle').click();
-    await sleep(1600);
-  };
-
-  // --- Action 1: the compact overview --------------------------------------
-  await page.evaluate(() => {
-    location.hash = '#/page/' + encodeURIComponent('Deep Work');
-  });
-  await sleep(3500);
-  if ((await page.locator('.f27-ref-overview').count()) === 0) {
-    await page.locator('a.open-block-ref-link').first().click();
-    await sleep(2200);
-  }
-  const crumbs = await rows();
-  out.overview_rows = crumbs;
-  const want = ['Weekly Review', '연구 노트', 'Habit Loop', 'Quick Capture'];
-  check(
-    'action-1-overview-shows-every-source-with-its-breadcrumb',
-    crumbs.length === 4 && want.every((w) => crumbs.some((c) => c.includes(w))),
-    `${crumbs.length} row(s): ${JSON.stringify(crumbs)}`
-  );
-
-  // --- Action 2: choosing a Crystal marker ---------------------------------
-  await away();
-  await page.locator('.f27-crystal-config-toggle').click();
-  await sleep(900);
-  const options = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('.f27-crystal-option')).map((o) => (o.innerText || '').trim())
-  );
-  out.crystal_options = options;
-  const coreIdx = options.findIndex((o) => o.includes('핵심'));
-  check(
-    'action-2a-the-marker-list-offers-the-graphs-real-tags',
-    coreIdx >= 0 && options.some((o) => o.includes('question')),
-    `options = ${JSON.stringify(options)}`
-  );
-  if (coreIdx >= 0) {
-    await page.locator('.f27-crystal-option').nth(coreIdx).click();
-    await sleep(1600);
-  }
-  const withMarker = await page.evaluate(() => ({
-    toggle: ((document.querySelector('.f27-crystal-config-toggle') || {}).innerText || '').trim(),
-    chips: Array.from(document.querySelectorAll('.f27-crystal-chip')).map((c) => (c.innerText || '').trim()),
-    scope: !!document.querySelector('.f27-crystal-scope'),
-  }));
-  out.crystal_selected = withMarker;
-  check(
-    'action-2b-the-chosen-marker-previews-beside-the-references',
-    withMarker.chips.length >= 2 && withMarker.scope && /Crystal marker:/.test(withMarker.toggle),
-    `${withMarker.chips.length} preview(s) ${JSON.stringify(withMarker.chips)}; toggle = ${JSON.stringify(
-      withMarker.toggle
-    )}`
-  );
-  await away();
-  await page.locator('.f27-crystal-clear').click().catch(() => {});
-  await sleep(1400);
-  const cleared = await page.evaluate(() => document.querySelectorAll('.f27-crystal-chip').length);
-  check('action-2c-the-marker-can-be-cleared-again', cleared === 0, `preview chips after clearing = ${cleared}`);
-
-  // --- Action 3: ancestors and children ------------------------------------
-  const iRev = await rowIdx('Weekly Review');
-  await openCtx(iRev);
-  const ancestors = await page.evaluate((n) => {
-    const r = document.querySelectorAll('.f27-ref-row')[n];
-    return Array.from(r.querySelectorAll('.f27-ctx-lines .f27-ctx-line')).map((e) => (e.innerText || '').trim());
-  }, iRev);
-  out.ancestors = ancestors;
-  check(
-    'action-3a-the-ancestor-path-above-the-reference-is-shown',
-    ancestors.some((a) => a.includes('Weekly review')) &&
-      ancestors.some((a) => a.includes('Week 36')) &&
-      ancestors.some((a) => a.includes('What worked')),
-    `${ancestors.length} line(s): ${JSON.stringify(ancestors)}`
-  );
-  await away();
-  await row(iRev).locator('.f27-desc-toggle-all').click();
-  await sleep(1500);
-  const children = await page.evaluate((n) => {
-    const r = document.querySelectorAll('.f27-ref-row')[n];
-    return Array.from(r.querySelectorAll('.f27-desc-line')).map((e) => (e.innerText || '').trim());
-  }, iRev);
-  out.children = children;
-  check(
-    'action-3b-the-children-of-that-reference-are-shown-on-request',
-    children.length >= 4 && children.some((c) => c.includes('Keep the same two hours')),
-    `${children.length} child line(s): ${JSON.stringify(children)}`
-  );
-  const idLeak = await page.evaluate((n) => {
-    const r = document.querySelectorAll('.f27-ref-row')[n];
-    return /id::/.test(r.innerText || '');
-  }, iRev);
-  check('action-3c-block-identifiers-stay-out-of-the-reading-view', !idLeak, `"id::" visible in the row = ${idLeak}`);
-  await openCtx(iRev); // close it again
-
-  // --- Action 4: following the chain, and Back -----------------------------
-  const iKo = await rowIdx('연구 노트');
-  await openCtx(iKo);
-  await openInbound(iKo);
-  const lvl1 = await inItems(iKo);
-  out.chain_level_1 = lvl1;
-  check(
-    'action-4a-the-first-step-shows-what-references-the-korean-note',
-    !!lvl1 && lvl1.items.length === 1 && lvl1.items[0].crumb.includes('프로젝트 계획'),
-    `head = ${JSON.stringify(lvl1 && lvl1.head)}; items = ${JSON.stringify(lvl1 && lvl1.items.map((i) => i.crumb))}`
-  );
-  check(
-    'action-4b-the-direction-is-stated-in-words-on-the-panel',
-    !!lvl1 && /refer TO the selected block/.test(lvl1.direction),
-    JSON.stringify(lvl1 && lvl1.direction)
-  );
-  await away();
-  await row(iKo).locator('.f27-in-item').nth(0).locator('.f27-in-explore').click();
-  await sleep(1800);
-  const lvl2 = await inItems(iKo);
-  out.chain_level_2 = lvl2;
-  check(
-    'action-4c-a-second-step-shows-what-references-the-plan',
-    !!lvl2 && lvl2.items.length === 1 && lvl2.items[0].crumb.includes('회의 기록') && lvl2.path.length >= 1,
-    `path = ${JSON.stringify(lvl2 && lvl2.path)}; items = ${JSON.stringify(lvl2 && lvl2.items.map((i) => i.crumb))}`
-  );
-  await away();
-  await row(iKo).locator('.f27-in-back').click();
-  await sleep(1500);
-  const backTo = await inItems(iKo);
-  out.chain_back = backTo;
-  check(
-    'action-4d-back-returns-to-the-previous-step-exactly',
-    !!backTo && backTo.items.length === 1 && backTo.items[0].crumb.includes('프로젝트 계획'),
-    `after Back: ${JSON.stringify(backTo && backTo.items.map((i) => i.crumb))}`
-  );
-  await openCtx(iKo);
-
-  // --- Action 5: the cycle boundary ----------------------------------------
-  const iCue = await rowIdx('Habit Loop');
-  await openCtx(iCue);
-  await openInbound(iCue);
-  const cyc1 = await inItems(iCue);
-  out.cycle_level_1 = cyc1;
-  check(
-    'action-5a-routine-is-listed-as-referencing-habit-loop',
-    !!cyc1 && cyc1.items.length === 1 && cyc1.items[0].crumb.includes('Routine'),
-    JSON.stringify(cyc1 && cyc1.items.map((i) => i.crumb))
-  );
-  await away();
-  await row(iCue).locator('.f27-in-item').nth(0).locator('.f27-in-explore').click();
-  await sleep(1800);
-  const cyc2 = await inItems(iCue);
-  out.cycle_level_2 = cyc2;
-  const boundary = cyc2 && cyc2.items.find((i) => i.crumb.includes('Habit Loop'));
-  check(
-    'action-5b-the-return-to-habit-loop-is-marked-as-a-boundary-and-not-reopened',
-    !!boundary && boundary.stop === true && boundary.explore === false,
-    boundary
-      ? `marker = ${JSON.stringify(boundary.mark)}, next-step control offered = ${boundary.explore}`
-      : `rows = ${JSON.stringify(cyc2 && cyc2.items.map((i) => i.crumb))}`
-  );
-  await openCtx(iCue);
-
-  // --- The honest empty answer ---------------------------------------------
-  const iQuick = await rowIdx('Quick Capture');
-  await openCtx(iQuick);
-  await openInbound(iQuick);
-  const empty = await inItems(iQuick);
-  out.empty_answer = empty;
-  check(
-    'extra-a-block-nothing-references-says-so-plainly',
-    !!empty && empty.items.length === 0 && empty.notes.some((n) => /No block in this graph references this one/.test(n)),
-    JSON.stringify(empty && empty.notes)
-  );
-  await openCtx(iQuick);
-
-  // --- Nothing was edited ---------------------------------------------------
-  const editing = await page.evaluate(() => document.querySelectorAll('textarea.editor-input').length);
-  check('extra-the-walkthrough-never-opened-an-editor', editing === 0, `editor textareas open = ${editing}`);
-
-  await page.screenshot({ path: path.join(PREVIEW_DIR, 'preview-walkthrough.png') }).catch(() => {});
-}
-
-// ---------------------------------------------------------------------------
 // The run. One try/finally: every path below leaves through `finish`, which
 // closes the application, lets it settle, and only then hashes the graph.
 // ---------------------------------------------------------------------------
@@ -739,13 +526,16 @@ const DEFAULTS = {
   launch: (profile, opts) => require(GUARDED_LAUNCH).launch(profile, opts),
   openGraph,
   markWindow,
-  walkthrough,
+  // `null` means "the scenario belonging to the chosen demo". A double can
+  // still pass one, which is what the lifecycle checks do.
+  walkthrough: null,
   digest,
-  checkArtifacts,
+  checkBuild,
   ensureGraph,
   freshProfile,
   sleep,
   log: (s) => console.log(s),
+  demo: DEMOS[DEFAULT_DEMO],
   reset: false,
   selfCheck: false,
   // Time for the application's own save/flush to land after a graceful close,
@@ -766,9 +556,11 @@ async function runPreview(overrides) {
   const lc = createLifecycle(deps);
   lc.install(); // signals, end-of-input and the deadline, before anything runs
 
+  const demo = deps.demo;
   const out = {
     started: new Date().toISOString(),
     launch: 'isolated-launch.js (guarded)',
+    demo: demo.key,
     session_limit_minutes: Math.round(deps.sessionLimitMs / 60000),
     checks: [],
   };
@@ -780,13 +572,43 @@ async function runPreview(overrides) {
   let reason = null;
   let selfCheckCompleted = false;
 
+  // What the window asked for and said, recorded from the moment there is a
+  // window. The scenario reads these to state — rather than assume — that no
+  // panel fetched anything and that nothing threw behind a panel.
+  const session = { phase: 'startup', requests: [], consoleErrors: [] };
+  const REQUEST_CAP = 5000;
+  const CONSOLE_CAP = 300;
+  const watchPage = (page) => {
+    try {
+      page.on('request', (r) => {
+        if (session.requests.length < REQUEST_CAP) {
+          session.requests.push({ i: session.requests.length, phase: session.phase, url: r.url() });
+        }
+      });
+      page.on('console', (m) => {
+        if (m.type() === 'error' && session.consoleErrors.length < CONSOLE_CAP) {
+          session.consoleErrors.push(session.phase + ': ' + String(m.text()).slice(0, 300));
+        }
+      });
+      page.on('pageerror', (e) => {
+        if (session.consoleErrors.length < CONSOLE_CAP) {
+          session.consoleErrors.push(session.phase + ': pageerror ' + String(e).slice(0, 300));
+        }
+      });
+    } catch (e) {
+      /* a double with no event emitter; the run does not depend on this */
+    }
+  };
+
   try {
     if (deps.onStarted) deps.onStarted({ requestStop: lc.requestStop, lifecycle: lc });
 
     rule();
-    log('F27 user preview — isolated development build, demonstration notes only');
+    log('F27 preview — isolated development build, demonstration notes only');
+    log(`Demonstration graph: ${demo.title}`);
     rule();
-    deps.checkArtifacts(deps);
+    out.build = deps.checkBuild(deps);
+    log('');
     graph = deps.ensureGraph(deps);
     out.graph = graph;
     profile = deps.freshProfile();
@@ -799,6 +621,7 @@ async function runPreview(overrides) {
     // later in the launch still leaves something for cleanup to close.
     const launched = await lc.guard(deps.launch(profile, { onApp: (a) => lc.adopt(a) }));
     lc.adopt(launched.app);
+    watchPage(launched.page);
     out.profile = launched.profileDir || out.profile;
     log(`  the guarded path accepted the profile and replaced the environment (${out.profile})`);
 
@@ -828,7 +651,11 @@ async function runPreview(overrides) {
     log('  * the menu bar says "Electron", not "Logseq" — this is a development');
     log('    build. Your installed Logseq OG is a separate application: this');
     log('    command does not start, stop or change it.');
-    log(`  * the graph name in the app is "${GRAPH_NAME}";`);
+    log(`  * the graph name in the app is "${path.basename(graph)}";`);
+    if (out.build && out.build.revision && out.build.revision.built) {
+      log(`  * it is running the code compiled from ${out.build.revision.built}` +
+          `${out.build.revision.provable ? ', which is this checkout' : ''}.`);
+    }
     log('  * a small orange "F27 PREVIEW" marker sits in the bottom-right corner.');
     log('');
     log('While you are in it');
@@ -849,11 +676,24 @@ async function runPreview(overrides) {
 
     if (deps.selfCheck) {
       log('');
-      log('Self-check: walking through the five guided actions…');
-      await lc.guard(deps.walkthrough(launched.page, out));
+      log('Self-check: working through the whole scenario…');
+      const scenario = deps.walkthrough || demo.scenario();
+      await lc.guard(
+        scenario(launched.page, out, {
+          sleep: deps.sleep,
+          log,
+          previewDir: PREVIEW_DIR,
+          demo: demo.generator(),
+          setPhase: (name) => {
+            session.phase = name;
+          },
+          requests: () => session.requests.slice(),
+        })
+      );
       selfCheckCompleted = true;
       reason = 'the self-check finished';
     } else {
+      session.phase = 'interactive';
       reason = await lc.waitForExit(launched.app);
     }
   } catch (e) {
@@ -919,6 +759,21 @@ async function runPreview(overrides) {
   }
   log('  your own notes were never opened; the installed Logseq OG was not started, stopped or changed');
 
+  // What the window logged. Two kinds of noise are OG's own and predate this
+  // work — its startup network attempts, and any deprecation notice it prints —
+  // so they are named rather than swept into a "clean" claim.
+  out.console_errors = session.consoleErrors;
+  const preExisting = /ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|path-only\? is always true/;
+  const renderErrors = session.consoleErrors.filter((m) => !preExisting.test(m));
+  out.render_errors = renderErrors;
+  if (session.consoleErrors.length) {
+    log(
+      `  the window logged ${session.consoleErrors.length} error(s): ${renderErrors.length} not attributable to ` +
+        `OG's own startup or deprecation notices`
+    );
+    for (const m of renderErrors.slice(0, 5)) log('    ' + m);
+  }
+
   if (error && !(error instanceof CancelledError)) {
     log('');
     if (error instanceof PreviewError) {
@@ -933,6 +788,10 @@ async function runPreview(overrides) {
   let exitCode = 0;
   if (error && !(error instanceof CancelledError)) exitCode = 1;
   if (close.attempted && !close.closed) exitCode = 1;
+  // Recorded BEFORE the result file is written, so the file is a complete
+  // account of the run rather than one missing its own verdict.
+  out.ready = readyAt;
+  out.stop_reason = reason;
   if (deps.selfCheck) {
     out.summary = {
       pass: out.checks.filter((c) => c.result === 'PASS').length,
@@ -942,9 +801,14 @@ async function runPreview(overrides) {
     // verified nothing, whatever the counters say.
     out.self_check_completed = selfCheckCompleted;
     if (out.summary.fail || out.graph_unchanged !== true || !readyAt || !selfCheckCompleted) exitCode = 1;
+    if (renderErrors.length) exitCode = 1;
+    out.exit_code = exitCode;
     if (deps.writeResult && profile) {
       try {
-        fs.writeFileSync(path.join(PREVIEW_DIR, `preview-self-check-${profile}.json`), JSON.stringify(out, null, 1));
+        fs.writeFileSync(
+          path.join(PREVIEW_DIR, `preview-self-check-${demo.key}-${profile}.json`),
+          JSON.stringify(out, null, 1)
+        );
       } catch (e) {
         log('  the self-check result file could not be written: ' + e.message);
       }
@@ -954,15 +818,40 @@ async function runPreview(overrides) {
   }
 
   out.exit_code = exitCode;
-  out.ready = readyAt;
-  out.stop_reason = reason;
   out.original_error = error || null;
   return out;
 }
 
+// `--demo <key>` or `--demo=<key>`. An unknown key is refused by name rather
+// than silently falling back to the other graph.
+function parseDemo(args) {
+  let key = DEFAULT_DEMO;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--demo') key = args[i + 1];
+    else if (a.startsWith('--demo=')) key = a.slice('--demo='.length);
+  }
+  const demo = DEMOS[key];
+  if (!demo) {
+    throw new PreviewError(
+      `there is no demonstration graph called ${JSON.stringify(key)}.`,
+      'Choose one of: ' + Object.keys(DEMOS).join(', ')
+    );
+  }
+  return demo;
+}
+
 if (require.main === module) {
   const args = process.argv.slice(2);
-  runPreview({ reset: args.includes('--reset'), selfCheck: args.includes('--self-check') })
+  let demo;
+  try {
+    demo = parseDemo(args);
+  } catch (e) {
+    console.log('PREVIEW STOPPED — ' + e.message);
+    if (e.extra) console.log(e.extra);
+    process.exit(1);
+  }
+  runPreview({ demo, reset: args.includes('--reset'), selfCheck: args.includes('--self-check') })
     .then((r) => process.exit(r.exit_code))
     .catch((e) => {
       // Should not be reachable: runPreview owns its own failures.
@@ -975,12 +864,17 @@ module.exports = {
   runPreview,
   createLifecycle,
   DEFAULTS,
+  DEMOS,
+  DEFAULT_DEMO,
+  parseDemo,
   PreviewError,
   CancelledError,
   digest,
+  manifest,
   ensureGraph,
-  checkArtifacts,
-  GRAPH,
+  checkBuild,
+  buildIdentity,
   PREVIEW_DIR,
   EVIDENCE,
+  REPO,
 };
