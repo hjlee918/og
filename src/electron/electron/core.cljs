@@ -123,7 +123,12 @@
      (.unregisterProtocol protocol FILE_ASSETS_SCHEME)))
 
 (defn- handle-export-publish-assets [_event html repo-path asset-filenames output-path]
-  (p/let [app-path (. app getAppPath)
+  ;; Pilot exports are intentionally unavailable. Checking only repo/output
+  ;; roots cannot validate the asset filenames and recursive child operations
+  ;; performed by create-export. Refuse BEFORE even opening a folder dialog.
+  (if pilot/PILOT
+    (pilot/refuse-js :export-publish-assets "publishing export is not available in the pilot")
+    (p/let [app-path (. app getAppPath)
           asset-filenames (->> (js->clj asset-filenames) (remove nil?))
           root-dir (or output-path (handler/open-dir-dialog))]
          ;; G5 (pilot only). `create-export` writes a whole tree into
@@ -147,7 +152,7 @@
             root-dir
             {:asset-filenames asset-filenames
              :log-error-fn logger/error
-             :notification-fn #(send-to-renderer :notification %)}))))
+             :notification-fn #(send-to-renderer :notification %)})))))
 
 (defn setup-app-manager!
   [^js win]

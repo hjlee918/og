@@ -49,9 +49,14 @@ define `electron.pilot/PILOT`, which is `false` in every ordinary build.
 
 ## Graph data
 
+The pilot intentionally disables publishing/export and recursive directory
+copying, as well as upstream updates and API-server startup. These restrictions
+are pilot-only. It is not a replacement for the installed everyday app.
+
 Graph data is used only inside
 `~/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test`, enforced by
-`checks/allowed-root.js` with symlink and traversal escape rejected. Each run
-generates fresh synthetic data into its own uniquely named subfolder. No
+the application boundary and `checks/allowed-root.js`, with symlink and traversal
+escape checks. Checks reuse the ownership-verified synthetic batch graph; they
+do not need a new graph for every attempt. No
 personal graph is opened, read or enumerated, and the installed application is
 never launched.

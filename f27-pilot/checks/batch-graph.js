@@ -39,13 +39,21 @@ function verifyReusable(graph) {
   } catch (e) {
     return { ok: false, problems: [`containment: ${e.message}`] };
   }
+  try {
+    B.assertInsideAllowedRoot('batch config', path.join(graph, 'logseq', 'config.edn'));
+  } catch (e) {
+    return { ok: false, problems: [`config containment: ${e.message}`] };
+  }
   if (!fs.existsSync(path.join(graph, 'logseq', 'config.edn'))) {
     problems.push('logseq/config.edn is missing');
   }
   for (const [rel, want] of Object.entries(expectedFiles())) {
     const p = path.join(graph, rel);
     let got;
-    try { got = sha256(fs.readFileSync(p)); } catch (e) { problems.push(`${rel}: ${e.code || e.message}`); continue; }
+    try {
+      B.assertInsideAllowedRoot('batch file', p);
+      got = sha256(fs.readFileSync(p));
+    } catch (e) { problems.push(`${rel}: ${e.code || e.message}`); continue; }
     if (got !== want) problems.push(`${rel}: content differs from the template`);
   }
   return { ok: problems.length === 0, problems };

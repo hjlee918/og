@@ -308,6 +308,34 @@ async function main() {
     await withTimeout(page.waitForLoadState('domcontentloaded'), 60000, 'domcontentloaded');
     await sleep(6000);
 
+    // Exercise the real export IPC with inert outside strings, not real paths.
+    // PILOT must refuse before showing a dialog or reaching export machinery.
+    await app.evaluate(({ dialog }) => {
+      global.__pilotExportDialogOriginal = dialog.showOpenDialog;
+      global.__pilotExportDialogCalls = 0;
+      dialog.showOpenDialog = async () => {
+        global.__pilotExportDialogCalls++;
+        return { canceled: true, filePaths: [] };
+      };
+    });
+    try {
+      const refusal = await attempt('publishing export refusal', 20000,
+        () => page.evaluate(() => window.apis.invoke('export-publish-assets',
+          ['<p>synthetic</p>', '/synthetic/outside-export-repo',
+            ['../../outside.txt'], null])), null);
+      const calls = await app.evaluate(() => global.__pilotExportDialogCalls);
+      record('P3.11', 'publishing export refuses before opening a dialog',
+        refusal && refusal.pilotRefused === true &&
+        refusal.guard === 'export-publish-assets' && calls === 0,
+        JSON.stringify({ refusal, dialogCalls: calls }));
+    } finally {
+      await app.evaluate(({ dialog }) => {
+        dialog.showOpenDialog = global.__pilotExportDialogOriginal;
+        delete global.__pilotExportDialogOriginal;
+        delete global.__pilotExportDialogCalls;
+      });
+    }
+
     // G1/G2 observed side effects, not counters alone
     const registered = await attempt('protocol registration', 20000,
       () => app.evaluate(({ protocol }) => ({

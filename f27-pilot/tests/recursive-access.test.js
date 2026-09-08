@@ -206,14 +206,14 @@ test('recursive copyDirectory is refused in the pilot rather than guarded at its
     'the refusal must come before the copy');
 });
 
-test('the publish-and-export destination and repo are both checked', () => {
+test('publishing export refuses in PILOT before any dialog or recursive operation', () => {
   const src = readSrc('core.cljs');
   const i = src.indexOf('handle-export-publish-assets');
-  const body = src.slice(i, i + 1800);
-  assert.match(body, /guard-fs! ::export-publish-assets-dest "write" root-dir/);
-  assert.match(body, /guard-fs! ::export-publish-assets-repo "graph-select" repo-path/);
-  assert.ok(body.indexOf('export-publish-assets-dest') < body.indexOf('publish-export/create-export'),
-    'the export runs before its destination is checked');
+  const body = src.slice(i, src.indexOf('(defn setup-app-manager!', i));
+  assert.match(body, /\(if pilot\/PILOT\s*\(pilot\/refuse-js :export-publish-assets/);
+  const refusal = body.indexOf('(pilot/refuse-js :export-publish-assets');
+  assert.ok(refusal < body.indexOf('(handler/open-dir-dialog)'), 'dialog precedes refusal');
+  assert.ok(refusal < body.indexOf('(publish-export/create-export'), 'export precedes refusal');
 });
 
 // ---------------------------------------------------------------------------
@@ -226,4 +226,6 @@ test('the pilot bundle carries the watcher and copy guards', () => {
   assert.ok(bundle.includes('dropped watcher event'), 'the watcher drop path is not compiled in');
   assert.ok(bundle.includes('recursive copy is not available in the pilot'),
     'the copyDirectory refusal is not compiled in');
+  assert.ok(bundle.includes('publishing export is not available in the pilot'),
+    'the publishing export refusal is not compiled in');
 });
