@@ -1804,3 +1804,114 @@ html.is-mac {
   .f27-ctx-wrap { margin-left: 0.5rem; }
   .f27-crystal-row { margin-left: 0.5rem; }
 }
+
+/* ---------------------------------------------------------------------
+   F27 inline reference context (C6 first slice).
+
+   The control is a SIBLING of `.block-ref-wrap`, so OG's reference keeps
+   every handler it had. The panel opens IN FLOW directly beneath the
+   sentence rather than as a floating overlay: an absolutely positioned
+   popover would be clipped by whichever ancestor happens to hide its
+   overflow and would fight OG's own hover preview for z-index, while a
+   block-in-inline panel is anchored to the reference by reading order and
+   is reachable by Tab in the order it is read.
+   --------------------------------------------------------------------- */
+.f27-il {
+  /* `display: inline` on purpose: the sentence around the reference must
+     wrap exactly as it did before the control existed. */
+  display: inline;
+}
+
+.f27-il-toggle {
+  display: inline;
+  margin-left: 0.15rem;
+  padding: 0 0.2rem;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.85em;
+  line-height: 1;
+  /* Always visible — a control that appears only on hover is neither
+     discoverable nor reachable from the keyboard. Dimmed so it does not
+     compete with the sentence it sits in. */
+  opacity: 0.55;
+  color: var(--ls-link-text-color);
+}
+
+.f27-il-toggle:hover,
+.f27-il-toggle:focus-visible,
+.f27-il.is-open .f27-il-toggle {
+  opacity: 1;
+  background: var(--ls-secondary-background-color);
+}
+
+.f27-il-panel {
+  display: block;
+  margin: 0.3rem 0 0.4rem 1.25rem;
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  background: var(--ls-secondary-background-color);
+  border-radius: 4px;
+  font-size: 0.85em;
+  /* The panel is a reading surface, not a fragment of the sentence. */
+  white-space: normal;
+  text-align: left;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The panel's own actions ABOVE the content, as A18 requires, with the
+   same actions repeated at its end. */
+.f27-il-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  color: var(--ls-secondary-text-color);
+  font-weight: 500;
+  margin-bottom: 0.3rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--ls-quaternary-background-color);
+}
+
+.f27-il-title { min-width: 0; }
+
+.f27-il-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.f27-il-source,
+.f27-il-close {
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.f27-il-direction {
+  color: var(--ls-secondary-text-color);
+  font-style: italic;
+  margin-bottom: 0.3rem;
+}
+
+.f27-il-crumb { min-width: 0; }
+
+.f27-il-ctx-wrap { margin-left: 0; }
+
+.f27-il-unavailable { font-style: italic; }
+
+.f27-il-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  padding-top: 0.3rem;
+  border-top: 1px solid var(--ls-quaternary-background-color);
+}
+
+@media (max-width: 640px) {
+  .f27-il-panel { margin-left: 0.5rem; }
+}

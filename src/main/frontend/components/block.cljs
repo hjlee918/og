@@ -70,6 +70,7 @@
             [frontend.util.f27-embed :as f27e]
             [frontend.util.f27-page-embed :as f27pe]
             [frontend.util.f27-outgoing :as f27o]
+            [frontend.util.f27-inline :as f27il]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -886,6 +887,10 @@
 (declare block-content)
 (declare block-container)
 (declare breadcrumb)
+;; F27 inline-context slice. Defined beside the other F27 panels, far below,
+;; because it reuses them; declared here because the two ordinary inline
+;; reference call sites are above it.
+(declare f27-inline-block-reference)
 
 (rum/defc block-reference < rum/reactive
   db-mixins/query
@@ -946,8 +951,15 @@
                       ;; default open block page
                       :else (route-handler/redirect-to-page! id))))))}
 
+           ;; F27 inline-context slice: `:f27/suppress-hover?` is set ONLY by
+           ;; `f27-inline-ref`, and only while ITS panel is open, so the hover
+           ;; preview cannot float over the panel the reader just opened. With
+           ;; the key absent — which is everywhere else — this condition is
+           ;; byte-for-byte the one it has always been, and closing the panel
+           ;; restores the preview.
            (if (and (not (util/mobile?))
                     (not (:preview? config))
+                    (not (:f27/suppress-hover? config))
                     (not (:modal/show? @state/state))
                     (nil? block-type))
              (ui/tippy {:html        (fn []
@@ -1136,7 +1148,10 @@
       ;; key absent this is byte-for-byte the behaviour it has always had.
       (if-let [f27-render (:f27/ref-render config)]
         (f27-render config id label)
-        (block-reference config id label)))
+        ;; F27 inline-context slice: the same `block-reference`, with the
+        ;; explicit context control beside it on ordinary reading surfaces and
+        ;; nothing at all anywhere else.
+        (f27-inline-block-reference config id label)))
 
     ;; F27 local-asset slice. A markdown link to a graph-local file written
     ;; WITHOUT a leading `!` never satisfies `show-link?`, so it falls through to
@@ -1203,11 +1218,13 @@
           (f27-render config id label*)
           (if (> link-depth max-depth-of-links)
             [:p.warning.text-sm "Block ref nesting is too deep"]
-            (block-reference (assoc config
-                                    :reference? true
-                                    :link-depth (inc link-depth)
-                                    :block/uuid id)
-                             id label*))))
+            ;; F27 inline-context slice, as in `search-link-cp` above. The
+            ;; depth guard, the config and the arguments are unchanged.
+            (f27-inline-block-reference (assoc config
+                                               :reference? true
+                                               :link-depth (inc link-depth)
+                                               :block/uuid id)
+                                        id label*))))
 
       ["Page_ref" page]
       (let [format (get-in config [:block :block/format])]
@@ -4892,6 +4909,250 @@
              [:button.f27-ctx-collapse.f27-btn
               (f27-btn on-collapse {:aria-expanded "true"})
               (t :f27/context-hide)]])]))]))
+
+;; ---------------------------------------------------------------------------
+;; F27 inline-context slice — the explicit control beside an ORDINARY inline
+;; block reference, and the panel it opens.
+;;
+;; Until now F27's context was reachable from one place only: a block's
+;; incoming-reference badge. A reader meeting a reference in the middle of a
+;; sentence could open the target's PAGE, send it to the sidebar, or hover it —
+;; but could not see the target's own context without leaving what they were
+;; reading.
+;;
+;; The contract here (F27_INLINE_CONTEXT_SPEC.md):
+;;
+;;   * the control is a SIBLING of `.block-ref-wrap`, never a descendant of it
+;;     and never inside a link, so OG's ordinary click, Shift-click, right-click
+;;     and hover behaviour are untouched. The one exception is deliberate: while
+;;     the panel is open the hover preview over THAT reference is suppressed, so
+;;     a floating preview cannot cover the panel;
+;;   * the subject is the TARGET — its source page, its ancestors, its children,
+;;     what it links to, and what links to IT. Never the host block's, and never
+;;     another occurrence's;
+;;   * state is component-local AND key-guarded by graph, host block and target,
+;;     so a reused instance can never display state belonging to another
+;;     reference;
+;;   * while the panel is CLOSED nothing about the target's context is read,
+;;     parsed or walked;
+;;   * the panel reuses `f27-row-context` — the existing engine, with its
+;;     existing bounds. No second context engine, and no new control inside
+;;     F27's own safe previews: everything below renders through
+;;     `f27-body-config`/`f27-breadcrumb-config`, which set `:f27/ref-render`,
+;;     so a reference inside the panel is a bounded chip and never reaches this
+;;     code path again.
+;; ---------------------------------------------------------------------------
+
+(defn- f27-inline-stop-mouse-down
+  "Mouse-down inside `.block-content` puts the block into the editor
+  (`block-content-on-mouse-down`). A press on this feature's control or inside
+  its panel is neither an edit nor a navigation, so it is stopped at the
+  feature's own root — and the elements also carry `forbid-edit`, which is the
+  class OG's own handler already honours."
+  [e]
+  (util/stop-propagation e))
+
+(defn- f27-inline-surface
+  "OG's `config` mapped to the one question `frontend.util.f27-inline` asks.
+
+  This is the ONLY place OG's config shape is known, so every rule in the
+  specification is decided by a pure function over plain booleans and is tested
+  without a renderer. `extra` carries the two facts that require the resolved
+  block, and is supplied only after the cheap config-only decision has already
+  said the control might belong here."
+  ([config id] (f27-inline-surface config id nil))
+  ([config id extra]
+   (merge
+    {:identity? (some? (try (parse-uuid (str id)) (catch :default _ nil)))
+     ;; Inside an F27 panel body. `:f27/ref-render` is set by
+     ;; `f27-body-config`, so this path is not even reached there; asked
+     ;; anyway, because the guard must not depend on that staying true.
+     :f27-panel? (some? (:f27/ref-render config))
+     :inline-panel? (boolean (:f27/inline-context? config))
+     :mobile? (boolean (util/mobile?))
+     :preview? (boolean (:preview? config))
+     :slide? (boolean (:slide? config))
+     :sidebar? (boolean (:sidebar? config))
+     :embed? (boolean (or (:embed? config) (:page-embed? config)))
+     :block-ref? (boolean (:block-ref? config))
+     :query? (boolean (:custom-query? config))
+     :html-export? (boolean (:html-export? config))
+     :whiteboard? (boolean (or (:whiteboard? config) (:whiteboard-view? config)))
+     :annotation? false}
+    extra)))
+
+(defn- f27-inline-special-target
+  "The two block kinds whose reference has its own click behaviour — a PDF
+  annotation and a whiteboard shape. Neither is expanded in this slice, and
+  both keep exactly the behaviour they have."
+  [entity]
+  (let [props (:block/properties entity)
+        ls-type (keyword (:ls-type props))]
+    {:whiteboard? (= :whiteboard-shape ls-type)
+     :annotation? (or (= :annotation ls-type) (some? (:hl-type props)))}))
+
+(defn- f27-inline-panel
+  "The panel itself. Rendered ONLY while open, so everything it reads — the
+  target, its breadcrumb, its Crystal matches and its context — is work that
+  happens because the reader asked for it.
+
+  `context?` is the second disclosure. The first names the target; the second
+  is `f27-row-context` for the TARGET, which is where the ancestors,
+  descendants, outgoing and inbound sections come from, unchanged."
+  [config repo id panel-id context? on-context on-close]
+  (let [entity (f27-ref-target repo id)
+        readable? (f27o/readable-target? entity)
+        tstate (f27il/target-state {:identity? true :readable? readable?})
+        label (or (f27-ref-label entity) (t :f27/inline-untitled))
+        crystal-tag (when readable? (state/get-crystal-tag repo))
+        {:keys [previews remainder]}
+        (when crystal-tag
+          (f27c/select-previews (f27-crystal-matches repo crystal-tag entity)))
+        ;; Everything below renders as INSIDE this panel, so no further inline
+        ;; control can be offered within it.
+        inner-config (assoc config :f27/inline-context? true)]
+    [:div.f27-il-panel {:id panel-id
+                        :role "group"
+                        :aria-label (t :f27/inline-panel-of label)
+                        :on-mouse-down f27-inline-stop-mouse-down
+                        :on-click (fn [e] (util/stop-propagation e))}
+     [:div.f27-il-head
+      [:span.f27-il-title (t :f27/inline-head)]
+      [:div.f27-il-actions
+       (when (f27il/expandable? tstate)
+         [:button.f27-il-source.f27-btn.forbid-edit
+          (assoc (f27-btn (fn [] (route-handler/redirect-to-page! (str id)))
+                          {:aria-label (t :f27/inline-source-of label)
+                           :title (t :f27/inline-source)})
+                 :on-mouse-down f27-inline-stop-mouse-down)
+          (t :f27/inline-source)])
+       [:button.f27-il-close.f27-btn.forbid-edit
+        (assoc (f27-btn on-close {:aria-label (t :f27/inline-close-of label)
+                                  :title (t :f27/inline-close)})
+               :on-mouse-down f27-inline-stop-mouse-down)
+        (t :f27/inline-close)]]]
+     ;; Which direction this is, in words. The inbound section inside the
+     ;; context below is about the TARGET, not about the block being read, and
+     ;; the two must never be read as one.
+     [:div.f27-il-direction (t :f27/inline-direction)]
+     (if-not (f27il/expandable? tstate)
+       [:div.f27-ctx-note.f27-ctx-error.f27-il-unavailable (t :f27/inline-unavailable)]
+       [:<>
+        ;; First disclosure: the target's source page and short breadcrumb,
+        ;; through the same component and the same F27 breadcrumb config the
+        ;; incoming-reference overview uses — so an asset or a macro written in
+        ;; an ancestor is a compact indicator here, never a picture.
+        [:div.f27-il-crumb
+         (breadcrumb (f27-breadcrumb-config inner-config repo (:block/uuid entity))
+                     repo (:block/uuid entity)
+                     {:show-page? true
+                      :level-limit 3
+                      :indent? false
+                      :end-separator? false})]
+        (when (seq previews)
+          [:div.f27-crystal-row
+           (for [m previews] (rum/with-key (f27-crystal-preview m) (str (:uuid m))))
+           (when (pos? remainder)
+             [:span.f27-crystal-more (t :f27/crystal-more remainder)])])
+        ;; Second disclosure: the existing context engine, for the TARGET.
+        [:div.f27-ctx-wrap.f27-il-ctx-wrap
+         [:button.f27-ctx-toggle.f27-il-ctx-toggle.f27-btn.forbid-edit
+          (assoc (f27-btn on-context {:aria-expanded (if context? "true" "false")})
+                 :on-mouse-down f27-inline-stop-mouse-down)
+          (if context? (t :f27/context-hide) (t :f27/context-show))]
+         (when context?
+           (f27-row-context inner-config repo entity on-context))]])
+     ;; The panel's own way out, repeated where a reader who has just finished
+     ;; reading actually is — the same rule the context panel already follows.
+     [:div.f27-il-end
+      [:button.f27-il-close.f27-btn.forbid-edit
+       (assoc (f27-btn on-close {:aria-label (t :f27/inline-close-of label)
+                                 :title (t :f27/inline-close)})
+              :on-mouse-down f27-inline-stop-mouse-down)
+       (t :f27/inline-close)]]]))
+
+(rum/defcs f27-inline-ref <
+  ;; Deliberately NOT `rum/static`. This component re-renders with the block it
+  ;; sits in, so a target that is deleted while its panel is open is re-resolved
+  ;; and the panel says so on the next render, instead of showing an entity that
+  ;; no longer exists because the arguments happened to compare equal.
+  {:init (fn [state _props]
+           ;; One identity per MOUNTED OCCURRENCE, so two references in one
+           ;; sentence never share a DOM id, and Escape in the second panel
+           ;; cannot return focus to the first control.
+           (assoc state ::uid (str (gensym "f27il"))))}
+  (rum/local nil ::panel)
+  "One ordinary inline block reference, plus the explicit control that opens the
+  TARGET's context in place.
+
+  While the panel is closed this renders exactly what OG rendered before, plus
+  one `<button>`. No entity is resolved for the panel, no ancestor is walked, no
+  reference is scanned and nothing is parsed."
+  [state config repo id label]
+  (let [*panel (::panel state)
+        uid (::uid state)
+        host-uuid (get-in config [:block :block/uuid])
+        k (f27il/panel-key {:repo repo :host host-uuid :target id})
+        {:keys [open? context?]} (f27il/panel-state @*panel k)
+        panel-id (str "f27-il-panel-" uid)
+        btn-id (str "f27-il-toggle-" uid)
+        ;; The control keeps its place in the DOM whether the panel is open or
+        ;; closed, so this returns focus when it still exists — and does
+        ;; nothing at all when the reference has gone.
+        focus-control! (fn [] (some-> (gdom/getElement btn-id) (.focus)))
+        close! (fn [] (swap! *panel f27il/close-panel k) (focus-control!))
+        toggle! (fn [] (swap! *panel f27il/toggle-panel k))
+        toggle-context! (fn [] (swap! *panel f27il/toggle-context k))
+        ;; The reference's OWN written label, when the author wrote one. Read
+        ;; from the already-parsed label nodes, never from the target — naming
+        ;; the target would mean reading and parsing it while closed.
+        written (get-label-text label)
+        named (if (string/blank? written) nil written)]
+    [:span.f27-il {:class (when open? "is-open")
+                   :on-key-down (fn [e]
+                                  (when (and open? (f27il/escape-key? (.-key e)))
+                                    (.preventDefault e)
+                                    (.stopPropagation e)
+                                    (close!)))}
+     ;; OG's reference, with the same arguments it has always had. The one
+     ;; added key suppresses the hover preview WHILE the panel is open, so a
+     ;; floating preview cannot cover it; closing restores it.
+     (block-reference (cond-> config open? (assoc :f27/suppress-hover? true))
+                      id label)
+     [:button.f27-il-toggle.f27-btn.forbid-edit
+      (assoc (f27-btn toggle!
+                      {:id btn-id
+                       :aria-expanded (if open? "true" "false")
+                       ;; Named only while the element it names exists.
+                       :aria-controls (when open? panel-id)
+                       :aria-label (cond
+                                     (and open? named) (t :f27/inline-hide-of named)
+                                     open? (t :f27/inline-hide)
+                                     named (t :f27/inline-show-of named)
+                                     :else (t :f27/inline-show))
+                       :title (if open? (t :f27/inline-hide) (t :f27/inline-show))})
+             :on-mouse-down f27-inline-stop-mouse-down)
+      (if open? "⌃" "⌄")]
+     (when open?
+       (f27-inline-panel config repo id panel-id context? toggle-context! close!))]))
+
+(defn f27-inline-block-reference
+  "The ordinary inline block-reference call site, with the F27 control where it
+  belongs and nothing at all where it does not.
+
+  Every excluded surface renders exactly what it rendered before: the same
+  `block-reference` call, with the same arguments and no wrapper. The cheap,
+  config-only decision runs first, so the resolved-block question below is asked
+  only where the control might actually be offered."
+  [config id label]
+  (if-not (f27il/offer-control? (f27-inline-surface config id))
+    (block-reference config id label)
+    (let [repo (state/get-current-repo)
+          entity (f27-ref-target repo id)
+          surface (f27-inline-surface config id (f27-inline-special-target entity))]
+      (if (f27il/offer-control? surface)
+        (f27-inline-ref config repo id label)
+        (block-reference config id label)))))
 
 (rum/defcs f27-ref-overview-row < rum/static
   (rum/local false ::ctx-open?)
