@@ -71,6 +71,7 @@
             [frontend.util.f27-page-embed :as f27pe]
             [frontend.util.f27-outgoing :as f27o]
             [frontend.util.f27-inline :as f27il]
+            [frontend.util.f27-inline-watch :as f27w]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -4991,21 +4992,39 @@
     {:whiteboard? (= :whiteboard-shape ls-type)
      :annotation? (or (= :annotation ls-type) (some? (:hl-type props)))}))
 
-(defn- f27-inline-target-snapshot
-  "What this panel is about, reduced to the two facts that decide what it shows:
-  WHICH entity the identity resolves to, and what that entity says. Comparing
-  these two is how the watcher below decides whether anything the reader can see
-  has actually changed."
-  [repo id]
-  (when-let [u (try (parse-uuid (str id)) (catch :default _ nil))]
-    (db/pull repo '[:db/id :block/content] [:block/uuid u])))
+(defn- f27-inline-interest
+  "The entity ids whose change could alter what THIS panel shows.
+
+  Gathered when the panel renders, which is rare, so that the decision made on
+  every transaction is a set lookup over that transaction's own datoms and
+  nothing else — no query, no walk, no pull.
+
+  It is deliberately small and bounded:
+
+    the target itself   its text, its retraction, its reparenting
+    its parent and page the breadcrumb's nearest step and its source page
+    its ancestors       the rest of the breadcrumb, capped at the three levels
+                        the breadcrumb is asked to show
+
+  A child arriving under the target and a block starting to refer to it are NOT
+  in this set and do not need to be: those transactions POINT at the target
+  through `:block/parent` and `:block/refs`, which `f27w/touches?` reads."
+  [repo entity]
+  (let [ancestors (when-let [u (:block/uuid entity)]
+                    (try (db/get-block-parents repo u 3) (catch :default _ nil)))]
+    (into #{}
+          (remove nil?)
+          (concat [(:db/id entity)
+                   (:db/id (:block/parent entity))
+                   (:db/id (:block/page entity))]
+                  (keep :db/id ancestors)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Keeping an OPEN panel true, and why it cannot use the reactive query system.
 ;;
 ;; The obvious mechanism is `db/sub-block`, which every other reactive component
-;; here uses. It does not work for this, and the reason is worth writing down
-;; because it was measured rather than guessed:
+;; here uses. It does not work for this, and the reason was measured rather than
+;; guessed:
 ;;
 ;;   * that query is keyed by DATABASE ID. A file changed on disk is re-parsed
 ;;     by `handler.file/alter-file`, which retracts the page's blocks and
@@ -5020,45 +5039,68 @@
 ;;
 ;;   * what OG does instead is `ui-handler/re-render-root!`, which requests a
 ;;     render of the ROOT — and `rum/static` short-circuits the block subtree,
-;;     so it never arrives. That is why OG's own inline reference text is itself
-;;     stale after a from-disk change until its host block re-renders for some
-;;     other reason. This slice does not change that; the lifecycle scenario
-;;     records it as an observation.
+;;     so it never arrives. That is why OG's own inline reference text does not
+;;     converge after a from-disk change either, until its host block re-renders
+;;     for some other reason. This slice does not change `block-reference`; the
+;;     lifecycle scenario records that as an observation.
 ;;
 ;; So the panel subscribes to the CONNECTION, which every transaction reaches
-;; whatever its metadata, and invalidates itself only when the two facts above
-;; actually differ. Scope and lifetime are the panel's own: registered in
-;; `:did-mount`, removed in `:will-unmount`, so nothing is watched while the
-;; panel is closed, after the host block is removed, or once the reader has
-;; navigated away. The cost while open is one `pull` of one entity per
-;; transaction, per open panel.
+;; whatever its metadata carries. What it does NOT do is re-read anything to
+;; decide: `f27w/touches?` answers from the transaction's own datoms and the set
+;; above, so an open panel costs one pass over each transaction's datoms and
+;; nothing more. There is no global re-render and no context scan.
+;;
+;; Scope and lifetime are the panel's own: the subscription starts at
+;; `:did-mount` and is removed at `:will-unmount`, from the EXACT connection it
+;; was added to — which matters because a re-index replaces the connection, and
+;; asking the application again at unmount would unlisten from the new one and
+;; leave this listener on the old one forever. If the connection is replaced
+;; while the panel is open, the next render rebinds it.
 ;; ---------------------------------------------------------------------------
+
+(defn- f27-inline-on-change
+  "The listener body: invalidate this panel when, and only when, the transaction
+  mentions something it is showing."
+  [state]
+  (let [*interest (::interest state)
+        *tick (::tick state)]
+    (fn [tx-report]
+      (when (f27w/touches? @*interest (:tx-data tx-report))
+        ;; A `rum/local` re-renders its component when it changes, so this is
+        ;; the invalidation and nothing else.
+        (swap! *tick inc)))))
 
 (defn- f27-inline-watch-target!
   [state]
-  (let [[_config repo id] (:rum/args state)
-        *seen (::seen state)
-        *tick (::tick state)
-        k (keyword "f27-inline" (str (gensym "panel")))]
-    (reset! *seen (f27-inline-target-snapshot repo id))
-    (when-let [conn (db/get-db repo false)]
-      (d/listen! conn k
-                 (fn [_tx-report]
-                   (let [now (f27-inline-target-snapshot repo id)]
-                     (when (not= now @*seen)
-                       (reset! *seen now)
-                       ;; A `rum/local` re-renders its component when it
-                       ;; changes, so this is the invalidation and nothing else.
-                       (swap! *tick inc))))))
-    (assoc state ::watch-key k)))
+  (let [[_config repo id] (:rum/args state)]
+    (reset! (::interest state) (f27-inline-interest repo (f27-ref-target repo id)))
+    (reset! (::handle state) (f27w/watch! (db/get-db repo false)
+                                          (f27-inline-on-change state))))
+  state)
 
 (defn- f27-inline-unwatch-target!
   [state]
-  (let [[_config repo] (:rum/args state)]
-    (when-let [k (::watch-key state)]
-      (when-let [conn (db/get-db repo false)]
-        (d/unlisten! conn k))))
-  (dissoc state ::watch-key))
+  (f27w/unwatch! @(::handle state))
+  (reset! (::handle state) nil)
+  state)
+
+(defn- f27-inline-keep-watching!
+  "Called from the panel's own render, with the entity it just resolved.
+
+  Two jobs, both cheap: refresh the set the listener decides from, and move the
+  subscription if the graph's connection is no longer the one being held. The
+  second is a single identity comparison; it does nothing at all in the ordinary
+  case, and it is what stops a re-index leaving this panel attached to a
+  connection that is not its graph's."
+  [state repo entity]
+  (reset! (::interest state) (f27-inline-interest repo entity))
+  (let [*handle (::handle state)]
+    ;; Only after `:did-mount` has established one: registering a listener from
+    ;; a render that may never mount would leak it.
+    (when @*handle
+      (reset! *handle (f27w/rebind! @*handle (db/get-db repo false)
+                                    (f27-inline-on-change state)))))
+  nil)
 
 (rum/defcs f27-inline-panel <
   ;; `rum/local` first: Rum collects before-render hooks MIXIN-major, so a map
@@ -5066,10 +5108,12 @@
   ;; yet. The same ordering fact that broke `f27-inline-ref` once.
   (rum/local 0 ::tick)
   {:init (fn [state _props]
-           ;; A PLAIN atom, deliberately: it records what was last seen so the
-           ;; watcher can tell a real change from any other transaction, and it
-           ;; must not itself re-render anything when it is set.
-           (assoc state ::seen (atom ::unset)))
+           ;; PLAIN atoms, deliberately: the interest set and the subscription
+           ;; handle are bookkeeping, and setting either of them must not
+           ;; re-render anything by itself. Only `::tick` does that.
+           (assoc state
+                  ::interest (atom #{})
+                  ::handle (atom nil)))
    :did-mount f27-inline-watch-target!
    :will-unmount f27-inline-unwatch-target!}
   "The panel itself. Rendered ONLY while open, so everything it reads — the
@@ -5083,12 +5127,15 @@
   It is a component of its own, rather than a fragment of `f27-inline-ref`, so
   that the target subscription above lives exactly as long as the panel does."
   [state config repo id panel-id context? on-context on-close]
-  ;; Read so this panel re-renders when the watcher above sees its target
-  ;; change. The value carries no meaning: everything below is resolved fresh
-  ;; from the current database on every render, so it is already correct once
-  ;; something has caused one.
+  ;; Read so this panel re-renders when the watcher above sees something it
+  ;; shows change. The value carries no meaning: everything below is resolved
+  ;; fresh from the current database on every render, so it is already correct
+  ;; once something has caused one.
   @(::tick state)
   (let [entity (f27-ref-target repo id)
+        ;; Refresh what the listener decides from, and follow the connection if
+        ;; the graph's has been replaced. Neither re-renders anything.
+        _ (f27-inline-keep-watching! state repo entity)
         readable? (f27o/readable-target? entity)
         tstate (f27il/target-state {:identity? true :readable? readable?})
         label (or (f27-ref-label entity) (t :f27/inline-untitled))

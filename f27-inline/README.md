@@ -55,12 +55,17 @@ node f27-inline/scripts/build-feature.js       # gulp + renderer + guarded main
 node f27-inline/scripts/package-feature.js     # electron-forge package, darwin/x64
 node f27-inline/scripts/run-feature-tests.js   # pilot guards + this build's own
 node f27-inline/checks/inline-loaded-graph-checks.js   # static reading, 0 content changes
-node f27-inline/checks/inline-lifecycle-checks.js      # an OPEN panel while the graph changes
+node f27-inline/checks/inline-lifecycle-checks.js      # an open panel, graph changed ON DISK
+node f27-inline/checks/inline-transaction-checks.js    # an open panel, changed BY THE APPLICATION
 ```
 
-The two packaged scenarios are separate sessions on separate graphs on purpose:
-one asserts that **nothing** in its graph changed, and the other changes its
-graph deliberately. Those claims cannot share a run.
+The three packaged scenarios are separate sessions on separate graphs on
+purpose. The first asserts that **nothing** in its graph changed; the other two
+change theirs deliberately, and by different means — one writes the files, which
+reaches OG through its file watcher, and one never touches a file at all and
+goes through OG's editor and `logseq.api`. Those claims cannot share a run, and
+the two write paths behave differently enough that neither substitutes for the
+other (see below).
 
 The ClojureScript tests are the ordinary ones:
 
@@ -93,10 +98,13 @@ them failing:
 | `checks/inline-batch-graph.js` | one graph per batch, reused only after per-file checks |
 | `checks/error-classifier.js` | **the harness improvement this batch owes**: phase-correlated window-error classification |
 | `checks/inline-loaded-graph-checks.js` | the packaged, loaded-graph scenario — STATIC reading, asserts zero content change (section I is this slice) |
-| `checks/make-lifecycle-graph.js` | the batch's MUTABLE synthetic graph, with every write declared as a whole-file body and one page that is never written |
-| `checks/inline-lifecycle-checks.js` | the packaged LIFECYCLE scenario: what happens to an OPEN panel while the graph changes underneath it |
+| `checks/make-lifecycle-graph.js` | a MUTABLE synthetic graph changed by WRITING ITS FILES, with every write declared as a whole-file body and one page that is never written |
+| `checks/inline-lifecycle-checks.js` | the packaged EXTERNAL-FILE scenario: an OPEN panel while the graph changes on disk |
+| `checks/make-transaction-graph.js` | a MUTABLE synthetic graph nothing writes but the application itself |
+| `checks/inline-transaction-checks.js` | the packaged NORMAL-TRANSACTION scenario: the same lifecycle through OG's own editor and API, plus context changes that are not the target's text, plus listener ownership |
 | `tests/feature-build.test.js` | identity, integrity and "this is neither accepted build" |
-| `tests/graph-fixture.test.js` | the fixture's own rules, without touching the graph root |
+| `tests/graph-fixture.test.js` | the read-only fixture's own rules, without touching the graph root |
+| `tests/mutable-fixture.test.js` | both mutable fixtures' rules, including that their end-state assertions could actually fail |
 | `tests/error-classifier.test.js` | the classification rules, driven deterministically |
 
 ## Window errors: correlation, not a substring
@@ -128,11 +136,35 @@ a change until its host re-renders for another reason. This slice does not
 change that, and the lifecycle scenario records it as an observation.
 
 The panel therefore listens to the datascript **connection**, which every
-transaction reaches whatever its metadata, and invalidates itself only when the
-target's `:db/id` or `:block/content` actually differs. It is registered in the
-panel's `:did-mount` and removed in `:will-unmount`, so nothing is watched while
-the panel is closed, after the host block is removed, or once the reader has
-navigated away.
+transaction reaches whatever its metadata carries. It decides from the
+transaction's own datoms — `f27-inline-watch/touches?` — against a small set of
+entity ids gathered when the panel last rendered: the target, its parent, its
+page and the ancestors the breadcrumb shows. A child arriving or a block
+starting to refer to the target is not in that set and does not need to be:
+those transactions POINT at the target through `:block/parent` and
+`:block/refs`. So an open panel costs one pass over each transaction's datoms
+and no database read at all; a closed one costs nothing.
+
+The subscription is registered in the panel's `:did-mount` and removed in
+`:will-unmount`, from the **exact connection it was added to** — a re-index
+REPLACES the connection, so asking the application again at unmount would
+unlisten from the new one and leave this listener on the old one forever. If the
+connection is replaced while a panel is open, the next render rebinds it.
+`frontend.util.f27-inline-watch` owns all of this and is tested against real
+`d/create-conn` connections, reading datascript's own listener table.
+
+### What the two write paths do differently
+
+Worth knowing before reading either scenario:
+
+| | files written outside the app | OG's editor / `logseq.api` |
+|---|---|---|
+| reactive queries refreshed | **no** (`invoke-hooks` skips `:from-disk?`) | yes |
+| OG's own inline reference text | does not converge; the run observed none within its 30-second budget | converges |
+| deleting a referenced block | the reference survives its target, so the panel reaches its honest **unavailable** state | OG **substitutes the deleted block's text** into every referrer, so the reference — and with it the control and the panel — ceases to exist |
+
+The panel converges on both paths. The unavailable state is only reachable on
+the first, and that is where it is asserted.
 
 ## Graph data
 

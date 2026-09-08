@@ -36,7 +36,7 @@ const PILOT_FILES = ['preflight.test.js', 'isolation.test.js', 'guards.test.js',
   .map((f) => path.join('f27-pilot', 'tests', f));
 
 const FEATURE_FILES = ['feature-build.test.js', 'graph-fixture.test.js',
-                       'error-classifier.test.js']
+                       'mutable-fixture.test.js', 'error-classifier.test.js']
   .map((f) => path.join('f27-inline', 'tests', f));
 
 // Exactly the two tests above, by name.
