@@ -132,8 +132,22 @@ async function main() {
   // ---------- O2 : launch, then a BAD dialog result ----------
   say('\nO2  launch, then a BAD dialog result');
   const { _electron } = require(path.join(REPO, 'node_modules', 'playwright'));
-  const app = await withTimeout(_electron.launch({ executablePath: EXE, timeout: 120000 }),
-                                180000, 'electron launch');
+
+  // One bounded retry. A launch immediately after the bundle was repackaged can
+  // find the target already gone, and losing a whole session to that is not
+  // worth it. Nothing is matched by name and no process is signalled here — the
+  // launcher owns only its own child, which the incident record requires.
+  let app = null;
+  for (let a = 1; a <= 2 && !app; a++) {
+    try {
+      app = await withTimeout(_electron.launch({ executablePath: EXE, timeout: 120000 }),
+                              180000, 'electron launch');
+    } catch (e) {
+      if (a === 2) throw e;
+      say(`  (launch attempt ${a} failed: ${String(e.message).split('\n')[0]}; retrying once)`);
+      await sleep(10000);
+    }
+  }
   let appPid = null;
   let stubInstalled = false;
   try {
@@ -817,9 +831,33 @@ async function main() {
 
   // ---------- O8 : integrity ----------
   say('\nO8  graph integrity');
-  record('O8.6', 'the window reported no error while the panels were used',
-    pageErrors.length === 0,
-    pageErrors.length ? `${pageErrors.length}: ${pageErrors[0].slice(0, 300)}` : 'none');
+  // This run DELIBERATELY provokes one error: it points the folder dialog at an
+  // inert path outside the permitted root and requires the application to refuse
+  // it (O2.2). OG logs that refusal, and its filesystem handler logs the failed
+  // call beside it. Those are the guard working, and they are NAMED here rather
+  // than folded into a "clean" claim — and the classifier is narrow enough that
+  // a real failure involving this run's own graph is not swallowed by it.
+  const expectedNoise = (e) =>
+    e.includes(BAD) ||
+    (e.includes('frontend.handler.web.nfs') && !e.includes(GRAPH));
+  const unexpected = pageErrors.filter((e) => !expectedNoise(e));
+  const expected = pageErrors.filter(expectedNoise);
+  record('O8.6', 'the window reported no error beyond the refusal this run provokes on purpose',
+    unexpected.length === 0,
+    `${expected.length} expected (the deliberate boundary refusal and its handler log), ` +
+    `${unexpected.length} unexpected` +
+    (unexpected.length ? `: ${unexpected[0].slice(0, 300)}` : ''));
+
+  // The shapes that unmount a React subtree, whatever else they are classified
+  // as. This is the guard for the defect this batch's live run found: a `case`
+  // whose default had been compiled away threw "No matching clause: ready" on
+  // every ordinary section, and the whole reference overview vanished.
+  const renderFailure = /No matching clause|Cannot read (?:property|properties)|is not a function|Maximum update depth|Minified React error/;
+  const renderFailures = pageErrors.filter((e) => renderFailure.test(e));
+  record('O8.7', 'nothing that unmounts a panel was thrown while the panels were used',
+    renderFailures.length === 0,
+    renderFailures.length ? `${renderFailures.length}: ${renderFailures[0].slice(0, 300)}`
+                          : '0 render failures among ' + pageErrors.length + ' captured line(s)');
   record('O8.5', 'how often the overview had to be re-opened mid-run', true,
     repairs === 0
       ? '0 — it stayed open for the whole run'
