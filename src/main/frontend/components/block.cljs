@@ -69,6 +69,7 @@
             [frontend.util.f27-inert :as f27i]
             [frontend.util.f27-embed :as f27e]
             [frontend.util.f27-page-embed :as f27pe]
+            [frontend.util.f27-outgoing :as f27o]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -4525,6 +4526,247 @@
           (f27-btn toggle! {:aria-expanded "true"})
           (t :f27/inbound-hide)]]])]))
 
+
+;; ---------------------------------------------------------------------------
+;; F27 outgoing first slice — the links written INSIDE one block.
+;;
+;; Every direction above this point is inbound (what refers to this block) or
+;; structural (its ancestors, its children). This is the other direction, and it
+;; is deliberately a SIBLING of the inbound section rather than part of it: two
+;; lists that answer opposite questions must never read as one.
+;;
+;; The list is derived from the SAME parse the panel renders — `inline->edn`
+;; over the block's displayed text — so what is listed and what is on screen
+;; cannot disagree. `:block/refs` is deliberately not the basis: it carries page
+;; refs, tags and refs inherited from ancestors, so a block would appear to link
+;; to things nobody wrote in it.
+;;
+;; Everything shown is one hop. A target's own text is rendered by
+;; `f27-embed-expansion`, which is the guarded renderer one level down, so a
+;; reference inside it is a closed chip, an asset a compact indicator and a
+;; macro inert — the same guards, without a new rule. Children are never read.
+;; Read-only throughout: entity lookups and pure functions.
+;; ---------------------------------------------------------------------------
+
+(defn- f27-outgoing-scan
+  "The inline block references written in ONE block's own text.
+
+  The text scanned is the text the panel DISPLAYS: built-in properties removed,
+  block-level prefix split off. A persisted `id::` is therefore never a source
+  of links, and the parse is the one the renderer already performs.
+
+  A failed read or parse is caught and reported as `:error`. It is never
+  reported as an empty block: 'nothing is written here' and 'this could not be
+  read' are different answers and the panel says which."
+  [entity]
+  (try
+    (let [format (or (:block/format entity) :markdown)
+          content (f27-display-content format (:block/content entity))
+          {:keys [text]} (f27ctx/split-block-prefix content)
+          ast (when-not (string/blank? text)
+                (gp-mldoc/inline->edn text (gp-mldoc/default-config format)))
+          {:keys [hits truncated?]} (f27o/scan (or ast []))
+          collected (f27o/collect hits)]
+      {:text text
+       :collected collected
+       :truncated? (boolean truncated?)
+       :state (f27o/section-state {:text text :collected collected})})
+    (catch :default _
+      {:text nil :collected (f27o/collect []) :truncated? false :state :error})))
+
+(rum/defcs f27-outgoing-row < (rum/local false ::open?)
+  "One target this block links to.
+
+  Shows the target's own source page and short ancestor path through OG's
+  existing `breadcrumb` — with the F27 config, so an asset or a macro written in
+  one of ITS parents is not rendered unguarded here — and a bounded compact
+  label of its text, never an identifier.
+
+  Three outcomes, and only one of them offers the expansion:
+
+    :show         the target resolves and is not this block. One control shows
+                  its own text, bounded, one hop, read-only
+    :self         the block refers to itself. Marked, said in words, and never
+                  opened — expanding it would render the block inside its own
+                  context
+    :unavailable  the target could not be found. Said in words, and carrying no
+                  control that cannot work"
+  [state config repo host-uuid link]
+  (let [id (:id link)
+        resolved (f27-ref-target repo id)
+        ;; NOT `(some? resolved)`. The parser turns every `((uuid))` into the
+        ;; lookup ref `[:block/uuid id]`, and transacting one that resolves to
+        ;; nothing CREATES an entity carrying that identity alone — so a link to
+        ;; a block nobody has written resolves to a stub. `readable-target?`
+        ;; asks whether there is a block there; a live run of this scenario is
+        ;; what found the difference.
+        entity (when (f27o/readable-target? resolved) resolved)
+        outcome (f27o/plan-link {:id id :host host-uuid :resolved? (some? entity)})
+        label (or (f27-ref-label entity) (t :f27/outgoing-untitled))
+        open? (and (f27o/expandable? outcome) @(::open? state))
+        ;; Built under the SAME config the body renderer uses, with this target
+        ;; pushed onto the trail alongside the host: a reference inside the
+        ;; expansion that points back at either is the repeat it is.
+        {:keys [heading marker body fallback truncated?]}
+        (when open?
+          (f27-embed-expansion (f27-body-config config repo host-uuid)
+                               entity f27o/max-target-chars
+                               [(f27-ref-key host-uuid) (f27-ref-key id)]))
+        repeats (or (:repeats link) 0)]
+    [:div.f27-out-row {:class (case outcome
+                                :self "is-self"
+                                :unavailable "is-unavailable"
+                                nil)}
+     [:div.f27-out-row-head
+      [:span.f27-out-pos (str (inc (or (:order link) 0)) ".")]
+      [:span.f27-out-mark {:class (when (not= :show outcome) "is-stop")
+                           :aria-hidden "true"}
+       (case outcome :self "↻" :unavailable "⚠" "→")]
+      [:span.f27-out-crumb
+       (when (and entity (not= :unavailable outcome))
+         (breadcrumb (f27-breadcrumb-config config repo (:block/uuid entity))
+                     repo (:block/uuid entity)
+                     {:show-page? true
+                      :level-limit 3
+                      :indent? false
+                      :end-separator? false}))]]
+     [:div.f27-out-text
+      (if (= :unavailable outcome)
+        [:span.f27-out-missing {:title (t :f27/outgoing-unavailable-title)}
+         (t :f27/outgoing-unavailable)]
+        [:span.f27-out-label label])
+      (when (pos? repeats)
+        [:span.f27-out-repeats (t :f27/outgoing-repeats repeats)])]
+     (when (= :self outcome)
+       [:div.f27-ctx-note.f27-ctx-cycle (t :f27/outgoing-self)])
+     [:div.f27-out-actions
+      (when (f27o/expandable? outcome)
+        [:button.f27-out-toggle-text.f27-btn
+         (f27-btn (fn [] (swap! (::open? state) not))
+                  {:aria-expanded (if open? "true" "false")
+                   :aria-label (if open?
+                                 (t :f27/outgoing-hide-text-of label)
+                                 (t :f27/outgoing-show-text-of label))
+                   :title (if open?
+                            (t :f27/outgoing-hide-text)
+                            (t :f27/outgoing-show-text))})
+         (if open? (t :f27/outgoing-hide-text) (t :f27/outgoing-show-text))])
+      ;; No control is offered for a target that could not be found: a button
+      ;; that navigates nowhere is worse than none.
+      (when (not= :unavailable outcome)
+        [:button.f27-out-source.f27-btn
+         (f27-btn (fn [] (route-handler/redirect-to-page! (str id)))
+                  {:aria-label (t :f27/outgoing-open-target-of label)
+                   :title (t :f27/outgoing-open-target)})
+         (t :f27/outgoing-open-target)])]
+     (when open?
+       [:div.f27-out-target {:role "group"
+                             :aria-label (t :f27/outgoing-target-of label)}
+        [:span.f27-out-target-head
+         (when heading [:span.f27-ctx-badge.is-heading (str "H" heading)])
+         (when marker [:span.f27-ctx-badge.is-task marker])]
+        (cond
+          body [:span.f27-out-target-text body]
+          fallback [:span.f27-out-target-text [:span.f27-out-target-fallback fallback]]
+          :else [:span.f27-out-target-text
+                 [:span.f27-out-target-empty (t :f27/outgoing-empty-target)]])
+        (when truncated? [:span.f27-out-cut {:aria-hidden "true"} "…"])
+        (when truncated?
+          [:div.f27-ctx-note.f27-out-note (t :f27/outgoing-bounded)])
+        [:div.f27-ctx-note.f27-out-note (t :f27/outgoing-one-hop)]])]))
+
+(rum/defcs f27-row-outgoing < (rum/local 0 ::shown)
+  "The links written INSIDE this referencing block, on request.
+
+  Collapsed by default: it is a second direction, and a panel that opened both
+  directions at once would be a list of everything rather than a reading
+  surface. The count in the control is taken from the block's own text, which is
+  a pure parse of one string — no target is resolved until the section is open.
+
+  Four outcomes are said differently, because they mean different things:
+  nothing written here, a target that could not be found, more links than are
+  kept, and a read that failed."
+  [state config repo ref-block]
+  (let [host-uuid (:block/uuid ref-block)
+        scan (f27-outgoing-scan ref-block)
+        collected (:collected scan)
+        truncated? (:truncated? scan)
+        status (:state scan)
+        shown @(::shown state)
+        open? (pos? shown)
+        page (f27o/page-of collected shown)
+        ;; Blank falls through to the plain heading below, rather than being
+        ;; substituted with a placeholder name the block does not have.
+        host-label (f27-row-label ref-block)
+        ;; One number, used in both places: how many distinct targets this
+        ;; block links to. Repeated writings of the same target are counted on
+        ;; the row itself, where the reader can see which target repeats.
+        found (or (:distinct collected) 0)
+        open-source! (fn [] (when host-uuid
+                              (route-handler/redirect-to-page! (str host-uuid))))]
+    [:div.f27-out
+     [:button.f27-out-toggle.f27-btn
+      (f27-btn (fn [] (swap! (::shown state)
+                             (fn [n] (if (pos? n) 0 f27o/links-per-request))))
+               {:aria-expanded (if open? "true" "false")})
+      (cond
+        open? (t :f27/outgoing-hide)
+        (pos? found) (t :f27/outgoing-show found)
+        :else (t :f27/outgoing-show-none))]
+     (when open?
+       [:div.f27-out-body
+        [:div.f27-out-head (if (string/blank? host-label)
+                             (t :f27/outgoing-head-plain)
+                             (t :f27/outgoing-head host-label))]
+        ;; Said in words on the surface itself, not only in a contract: this is
+        ;; the opposite direction from the section below it.
+        [:div.f27-out-direction (t :f27/outgoing-direction)]
+        [:div.f27-out-scope (t :f27/outgoing-scope)]
+        (case status
+          :error
+          [:<>
+           [:div.f27-ctx-note.f27-ctx-error (t :f27/outgoing-error)]
+           [:button.f27-out-open-source.f27-btn (f27-btn open-source! nil)
+            (t :f27/outgoing-open-source)]]
+
+          :no-text [:div.f27-ctx-note (t :f27/outgoing-no-text)]
+
+          :empty [:div.f27-ctx-note (t :f27/outgoing-empty)]
+
+          [:<>
+           [:div.f27-out-count (t :f27/outgoing-count found)]
+           [:div.f27-out-rows
+            (for [[i l] (map-indexed vector (:rows page))]
+              (rum/with-key (f27-outgoing-row config repo host-uuid l)
+                (str "f27-out-" (:id l) "-" i)))]])
+
+        ;; Bounds and losses, each said only when it actually bites.
+        (when (pos? (or (:malformed collected) 0))
+          [:div.f27-ctx-note.f27-ctx-error
+           (t :f27/outgoing-malformed (:malformed collected))])
+        (when truncated?
+          [:div.f27-ctx-note.f27-ctx-capped (t :f27/outgoing-truncated)])
+        (when (pos? (or (:remaining page) 0))
+          [:div.f27-ctx-note (t :f27/outgoing-remaining (:remaining page))])
+        (when (f27o/can-continue? page)
+          [:button.f27-out-more.f27-btn
+           (f27-btn (fn [] (reset! (::shown state) (f27o/next-wanted shown)))
+                    {:aria-label (t :f27/outgoing-more-of f27o/links-per-request)})
+           (t :f27/outgoing-more)])
+        ;; A retention cap is NOT a continuation: nothing past it was kept, so
+        ;; the reader is sent to the source rather than offered a control that
+        ;; silently fails to reach what it names.
+        (when (f27o/cap-hiding-anything? page)
+          [:<>
+           [:div.f27-ctx-note.f27-ctx-capped
+            (t :f27/outgoing-beyond-cap (:beyond-cap page) f27o/max-links)]
+           [:button.f27-out-open-source.f27-btn (f27-btn open-source! nil)
+            (t :f27/outgoing-open-source)]])
+        [:div.f27-out-end
+         [:button.f27-out-toggle.f27-btn
+          (f27-btn (fn [] (reset! (::shown state) 0)) {:aria-expanded "true"})
+          (t :f27/outgoing-hide)]]])]))
+
 (rum/defcs f27-row-context < rum/static
   (rum/local f27ctx/default-batch ::limit)
   (rum/local false ::kids-open?)
@@ -4594,6 +4836,11 @@
           ;; Descendants of THIS referencing block.
           (f27-row-descendants config repo uuid'
                                (::kids-open? state) (::desc state))
+          ;; The links written INSIDE this referencing block. A third
+          ;; direction, above the inbound section and clearly labelled, so
+          ;; "what this block points at" and "what points at this block" are
+          ;; never read as one list.
+          (f27-row-outgoing config repo ref-block)
           ;; Blocks that REFERENCE this referencing block — the opposite
           ;; direction from the descendants above, and deliberately below them
           ;; so the two are never read as one list.

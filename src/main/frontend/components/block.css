@@ -1204,6 +1204,185 @@ html.is-mac {
   margin-top: 0.25rem;
 }
 
+/* F27 outgoing first slice — the links written INSIDE one block. Display-only.
+
+   Deliberately styled as a SIBLING of the inbound section above rather than a
+   variation of it: the two answer opposite questions, and a reader must be able
+   to tell them apart at a glance as well as by their words. */
+
+.f27-out {
+  margin-top: 0.45rem;
+}
+
+.f27-out-toggle {
+  color: var(--ls-link-text-color);
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+.f27-out-body {
+  margin-top: 0.3rem;
+  padding: 0.35rem 0.45rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  background: var(--ls-tertiary-background-color);
+  border-radius: 4px;
+}
+
+.f27-out-head {
+  font-weight: 600;
+  margin-bottom: 0.1rem;
+}
+
+.f27-out-direction {
+  color: var(--ls-secondary-text-color);
+  font-size: 0.85em;
+  font-style: italic;
+  margin-bottom: 0.15rem;
+}
+
+/* What this list does NOT contain is part of what it means, so it is on screen
+   rather than only in the contract. */
+
+.f27-out-scope {
+  color: var(--ls-secondary-text-color);
+  font-size: 0.8em;
+  margin-bottom: 0.3rem;
+}
+
+.f27-out-count {
+  color: var(--ls-secondary-text-color);
+  font-size: 0.85em;
+  margin-bottom: 0.25rem;
+}
+
+.f27-out-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.f27-out-row {
+  padding: 0.2rem 0 0.25rem;
+  border-top: 1px solid var(--ls-quaternary-background-color);
+}
+
+.f27-out-row:first-child {
+  border-top: 0;
+}
+
+.f27-out-row-head {
+  display: flex;
+  gap: 0.35rem;
+  align-items: baseline;
+  min-width: 0;
+}
+
+/* The position is the reader's evidence that the list is in SOURCE order. */
+
+.f27-out-pos {
+  flex: 0 0 auto;
+  color: var(--ls-secondary-text-color);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+
+.f27-out-mark {
+  flex: 0 0 auto;
+  width: 1em;
+  text-align: center;
+  color: var(--ls-secondary-text-color);
+}
+
+/* A link that cannot be opened must not look like one that can. */
+
+.f27-out-mark.is-stop {
+  color: var(--ls-warning-text-color, var(--ls-secondary-text-color));
+  font-weight: 600;
+}
+
+.f27-out-crumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.f27-out-text {
+  margin: 0.1rem 0 0.15rem 2.1rem;
+  min-width: 0;
+}
+
+.f27-out-missing {
+  color: var(--ls-secondary-text-color);
+  font-style: italic;
+}
+
+.f27-out-repeats {
+  margin-left: 0.4rem;
+  color: var(--ls-secondary-text-color);
+  font-size: 0.8em;
+}
+
+.f27-out-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-left: 2.1rem;
+  font-size: 0.85em;
+}
+
+.f27-out-toggle-text,
+.f27-out-source,
+.f27-out-more,
+.f27-out-open-source {
+  font-size: 1em;
+  text-decoration: underline;
+}
+
+.f27-out-more,
+.f27-out-open-source {
+  display: inline-block;
+  margin-top: 0.25rem;
+}
+
+/* One target's own text, one hop down. Bounded by the contract, not by a
+   scroller: nothing here scrolls inside itself. */
+
+.f27-out-target {
+  display: block;
+  margin: 0.25rem 0 0.1rem 2.1rem;
+  padding: 0.25rem 0.4rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  border-radius: 3px;
+  background: var(--ls-secondary-background-color);
+}
+
+.f27-out-target-head {
+  display: inline;
+}
+
+.f27-out-target-text {
+  display: inline;
+}
+
+.f27-out-target-fallback,
+.f27-out-target-empty {
+  color: var(--ls-secondary-text-color);
+  font-style: italic;
+}
+
+.f27-out-cut {
+  color: var(--ls-secondary-text-color);
+}
+
+.f27-out-note {
+  margin-top: 0.15rem;
+}
+
+.f27-out-end {
+  margin-top: 0.4rem;
+}
+
 /* Crystal selector — the same native-button treatment as every other F27
    control, so its options and actions are reachable by Tab and activated by
    Enter and Space.
