@@ -33,6 +33,7 @@ const ID = require(path.join(REPO, 'f27-pilot', 'src', 'pilot-identity.js'));
 const preflight = require(path.join(REPO, 'f27-pilot', 'src', 'pilot-preflight.js'));
 const B = require('./allowed-root.js');
 const graphGen = require('./make-synthetic-graph.js');
+const batchGraph = require('./batch-graph.js');
 const GH = require('./graph-hash.js');
 const OP = require('./owned-process.js');
 
@@ -90,10 +91,14 @@ async function main() {
 
   // ---------- L1 ----------
   say('\nL1  synthetic graph, inside the permitted root only');
-  const gen = graphGen.build();
-  const GRAPH = B.assertInsideAllowedRoot('synthetic graph', gen.graph);
-  record('L1.1', 'fresh synthetic graph generated from templates in the permitted root', true,
-    `${GRAPH} (${gen.pages} pages)`);
+  // ONE graph per batch, reused after ownership, containment and content
+  // checks, so repeated attempts stop littering the shared root. Nothing is
+  // ever deleted, reset or renamed here.
+  const batch = batchGraph.ensure(path.join(EVIDENCE, 'current-batch-graph.json'));
+  const GRAPH = B.assertInsideAllowedRoot('synthetic graph', batch.graph);
+  record('L1.1', 'one synthetic graph for this batch, inside the permitted root only', true,
+    `${batch.reused ? 'reused after containment and content checks' : 'created'}: ${GRAPH}` +
+    (batch.problems.length ? ` (previous one left in place: ${batch.problems.join('; ')})` : ''));
   const before = GH.snapshot(GRAPH);
   record('L1.2', 'graph content hashed before the session', true,
     `${Object.keys(before).length} files`);
@@ -243,8 +248,57 @@ async function main() {
       !!overview && !overview.idLeak && !overview.uuidLeak,
       overview ? `id:: ${overview.idLeak}, raw uuid ${overview.uuidLeak}` : 'n/a');
 
-    record('L5.3', 'Crystal marker controls are present', (await count('.f27-crystal-config-toggle')) > 0,
-      `${await count('.f27-crystal-config-toggle')} config toggle(s), ${await count('.f27-crystal-chip')} chip(s)`);
+    // ---- Crystal: select a known tag, assert the preview, clear it --------
+    // The graph tags three referencing blocks with #crystal, so the option is
+    // known in advance rather than whatever happens to be offered.
+    const crystalBefore = await count('.f27-crystal-chip');
+    await attempt('open crystal config', 20000,
+      () => page.locator('.f27-crystal-config-toggle').first().click(), null);
+    await sleep(2000);
+    const options = await page.evaluate(() =>
+      [...document.querySelectorAll('.f27-crystal-option')].map((o) => ({
+        text: (o.innerText || '').trim(),
+        pressed: o.getAttribute('aria-pressed'),
+      })));
+    record('L5.3', 'the Crystal tag list offers the tag the graph actually uses',
+      options.some((o) => o.text === '#crystal'),
+      `${options.length} option(s): ${JSON.stringify(options.map((o) => o.text))}`);
+
+    await attempt('select #crystal', 20000,
+      () => page.locator('.f27-crystal-option').filter({ hasText: '#crystal' }).first().click(), null);
+    await sleep(3000);
+    const selected = await page.evaluate(() => ({
+      pressed: [...document.querySelectorAll('.f27-crystal-option')]
+        .map((o) => `${(o.innerText || '').trim()}=${o.getAttribute('aria-pressed')}`),
+      chips: [...document.querySelectorAll('.f27-crystal-chip')].map((c) => (c.innerText || '').trim()),
+      rowsWithChip: [...document.querySelectorAll('.f27-ref-row')]
+        .filter((r) => r.querySelector('.f27-crystal-chip'))
+        .map((r) => ((r.querySelector('.f27-ref-crumb') || {}).innerText || '').trim()),
+      clear: document.querySelectorAll('.f27-crystal-clear').length,
+    }));
+    // Weekly Review, Reading List and Link Check are the tagged sources.
+    const expectedTagged = ['Weekly Review', 'Reading List', 'Link Check'];
+    const gotTagged = expectedTagged.filter((n) => selected.rowsWithChip.some((r) => r.includes(n)));
+    record('L5.14', 'selecting #crystal marks exactly the rows whose source block carries it',
+      selected.chips.length > 0 && gotTagged.length === expectedTagged.length &&
+        selected.rowsWithChip.length === expectedTagged.length,
+      `${selected.chips.length} chip(s) ${JSON.stringify(selected.chips.slice(0, 4))} on ` +
+      `${JSON.stringify(selected.rowsWithChip)}; expected ${JSON.stringify(expectedTagged)}; ` +
+      `option state ${JSON.stringify(selected.pressed)}`);
+
+    await attempt('clear crystal', 20000,
+      () => page.locator('.f27-crystal-clear').first().click(), null);
+    await sleep(2500);
+    const cleared = await page.evaluate(() => ({
+      chips: document.querySelectorAll('.f27-crystal-chip').length,
+      pressed: [...document.querySelectorAll('.f27-crystal-option')]
+        .map((o) => o.getAttribute('aria-pressed')),
+    }));
+    record('L5.15', 'clearing Crystal removes every chip and releases the tag',
+      cleared.chips === crystalBefore && !cleared.pressed.includes('true'),
+      `${cleared.chips} chip(s) after clearing (started at ${crystalBefore}), ` +
+      `option state ${JSON.stringify(cleared.pressed)}`);
+
 
     // Rows arrive collapsed. Everything else -- description lines, assets,
     // inert embeds, the inbound-follow control -- only exists once the row's
@@ -288,41 +342,67 @@ async function main() {
     record('L5.5', 'chained references can be followed from a row', chainControls > 0 && chain.steps > 0,
       `${chainControls} follow control(s), ${chain.steps} step(s), ${chain.crumbs} path step(s)`);
 
-    // A <-> B. One level reaches B; the repeat is only reached, and so only
-    // marked, when the walk is taken a second level back to A.
+    // ---- cyclic traversal, by visited identity ---------------------------
+    // Counting steps proves nothing about which blocks were visited. This
+    // records the source of every listed block and the path the explorer
+    // reports, and asserts the intended A -> B -> A walk explicitly.
+    // Scoped to the row being explored. Reading the whole document would mix in
+    // the chain row's open explorer and make "which blocks were visited"
+    // ambiguous -- which it did on the first run of this check.
+    const inboundState = (row) => row.evaluate((r) => ({
+      path: [...r.querySelectorAll('.f27-in-path-step')].map((e) => (e.innerText || '').trim()),
+      head: ((r.querySelector('.f27-in-head') || {}).innerText || '').trim(),
+      items: [...r.querySelectorAll('.f27-in-item')].map((e) => ({
+        source: ((e.querySelector('.f27-in-crumb') || {}).innerText || '').trim(),
+        text: ((e.querySelector('.f27-in-text') || {}).innerText || '').trim().slice(0, 60),
+        stop: !!e.querySelector('.f27-in-mark.is-stop'),
+        explore: !!e.querySelector('.f27-in-explore'),
+        exploreLabel: ((e.querySelector('.f27-in-explore') || {}).innerText || '').trim(),
+      })),
+    }));
+
     const cycleRow = rowWith('Pilot Cycle A');
-    let cycle = { steps: 0, stops: 0, levels: 0 };
+    const cycle = { levels: [], ok: false };
     if ((await cycleRow.locator('.f27-in-toggle').count().catch(() => 0)) > 0) {
-      await attempt('follow cycle', 20000, () => cycleRow.locator('.f27-in-toggle').first().click(), null);
+      await attempt('follow cycle from A', 20000,
+        () => cycleRow.locator('.f27-in-toggle').first().click(), null);
       await sleep(3500);
-      cycle.levels = 1;
-      const deeper = await cycleRow.locator('.f27-in-item .f27-in-toggle').count().catch(() => 0);
-      if (deeper > 0) {
-        await attempt('follow cycle again', 20000,
-          () => cycleRow.locator('.f27-in-item .f27-in-toggle').first().click(), null);
+      cycle.levels.push(await inboundState(cycleRow));
+
+      // Explore the block we just reached; in an A<->B cycle that must lead
+      // back to A, which is already on the path.
+      if ((await cycleRow.locator('.f27-in-item .f27-in-explore').count().catch(() => 0)) > 0) {
+        await attempt('explore back to A', 20000,
+          () => cycleRow.locator('.f27-in-item .f27-in-explore').first().click(), null);
         await sleep(3500);
-        cycle.levels = 2;
+        cycle.levels.push(await inboundState(cycleRow));
       }
-      cycle = Object.assign(cycle, await page.evaluate(() => ({
-        steps: document.querySelectorAll('.f27-in-item').length,
-        stops: document.querySelectorAll('.f27-in-mark.is-stop').length,
-        marks: document.querySelectorAll('.f27-in-mark').length,
-        markText: [...document.querySelectorAll('.f27-in-mark')]
-          .map((m) => `${(m.className || '').toString()}:${(m.title || m.innerText || '').trim().slice(0, 24)}`)
-          .slice(0, 4),
-        deeperControls: document.querySelectorAll('.f27-in-item .f27-in-toggle').length,
-      })));
     }
-    // The property is TERMINATION: following A<->B must not walk round for
-    // ever. `.f27-in-mark.is-stop` is one presentation of that, and it is not
-    // the one this graph shape produces; what is asserted here is what is
-    // actually observable -- a bounded walk that offers no further expansion.
-    record('L5.10', 'a cyclic reference terminates rather than recursing',
-      cycle.steps > 0 && cycle.steps < 10 && cycle.deeperControls === 0,
-      `${cycle.levels} level(s) followed, ${cycle.steps} step(s), ` +
-      `${cycle.deeperControls} further control(s) offered, ` +
-      `${cycle.stops} of ${cycle.marks || 0} mark(s) flagged as a stop; ` +
-      `marks ${JSON.stringify(cycle.markText || [])}`);
+
+    const lvl1 = cycle.levels[0];
+    const lvl2 = cycle.levels[1];
+    const visited1 = lvl1 ? lvl1.items.map((i) => i.source) : [];
+    const visited2 = lvl2 ? lvl2.items.map((i) => i.source) : [];
+    record('L5.10', 'the cycle is traversed A -> B and then back to A, by visited identity',
+      visited1.length === 1 && visited1[0] === 'Pilot Cycle B' &&
+        visited2.length === 1 && visited2[0] === 'Pilot Cycle A',
+      `level 1 from "Pilot Cycle A" visited ${JSON.stringify(visited1)}; ` +
+      `level 2 visited ${JSON.stringify(visited2)}; ` +
+      `path ${JSON.stringify(lvl2 ? lvl2.path : (lvl1 || {}).path || [])}`);
+
+    // What happens at the repeat is asserted, not assumed. If the product marks
+    // it, that is recorded; if it instead simply offers no further exploration,
+    // that is recorded too -- and if it offers unbounded re-exploration, this
+    // check fails rather than being reworded to fit.
+    const repeat = lvl2 ? lvl2.items.find((i) => i.source === 'Pilot Cycle A') : null;
+    const stopped = !!repeat && (repeat.stop || !repeat.explore);
+    record('L5.13', 'the repeat is stopped rather than offered for endless re-exploration',
+      stopped,
+      repeat
+        ? `repeat entry for "Pilot Cycle A": stop marker ${repeat.stop}, ` +
+          `further explore control ${repeat.explore}` +
+          (repeat.explore ? ` ("${repeat.exploreLabel}")` : '')
+        : 'the walk never returned to Pilot Cycle A, so no repeat was reached');
 
     // ---- assets ----------------------------------------------------------
     const assetRow = rowWith('Attachments');

@@ -36,6 +36,7 @@ const preflight = require(path.join(REPO, 'f27-pilot', 'src', 'pilot-preflight.j
 const snap = require('./os-snapshot.js');
 const B = require('./allowed-root.js');
 const graphGen = require('./make-synthetic-graph.js');
+const batchGraph = require('./batch-graph.js');
 const OP = require('./owned-process.js');
 
 const APP_DIR = path.join(PILOT_DIR, 'out', 'Logseq-OG-F27-Pilot-darwin-x64',
@@ -149,10 +150,11 @@ async function main() {
   record('P1.1', 'OS snapshot recorded', true,
     `${Object.keys(beforeSnap.dirs).length} directories, non-recursive`);
 
-  const runGraph = graphGen.build();
+  // The same one graph this batch uses, not a new folder per run.
+  const runGraph = batchGraph.ensure(path.join(EVIDENCE, 'current-batch-graph.json'));
   const graphReal = B.assertInsideAllowedRoot('synthetic graph', runGraph.graph);
-  record('P1.0', 'fresh synthetic graph generated inside the permitted root only', true,
-    graphReal);
+  record('P1.0', 'the batch synthetic graph is inside the permitted root only', true,
+    `${runGraph.reused ? 'reused' : 'created'}: ${graphReal}`);
 
   const claimantsBefore = schemeClaimants('logseq-og');
   record('P1.2', 'logseq-og: scheme claimants recorded', true, claimantsBefore.join(', ') || '(none)');
