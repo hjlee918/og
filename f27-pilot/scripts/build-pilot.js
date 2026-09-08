@@ -35,6 +35,10 @@ const ACCEPTED_CHECKOUT_NAME = 'f27-slice-1';
 // Files copied verbatim from the tracked pilot sources into the app directory.
 const ENTRY_FILES = [
   'pilot-main.js', 'pilot-preflight.js', 'pilot-isolation.js', 'pilot-identity.js',
+  // Loaded by the compiled main process at runtime, not by the entry, but
+  // shipped and hashed with it so the boundary code is integrity-checked before
+  // the bundle that requires it is loaded.
+  'pilot-boundary.js',
 ];
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');

@@ -24,6 +24,15 @@ module.exports = Object.freeze({
   STATE_DIR: 'pilot-state',
 
   MANIFEST_FILE: 'pilot-build-manifest.json',
+  BOUNDARY_FILE: 'pilot-boundary.json',
+  BOUNDARY_SCHEMA: 'f27-pilot/boundary/1',
+
+  // The sole permitted graph-data location, expressed relative to the real OS
+  // home rather than hard-coded to one machine. The entry validates it before
+  // the main process is allowed to treat it as a root; if validation fails the
+  // application refuses every graph path rather than falling back to anything.
+  GRAPH_ROOT_SEGMENTS: ['Library', 'Mobile Documents', 'com~apple~CloudDocs',
+                        'Logseq Test'],
   MAIN_BUNDLE: 'electron.js',
   OWNERSHIP_MARKER: 'PILOT-OWNED.json',
   STARTUP_REPORT: 'startup-report.json',

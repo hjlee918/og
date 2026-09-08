@@ -107,7 +107,7 @@ function verify(dir) {
   // covered, so a tampered isolation module cannot ride along on a valid
   // bundle hash.
   const required = [ID.MAIN_BUNDLE, 'pilot-main.js', 'pilot-preflight.js',
-                    'pilot-isolation.js', 'pilot-identity.js'];
+                    'pilot-isolation.js', 'pilot-identity.js', 'pilot-boundary.js'];
   for (const req of required) {
     if (!artifacts[req]) {
       return refuse('manifest-incomplete', `artifact not covered: ${req}`, { checks });

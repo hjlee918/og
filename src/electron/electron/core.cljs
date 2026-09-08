@@ -76,7 +76,15 @@
            url (decode-protected-assets-schema-path url)
            path (string/replace url "assets://" "")
            path (js/decodeURIComponent path)]
-       (cond (or (string/starts-with? path "/")
+       (cond
+             ;; G5 (pilot only). An assets:// URL comes from note content, so it
+             ;; is untrusted input to the file protocol. A path outside the
+             ;; permitted roots is answered as not-found rather than served.
+             (and pilot/PILOT (not (pilot/permitted-path? path)))
+             (do (pilot/record! :graph-boundary (str "refused assets:// " (pr-str path)))
+                 (callback #js {:error -6}))
+
+             (or (string/starts-with? path "/")
                  (re-find #"(?i)^/[a-zA-Z]:" path))
              (callback #js {:path path})
 
@@ -103,7 +111,12 @@
            path' (utils/safe-decode-uri-component path')
            path' (.join node-path ROOT path')]
 
-       (callback #js {:path path'}))))
+       ;; G5 (pilot only). lsp:// serves bundled resources and plugin files;
+       ;; both are inside permitted roots, so anything else is refused.
+       (if (and pilot/PILOT (not (pilot/permitted-path? path')))
+         (do (pilot/record! :graph-boundary (str "refused lsp:// " (pr-str path')))
+             (callback #js {:error -6}))
+         (callback #js {:path path'})))))
 
   #(do
      (.unregisterProtocol protocol FILE_LSP_SCHEME)

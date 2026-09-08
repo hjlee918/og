@@ -300,6 +300,45 @@ function establish(opts) {
   }
   step('configs.edn', seeded ? `seeded ${cfgPath}` : `left as found ${cfgPath}`);
 
+  // ---- 8b. the graph-data boundary the main process will enforce ---------
+  //
+  // The application enforces this itself (electron.pilot G5). This step only
+  // supplies the one root that cannot be derived from Electron, and validates
+  // it first: it must exist, be a real directory, and not be a symlink. A root
+  // that does not validate is written as null, and the main process then
+  // refuses every graph path. Nothing falls back to the home directory.
+  const graphRootDeclared = path.join(realOsHome, ...ID.GRAPH_ROOT_SEGMENTS);
+  let graphRoot = null;
+  let graphRootStatus;
+  try {
+    const st = fs.lstatSync(graphRootDeclared);
+    if (st.isSymbolicLink()) {
+      graphRootStatus = 'refused: the permitted graph root is a symbolic link';
+    } else if (!st.isDirectory()) {
+      graphRootStatus = 'refused: the permitted graph root is not a directory';
+    } else {
+      const real = fs.realpathSync(graphRootDeclared);
+      if (real !== graphRootDeclared) {
+        graphRootStatus = `refused: resolves to ${real}`;
+      } else {
+        graphRoot = real;
+        graphRootStatus = 'validated';
+      }
+    }
+  } catch (e) {
+    graphRootStatus = `refused: ${e.code || e.message}`;
+  }
+
+  fs.writeFileSync(path.join(rootReal, ID.BOUNDARY_FILE), JSON.stringify({
+    schema: ID.BOUNDARY_SCHEMA,
+    graphRoot,
+    graphRootDeclared,
+    graphRootStatus,
+    stateRoot: rootReal,
+    at: new Date().toISOString(),
+  }, null, 2) + '\n');
+  step('graph-boundary', `${graphRootStatus}: ${graphRootDeclared}`);
+
   // ---- 9. verify by reading back, then refuse on any failure -------------
   const postOverride = snapshotPaths();
   const failures = [];
@@ -376,6 +415,7 @@ function establish(opts) {
       appHomeBeforeOverride: preOverride.paths.home,
     },
     derived: { dotRoot, realDotRoot, dotRootIsolated: inside(dotRoot) },
+    graphBoundary: { graphRoot, graphRootDeclared, graphRootStatus },
     pathsBefore: preOverride.paths,
     pathsAfter: postOverride,
     audit,

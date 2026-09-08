@@ -5,7 +5,8 @@
 const path = require('path');
 const { execFileSync } = require('child_process');
 const REPO = path.resolve(__dirname, '..', '..');
-const FILES = ['preflight.test.js', 'isolation.test.js', 'guards.test.js']
+const FILES = ['preflight.test.js', 'isolation.test.js', 'guards.test.js',
+               'boundary.test.js']
   .map((f) => path.join('f27-pilot', 'tests', f));
 try {
   execFileSync(process.execPath, ['--test'].concat(FILES), { cwd: REPO, stdio: 'inherit' });

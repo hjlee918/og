@@ -22,7 +22,7 @@ const ID = require(path.join(SRC, 'pilot-identity.js'));
 
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 const ENTRY_FILES = ['pilot-main.js', 'pilot-preflight.js', 'pilot-isolation.js',
-                     'pilot-identity.js'];
+                     'pilot-identity.js', 'pilot-boundary.js'];
 
 const SENTINEL = 'OG-INITIALISED.sentinel';
 

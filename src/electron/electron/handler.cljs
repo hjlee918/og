@@ -21,6 +21,7 @@
             [electron.fs-watcher :as watcher]
             [electron.git :as git]
             [electron.logger :as logger]
+            [electron.pilot :as pilot]
             [electron.plugin :as plugin]
             [electron.search :as search]
             [electron.server :as server]
@@ -34,20 +35,33 @@
 
 (defmulti handle (fn [_window args] (keyword (first args))))
 
+;; G5 (pilot only). Every path below that can reach graph data is checked
+;; against the permitted roots BEFORE the filesystem call that follows it.
+;;
+;; Each check is written inline as `(when pilot/PILOT (pilot/guard-fs! ...))`
+;; rather than through a helper function on purpose: `PILOT` is a compile-time
+;; constant, so the whole form folds away and an ordinary build emits the
+;; original handler byte for byte. A helper would have left a real call behind.
+
 (defmethod handle :mkdir [_window [_ dir]]
+  (when pilot/PILOT (pilot/guard-fs! ::mkdir dir))
   (fs/mkdirSync dir))
 
 (defmethod handle :mkdir-recur [_window [_ dir]]
+  (when pilot/PILOT (pilot/guard-fs! ::mkdir-recur dir))
   (fs/mkdirSync dir #js {:recursive true}))
 
 (defmethod handle :readdir [_window [_ dir]]
+  (when pilot/PILOT (pilot/guard-fs! ::readdir dir))
   (common-graph/readdir dir))
 
 (defmethod handle :listdir [_window [_ dir flat?]]
+  (when pilot/PILOT (pilot/guard-fs! ::listdir dir))
   (when (and dir (fs-extra/pathExistsSync dir))
     (js-utils/deepReadDir dir (if (boolean? flat?) flat? true))))
 
 (defmethod handle :unlink [_window [_ repo-dir path]]
+  (when pilot/PILOT (pilot/guard-fs! ::unlink path) (pilot/guard-fs! ::unlink repo-dir))
   (if (or (plugin/dotdir-file? path)
           (plugin/assetsdir-file? path))
     (fs/unlinkSync path)
@@ -72,6 +86,7 @@
     (some (fn [a] (= -1 (first a))) result)))
 
 (defmethod handle :backupDbFile [_window [_ repo path db-content new-content]]
+  (when pilot/PILOT (pilot/guard-fs! ::backup-db-file path))
   (when (and (string? db-content)
              (string? new-content)
              (string-some-deleted? db-content new-content))
@@ -79,20 +94,24 @@
     (backup-file/backup-file repo :backup-dir path (node-path/extname path) db-content)))
 
 (defmethod handle :addVersionFile [_window [_ repo path content]]
+  (when pilot/PILOT (pilot/guard-fs! ::add-version-file path))
   (backup-file/backup-file repo :version-file-dir path (node-path/extname path) content))
 
 (defmethod handle :openFileBackupDir [_window [_ repo path]]
+  (when pilot/PILOT (pilot/guard-fs! ::open-file-backup-dir path))
   (when (string? path)
     (let [dir (backup-file/get-backup-dir repo path)
           full-path (utils/to-native-win-path! dir)]
       (.openPath shell full-path))))
 
 (defmethod handle :openFileInFolder [_window [_ full-path]]
+  (when pilot/PILOT (pilot/guard-fs! ::open-file-in-folder full-path))
   (when-let [full-path (utils/to-native-win-path! full-path)]
     (logger/info ::open-file-in-folder full-path)
     (.showItemInFolder shell full-path)))
 
 (defmethod handle :readFile [_window [_ path]]
+  (when pilot/PILOT (pilot/guard-fs! ::read-file path))
   (utils/read-file path))
 
 (defn writable?
@@ -110,10 +129,12 @@
     (cfgs/get-item :feature/enable-automatic-chmod?)))
 
 (defmethod handle :copyFile [_window [_ _repo from-path to-path]]
+  (when pilot/PILOT (pilot/guard-fs! ::copy-file from-path) (pilot/guard-fs! ::copy-file to-path))
   (logger/info ::copy-file from-path to-path)
   (fs-extra/copy from-path to-path))
 
 (defmethod handle :writeFile [window [_ repo path content]]
+  (when pilot/PILOT (pilot/guard-fs! ::write-file path))
   (let [^js Buf (.-Buffer buffer)
         ^js content (if (instance? js/ArrayBuffer content)
                       (.from Buf content)
@@ -139,15 +160,20 @@
                                                                               ".")))}))))))
 
 (defmethod handle :rename [_window [_ old-path new-path]]
+  (when pilot/PILOT (pilot/guard-fs! ::rename old-path) (pilot/guard-fs! ::rename new-path))
   (logger/info ::rename "from" old-path "to" new-path)
   (fs/renameSync old-path new-path))
 
 (defmethod handle :stat [_window [_ path]]
+  (when pilot/PILOT (pilot/guard-fs! ::stat path))
   (utils/fs-stat->clj path))
 
 (defn- get-files
   "Returns vec of file-objs"
   [path]
+  ;; Guarded here rather than only at the callers: :openDir, :getFiles and the
+  ;; graph-restore path all funnel through this one enumeration.
+  (when pilot/PILOT (pilot/guard-fs! ::get-files path))
   (->> (common-graph/get-files path)
        (map (fn [path]
               (let [stat (fs/statSync path)]
@@ -183,6 +209,9 @@
   (p/let [path (open-dir-dialog)
           path (utils/fix-win-path! path)]
     (logger/debug ::open-dir {:path path})
+    ;; A dialog result is not trusted just because a dialog produced it: a
+    ;; stubbed or malicious result is refused here, before it is enumerated.
+    (when pilot/PILOT (pilot/guard-fs! ::open-dir path))
     (if path
       (try
         (p/resolved (bean/->js {:path path
@@ -197,6 +226,7 @@
       (p/rejected (js/Error "path empty")))))
 
 (defmethod handle :getFiles [_window [_ path]]
+  (when pilot/PILOT (pilot/guard-fs! ::get-files-ipc path))
   (logger/debug ::get-files {:path path})
   (p/let [files (get-files path)]
     (bean/->js {:path path
@@ -245,10 +275,15 @@
                 %))))
 
 (defmethod handle :getGraphs [_window [_]]
-  (get-graphs))
+  ;; Restoration must not be able to bring an outside graph back: entries
+  ;; pointing outside the permitted roots are dropped, not returned.
+  (if pilot/PILOT
+    (pilot/permitted-graphs (get-graphs) utils/get-graph-dir)
+    (get-graphs)))
 
 (defn- read-txid-info!
   [root]
+  (when pilot/PILOT (pilot/guard-fs! ::read-txid-info root))
   (try
     (let [txid-path (.join node-path root "logseq/graphs-txid.edn")]
       (when (fs/existsSync txid-path)
@@ -286,10 +321,19 @@
         (utils/read-file file-path)))))
 
 (defmethod handle :getSerializedGraph [_window [_ graph-name]]
+  ;; A registry entry is a graph NAME (`logseq_local_++Users++...`), not a path.
+  ;; It has to be turned back into a directory before the boundary can mean
+  ;; anything; guarding the name itself would refuse every graph.
+  (when pilot/PILOT
+    (when-let [dir (utils/get-graph-dir graph-name)]
+      (pilot/guard-fs! ::get-serialized-graph dir)))
   (get-serialized-graph graph-name))
 
 (defmethod handle :saveGraph [_window [_ graph-name value-str]]
   ;; NOTE: graph-name is a plain "local" for demo graph.
+  (when pilot/PILOT
+    (when-let [dir (utils/get-graph-dir graph-name)]
+      (pilot/guard-fs! ::save-graph dir)))
   (when (and graph-name value-str (not (= "local" graph-name)))
     (when-let [file-path (get-graph-path graph-name)]
       (fs/writeFileSync file-path value-str))))
@@ -370,6 +414,7 @@
   (open-dir-dialog))
 
 (defmethod handle :copyDirectory [^js _window [_ src dest opts]]
+  (when pilot/PILOT (pilot/guard-fs! ::copy-directory src) (pilot/guard-fs! ::copy-directory dest))
   (fs-extra/copy src dest opts))
 
 (defmethod handle :getLogseqDotDirRoot []
@@ -445,6 +490,7 @@
 (defmethod handle :getAssetsFiles [^js win [_ {:keys [exts]}]]
   (when-let [graph-path (state/get-window-graph-path win)]
     (when-let [assets-path (.join node-path graph-path "assets")]
+      (when pilot/PILOT (pilot/guard-fs! ::get-assets-files assets-path))
       (when (fs-extra/pathExistsSync assets-path)
         (p/let [^js files (js-utils/getAllFiles assets-path (clj->js exts))]
           files)))))
@@ -465,14 +511,23 @@
 
 (defmethod handle :setCurrentGraph [^js window [_ graph-name]]
   (when graph-name
+    ;; Only when a local directory is actually derivable. The bundled demo graph
+    ;; has no local directory, so there is no path to guard and refusing it
+    ;; would break a graph that never touches the filesystem.
+    (when pilot/PILOT
+      (when-let [dir (utils/get-graph-dir graph-name)]
+        (pilot/guard-fs! ::set-current-graph dir)))
     (set-current-graph! window (utils/get-graph-dir graph-name))))
 
 (defmethod handle :runGit [_ [_ {:keys [repo command]}]]
   (when (seq command)
+    (when pilot/PILOT (pilot/guard-fs! ::run-git (utils/get-graph-dir repo)))
     (git/raw! (utils/get-graph-dir repo) command)))
 
 (defmethod handle :runGitWithinCurrentGraph [_ [_ {:keys [repo command]}]]
   (when (seq command)
+    (when pilot/PILOT
+      (pilot/guard-fs! ::run-git-within-current-graph (utils/get-graph-dir repo)))
     (git/init! (utils/get-graph-dir repo))
     (git/run-git2! (utils/get-graph-dir repo) (clj->js command))))
 
@@ -588,6 +643,7 @@
   ;;    1. there is no one window on the same dir
   ;;    2. reset file watcher to resend `add` event on window refreshing
   (when dir
+    (when pilot/PILOT (pilot/guard-fs! ::watch-dir dir))
     (logger/debug ::watch-dir {:path dir})
     (watcher/watch-dir! dir options)
     nil))
