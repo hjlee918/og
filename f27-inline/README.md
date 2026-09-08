@@ -57,15 +57,17 @@ node f27-inline/scripts/run-feature-tests.js   # pilot guards + this build's own
 node f27-inline/checks/inline-loaded-graph-checks.js   # static reading, 0 content changes
 node f27-inline/checks/inline-lifecycle-checks.js      # an open panel, graph changed ON DISK
 node f27-inline/checks/inline-transaction-checks.js    # an open panel, changed BY THE APPLICATION
+node f27-inline/checks/inline-refresh-checks.js        # reading an open panel again, on purpose
 ```
 
-The three packaged scenarios are separate sessions on separate graphs on
-purpose. The first asserts that **nothing** in its graph changed; the other two
-change theirs deliberately, and by different means — one writes the files, which
-reaches OG through its file watcher, and one never touches a file at all and
-goes through OG's editor and `logseq.api`. Those claims cannot share a run, and
-the two write paths behave differently enough that neither substitutes for the
-other (see below).
+The four packaged scenarios are separate sessions on separate graphs on purpose.
+The first asserts that **nothing** in its graph changed; the other three change
+theirs deliberately, and by different means — one writes the files, which reaches
+OG through its file watcher, and two never touch a file at all and go through
+OG's editor and `logseq.api`. Those claims cannot share a run, and the two write
+paths behave differently enough that neither substitutes for the other (see
+below). Run them one at a time: **do not run more than one of these builds at
+once.**
 
 The ClojureScript tests are the ordinary ones:
 
@@ -102,6 +104,8 @@ them failing:
 | `checks/inline-lifecycle-checks.js` | the packaged EXTERNAL-FILE scenario: an OPEN panel while the graph changes on disk |
 | `checks/make-transaction-graph.js` | a MUTABLE synthetic graph nothing writes but the application itself |
 | `checks/inline-transaction-checks.js` | the packaged NORMAL-TRANSACTION scenario: the same lifecycle through OG's own editor and API, plus context changes that are not the target's text, plus listener ownership |
+| `checks/make-refresh-graph.js` | a MUTABLE synthetic graph for the refresh scenario, with incoming sources that appear and disappear, a mutual pair, an identity nobody wrote, a control page and a reading page that is a second control |
+| `checks/inline-refresh-checks.js` | the packaged EXPLICIT-REFRESH scenario: an incoming source added and removed through the ordinary API while the section is open, the keyboard, two independent panels, the inner walk and its reset, a cycle, a missing target, and a refresh-only burst measured for writes, listeners, re-index and navigation |
 | `tests/feature-build.test.js` | identity, integrity and "this is neither accepted build" |
 | `tests/graph-fixture.test.js` | the read-only fixture's own rules, without touching the graph root |
 | `tests/mutable-fixture.test.js` | both mutable fixtures' rules, including that their end-state assertions could actually fail |
@@ -121,6 +125,42 @@ error arriving during feature use **fails** — proved by a deterministic
 regression, by name, in `tests/error-classifier.test.js`. An error mentioning
 this run's own graph is never expected, anywhere. Expected refusals stay
 visible: they are counted, named and printed.
+
+## Reading an open panel again, on purpose
+
+Everything the panel shows is derived from the database on each render — except
+one section. The incoming-reference explorer reads a level when the reader asks
+for it and then REPLAYS what it read, because Back and a path jump re-display a
+level without reading anything; that is what retaining the history is for
+(B3/B7). So a section left open while the graph changes keeps showing the level
+it read.
+
+**Refresh context** is the explicit answer, and the panel says in words that its
+lists were read rather than being live. It advances a reading GENERATION carried
+inside the panel's key-guarded state, which:
+
+* re-resolves the target and re-derives every other section, because the panel
+  re-renders;
+* discards the incoming-reference explorer's walked path and reads its **root**
+  level again — the section stays open and is re-read in place, and the inner
+  traversal returning to the panel's own target is stated rather than implied;
+* leaves the panel, its first disclosure, *Show context*, the ancestor batch,
+  the descendant branches and the outgoing paging exactly as they were, none of
+  which hold a stale answer;
+* reaches **one** panel. The generation lives in the mounted occurrence's own
+  atom and the key guard refuses a refresh under another reference's key, so a
+  second panel open at the same time goes on showing what IT read;
+* navigates nothing, re-indexes nothing, transacts nothing and remounts nothing
+  outside the panel — and adds and removes no connection listener, because
+  `rebind!` compares connection identity. Measured in the scenario on both sides
+  of a six-press burst, not asserted.
+
+`refresh-panel` in `frontend.util.f27-inline` and `reset-trail` /
+`awaiting-start?` in `frontend.util.f27-inbound` are pure and are tested without
+a DOM. The reset itself happens in `f27-row-inbound`'s `:after-render` — never
+`:before-render`, which is React's `componentWillUpdate`, where Rum's
+`request-render` would perform exactly the illegal synchronous update React
+forbids.
 
 ## Keeping an open panel true
 

@@ -4357,14 +4357,112 @@
         (f27-btn on-back {:aria-label (t :f27/inbound-back-to prev)})
         (t :f27/inbound-back)]))])
 
+(defn- f27-inbound-load!
+  "Ask for ONE exploration level's read, deferred by a turn.
+
+  Deferred so the level's `:loading` state is a real rendered state rather than
+  one the model claims and never shows. `live?` is the row's own volatile: the
+  read can still be in flight when the reader collapses the panel, and an answer
+  that comes back to a component that has gone is dropped instead of written
+  into state nothing is showing. `apply-result` drops it again if the reader has
+  left the level meanwhile, so Back — and a refresh — can never be overwritten
+  by a read they did not ask for.
+
+  Extracted from the render body so the refresh resumption below can ask for the
+  same read the reader's own actions ask for, rather than a second one written
+  to look like it."
+  [repo *ex live? req uuid skip]
+  (js/setTimeout
+   (fn []
+     (when (and @live? (f27in/accepts-result? (:trail @*ex) req))
+       (let [outcome (f27-load-inbound repo uuid skip)]
+         (swap! *ex update :trail f27in/apply-result req outcome))))
+   0))
+
+(defn- f27-inbound-start!
+  "Show a level, and read it.
+
+  Two cases, and the difference is the point:
+
+    * nothing walked yet, or a state belonging to another graph — the ORIGIN
+      level is created for `ref-block` and read;
+    * a path already walked — it is kept, and the level now on screen is read
+      again, so re-opening never shows an answer that has since gone stale.
+
+  Both take a fresh request id, so an answer still in flight for the old one is
+  dropped rather than racing this read."
+  [repo ref-block *ex live?]
+  (let [cur @*ex
+        fresh? (or (not= repo (:repo cur)) (empty? (:trail cur)))
+        req (inc (:req cur 0))]
+    (if fresh?
+      (let [origin (f27in/new-step ref-block req)]
+        (reset! *ex {:repo repo :trail [origin] :req req})
+        (when (= :loading (:status origin))
+          (f27-inbound-load! repo *ex live? req (:uuid origin) #{(:key origin)})))
+      (let [tr (f27in/reload-step (:trail cur) req)
+            st (f27in/current-step tr)]
+        (swap! *ex assoc :req req :trail tr)
+        (when (= :loading (:status st))
+          (f27-inbound-load! repo *ex live? req (:uuid st) (f27in/trail-keys tr)))))))
+
+(defn- f27-inbound-resume!
+  "What an explicit refresh of the surrounding panel does to THIS section.
+
+  The section is a snapshot and this is the only part of the context panel that
+  is: every other section is derived from the database on each render, while the
+  trail is a record of levels ALREADY READ — Back and a path jump re-display
+  them without reading anything, which is what retaining the history is for. So
+  a section left open across a change keeps showing what it read, and a refresh
+  has to say so explicitly.
+
+  `gen` is the panel's reading generation. When it moves:
+
+    * the walked path is DISCARDED, not reloaded level by level. The reader gets
+      the ROOT level — the panel's own target — read again, which is the inner
+      traversal resetting to its root and is stated as such in the panel and in
+      the specification;
+    * `reset-trail` keeps the request counter, so the read still in flight for
+      the discarded level is dropped by `accepts-result?` rather than landing on
+      the refreshed one and displaying exactly the stale answer the reader asked
+      to replace.
+
+  A CLOSED section is not read: the generation is recorded and nothing else
+  happens, so a refresh never turns a section the reader has not opened into a
+  read. Nothing is started for a graph switch either — that leaves a level on
+  the trail, and `awaiting-start?` is false for it.
+
+  It runs AFTER the render, never during it and never before it. Rendering in
+  this panel mutates nothing; and `:before-render` is React's
+  `componentWillUpdate`, where requesting another render is exactly the illegal
+  update Rum's `request-render` would perform synchronously. The read this asks
+  for puts the level into `:loading`, which renders, and the guard is false on
+  the way back through — so it settles rather than repeating."
+  [state]
+  (let [[_config repo ref-block *open? *ex gen] (:rum/args state)
+        *seen (::gen-seen state)]
+    (when (not= @*seen gen)
+      (reset! *seen gen)
+      (swap! *ex f27in/reset-trail))
+    (when (f27in/awaiting-start? @*open? @*ex)
+      (f27-inbound-start! repo ref-block *ex (::in-live state))))
+  state)
+
 (rum/defcs f27-row-inbound < rum/reactive
   ;; A level's read is deferred by one turn (see `load!`), so it can still be in
   ;; flight when the reader collapses the whole context panel. A plain volatile
   ;; — not a rum/local, which would request a render on the very component being
   ;; torn down — records that the component has gone, and the answer is dropped
   ;; instead of writing into state nothing is showing.
-  {:will-mount (fn [state] (assoc state ::in-live (volatile! true)))
-   :will-unmount (fn [state] (vreset! (::in-live state) false) state)}
+  {;; A PLAIN atom: the last reading generation this section acted on is
+   ;; bookkeeping, and recording it must not re-render anything by itself.
+   :init (fn [state _props] (assoc state ::gen-seen (atom nil)))
+   :will-mount (fn [state] (assoc state ::in-live (volatile! true)))
+   :will-unmount (fn [state] (vreset! (::in-live state) false) state)
+   ;; The one read that is not started by a press: an explicit refresh of the
+   ;; panel around this section discards the walked path and leaves the section
+   ;; open, and this is what reads its root level again.
+   :after-render f27-inbound-resume!}
   "Blocks that REFERENCE this referencing block, explored one level at a time.
 
   If B references A and C references B, the overview for A lists B; this is
@@ -4386,8 +4484,14 @@
   each row and each panel appearance explores independently, and a graph switch
   starts over rather than showing another graph's path. It is TRANSIENT and
   READ-ONLY: nothing here edits, persists an id, opens a transaction, or writes
-  a file."
-  [component-state config repo ref-block *open? *ex]
+  a file.
+
+  It is also the one part of the context panel that is a SNAPSHOT. A level is
+  read when the reader asks for it and then replayed, so a section left open
+  while the graph changes keeps showing what it read. `gen` — the surrounding
+  panel's reading generation — is how an explicit refresh says otherwise; see
+  `f27-inbound-resume!`."
+  [component-state config repo ref-block *open? *ex _gen]
   (let [live? (::in-live component-state)
         raw-ex (rum/react *ex)
         open? (rum/react *open?)
@@ -4402,36 +4506,8 @@
         trail-label (let [l (f27-row-label (:entity step))]
                       (if (string/blank? l) (t :f27/inbound-origin) l))
         next-req (fn [] (inc (:req @*ex 0)))
-        load! (fn [req uuid' skip]
-                ;; Deferred by one turn so the level's :loading state is a real
-                ;; rendered state rather than one the model claims and never
-                ;; shows. `apply-result` drops the answer if the reader has left
-                ;; the level meanwhile, so Back can never be overwritten by a
-                ;; read it did not ask for.
-                (js/setTimeout
-                 (fn []
-                   (when (and @live?
-                              (f27in/accepts-result? (:trail @*ex) req))
-                     (let [outcome (f27-load-inbound repo uuid' skip)]
-                       (swap! *ex update :trail f27in/apply-result req outcome))))
-                 0))
-        start! (fn []
-                 (let [cur @*ex
-                       fresh? (or (not= repo (:repo cur)) (empty? (:trail cur)))
-                       req (inc (:req cur 0))]
-                   (if fresh?
-                     (let [origin (f27in/new-step ref-block req)]
-                       (reset! *ex {:repo repo :trail [origin] :req req})
-                       (when (= :loading (:status origin))
-                         (load! req (:uuid origin) #{(:key origin)})))
-                     ;; The path is kept across hide/show, but the level now on
-                     ;; screen is read again, so reopening never shows an answer
-                     ;; that has since gone stale.
-                     (let [t (f27in/reload-step (:trail cur) req)
-                           s (f27in/current-step t)]
-                       (swap! *ex assoc :req req :trail t)
-                       (when (= :loading (:status s))
-                         (load! req (:uuid s) (f27in/trail-keys t)))))))
+        load! (fn [req uuid' skip] (f27-inbound-load! repo *ex live? req uuid' skip))
+        start! (fn [] (f27-inbound-start! repo ref-block *ex live?))
         toggle! (fn [] (if open? (reset! *open? false)
                            (do (start!) (reset! *open? true))))
         explore! (fn [entity]
@@ -4848,8 +4924,17 @@
   panel. A context with a long body used to leave its only collapse control far
   above whatever the reader had scrolled to; the control now sits on both sides
   of the content, so it is reachable from either end without a sticky element
-  floating over the text."
-  [state config repo ref-block on-collapse]
+  floating over the text.
+
+  `gen` is the caller's reading generation, and it is carried rather than acted
+  on here. Every section below is derived from the database on each render, so a
+  re-render is already a re-reading of it; the ONE exception is the inbound
+  explorer, which replays the level it read, and that is where the generation is
+  used. The reader's own disclosure and paging state — how far the ancestor
+  batch was continued, which descendant branches are open, how many links are
+  shown — is not touched by a refresh, because none of it holds a stale answer.
+  A caller with no refresh action of its own passes a constant."
+  [state config repo ref-block on-collapse gen]
   (let [*limit (::limit state)
         uuid' (:block/uuid ref-block)]
     [:div.f27-ctx {:on-click (fn [e] (util/stop-propagation e))}
@@ -4902,7 +4987,7 @@
           ;; direction from the descendants above, and deliberately below them
           ;; so the two are never read as one list.
           (f27-row-inbound config repo ref-block
-                           (::inbound-open? state) (::inbound state))
+                           (::inbound-open? state) (::inbound state) gen)
           ;; The same collapse action as the control above this panel, repeated
           ;; where a reader who has just finished reading actually is.
           (when on-collapse
@@ -5125,8 +5210,17 @@
   descendants, outgoing and inbound sections come from, unchanged.
 
   It is a component of its own, rather than a fragment of `f27-inline-ref`, so
-  that the target subscription above lives exactly as long as the panel does."
-  [state config repo id panel-id context? on-context on-close]
+  that the target subscription above lives exactly as long as the panel does.
+
+  `gen` is the reading generation, and `on-refresh` advances it. What the panel
+  shows is a SNAPSHOT — read when the panel was opened, and again whenever the
+  watcher above sees a transaction that touches something it shows. Refresh is
+  the reader's explicit way to ask for another reading, and the one section it
+  actually changes is the incoming-reference explorer, which replays levels it
+  has already read. It stays this panel's own: it does not navigate, does not
+  re-index, transacts nothing, remounts nothing outside this panel, and cannot
+  reach another occurrence's panel."
+  [state config repo id panel-id context? gen on-context on-refresh on-close]
   ;; Read so this panel re-renders when the watcher above sees something it
   ;; shows change. The value carries no meaning: everything below is resolved
   ;; fresh from the current database on every render, so it is already correct
@@ -5153,16 +5247,30 @@
                         :on-click (fn [e] (util/stop-propagation e))}
      [:div.f27-il-head
       [:span.f27-il-title (t :f27/inline-head)]
+      ;; Every action carries an explicit React key. The middle one is
+      ;; CONDITIONAL — a target that has gone unreadable has no source to open —
+      ;; and without keys its removal would let React reuse one action's element
+      ;; for another, moving the focus a reader is holding onto a different
+      ;; control. Refresh is first for the same reason: its position does not
+      ;; depend on a control that may not be there.
       [:div.f27-il-actions
+       [:button.f27-il-refresh.f27-btn.forbid-edit
+        (assoc (f27-btn on-refresh {:key "refresh"
+                                    :aria-label (t :f27/inline-refresh-of label)
+                                    :title (t :f27/inline-refresh-title)})
+               :on-mouse-down f27-inline-stop-mouse-down)
+        (t :f27/inline-refresh)]
        (when (f27il/expandable? tstate)
          [:button.f27-il-source.f27-btn.forbid-edit
           (assoc (f27-btn (fn [] (route-handler/redirect-to-page! (str id)))
-                          {:aria-label (t :f27/inline-source-of label)
+                          {:key "source"
+                           :aria-label (t :f27/inline-source-of label)
                            :title (t :f27/inline-source)})
                  :on-mouse-down f27-inline-stop-mouse-down)
           (t :f27/inline-source)])
        [:button.f27-il-close.f27-btn.forbid-edit
-        (assoc (f27-btn on-close {:aria-label (t :f27/inline-close-of label)
+        (assoc (f27-btn on-close {:key "close"
+                                  :aria-label (t :f27/inline-close-of label)
                                   :title (t :f27/inline-close)})
                :on-mouse-down f27-inline-stop-mouse-down)
         (t :f27/inline-close)]]]
@@ -5170,6 +5278,11 @@
      ;; context below is about the TARGET, not about the block being read, and
      ;; the two must never be read as one.
      [:div.f27-il-direction (t :f27/inline-direction)]
+     ;; And WHEN this was read, in words, because it is a snapshot rather than a
+     ;; live list. Said on the surface itself and not only in a contract: a
+     ;; section left open while the graph changes keeps showing the level it
+     ;; read, and Refresh is what asks for another reading.
+     [:div.f27-il-snapshot (t :f27/inline-snapshot)]
      (if-not (f27il/expandable? tstate)
        [:div.f27-ctx-note.f27-ctx-error.f27-il-unavailable (t :f27/inline-unavailable)]
        [:<>
@@ -5196,12 +5309,21 @@
                  :on-mouse-down f27-inline-stop-mouse-down)
           (if context? (t :f27/context-hide) (t :f27/context-show))]
          (when context?
-           (f27-row-context inner-config repo entity on-context))]])
-     ;; The panel's own way out, repeated where a reader who has just finished
+           (f27-row-context inner-config repo entity on-context gen))]])
+     ;; The panel's own actions, repeated where a reader who has just finished
      ;; reading actually is — the same rule the context panel already follows.
+     ;; Refresh belongs here most of all: the list a reader doubts is the one
+     ;; they have just read to the end of.
      [:div.f27-il-end
+      [:button.f27-il-refresh.f27-btn.forbid-edit
+       (assoc (f27-btn on-refresh {:key "refresh-end"
+                                   :aria-label (t :f27/inline-refresh-of label)
+                                   :title (t :f27/inline-refresh-title)})
+              :on-mouse-down f27-inline-stop-mouse-down)
+       (t :f27/inline-refresh)]
       [:button.f27-il-close.f27-btn.forbid-edit
-       (assoc (f27-btn on-close {:aria-label (t :f27/inline-close-of label)
+       (assoc (f27-btn on-close {:key "close-end"
+                                 :aria-label (t :f27/inline-close-of label)
                                  :title (t :f27/inline-close)})
               :on-mouse-down f27-inline-stop-mouse-down)
        (t :f27/inline-close)]]]))
@@ -5260,7 +5382,7 @@
         uid (::uid state)
         host-uuid (get-in config [:block :block/uuid])
         k (f27il/panel-key {:repo repo :host host-uuid :target id})
-        {:keys [open? context?]} (f27il/panel-state @*panel k)
+        {:keys [open? context? gen]} (f27il/panel-state @*panel k)
         panel-id (str "f27-il-panel-" uid)
         btn-id (str "f27-il-toggle-" uid)
         ;; The control keeps its place in the DOM whether the panel is open or
@@ -5270,6 +5392,14 @@
         close! (fn [] (swap! *panel f27il/close-panel k) (focus-control!))
         toggle! (fn [] (swap! *panel f27il/toggle-panel k))
         toggle-context! (fn [] (swap! *panel f27il/toggle-context k))
+        ;; Refresh. It advances THIS occurrence's reading generation and does
+        ;; nothing else: no navigation, no re-index, no transaction, no remount
+        ;; of anything outside this panel, and no reach into another occurrence
+        ;; — the atom is this instance's own and the key guards it besides. The
+        ;; panel below re-renders, which re-resolves the target and re-derives
+        ;; every section from the current database; the one section that was
+        ;; replaying an earlier read is told to read its root level again.
+        refresh! (fn [] (swap! *panel f27il/refresh-panel k))
         ;; The reference's OWN written label, when the author wrote one. Read
         ;; from the already-parsed label nodes, never from the target — naming
         ;; the target would mean reading and parsing it while closed.
@@ -5301,7 +5431,8 @@
              :on-mouse-down f27-inline-stop-mouse-down)
       (if open? "⌃" "⌄")]
      (when open?
-       (f27-inline-panel config repo id panel-id context? toggle-context! close!))]))
+       (f27-inline-panel config repo id panel-id context? gen
+                         toggle-context! refresh! close!))]))
 
 (defn f27-inline-block-reference
   "The ordinary inline block-reference call site, with the F27 control where it
@@ -5356,7 +5487,11 @@
            (f27-btn #(swap! *ctx not) {:aria-expanded (if @*ctx "true" "false")})
            (if @*ctx (t :f27/context-hide) (t :f27/context-show))]
           (when @*ctx
-            (f27-row-context config repo ref-block #(reset! *ctx false)))])])))
+            ;; The incoming-reference overview has no refresh action of its
+            ;; own, so its context is always its first reading: opening the row
+            ;; is what reads it, and closing the row is what discards it.
+            (f27-row-context config repo ref-block #(reset! *ctx false)
+                             f27il/initial-generation))])])))
 
 (rum/defc f27-ref-overview < rum/reactive
   [config repo block list-visible? *hide-block-refs? *show-ref-overview?]

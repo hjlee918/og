@@ -1,6 +1,6 @@
 'use strict';
 //
-// The two MUTABLE fixtures' own rules, checked WITHOUT touching the permitted
+// The three MUTABLE fixtures' own rules, checked WITHOUT touching the permitted
 // graph-data root.
 //
 // Nothing here creates, reads or enumerates a graph. `build()` is deliberately
@@ -19,12 +19,13 @@ const path = require('path');
 const REPO = path.resolve(__dirname, '..', '..');
 const LG = require(path.join(REPO, 'f27-inline', 'checks', 'make-lifecycle-graph.js'));
 const TG = require(path.join(REPO, 'f27-inline', 'checks', 'make-transaction-graph.js'));
+const RG = require(path.join(REPO, 'f27-inline', 'checks', 'make-refresh-graph.js'));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // --- both fixtures ----------------------------------------------------------
 
-for (const [name, F] of [['lifecycle', LG], ['transaction', TG]]) {
+for (const [name, F] of [['lifecycle', LG], ['transaction', TG], ['refresh', RG]]) {
   test(`${name}: every identity it writes is a well-formed, distinct uuid`, () => {
     const ids = Object.values(F.UUID);
     for (const [k, u] of Object.entries(F.UUID)) assert.match(u, UUID_RE, `${k} is not a uuid`);
@@ -169,5 +170,140 @@ test('transaction: nothing declares a change to a page it does not own', () => {
     assert.ok(rel.startsWith('pages/'));
     assert.ok(TG.PAGES[rel.slice('pages/'.length)], `${rel} is not a fixture page`);
     assert.notStrictEqual(rel, TG.CONTROL_FILE);
+  }
+});
+
+// --- the refresh fixture ----------------------------------------------------
+
+test('refresh: the reading page is a second control and is never declared', () => {
+  // Every case is driven from a host on it, and no case edits a host. Leaving
+  // it out of the declared end states is what makes any change to it fail as
+  // undeclared, so this pins that it is genuinely left out.
+  assert.ok(RG.PAGES[RG.READING_FILE.slice('pages/'.length)], 'the reading page is missing');
+  assert.strictEqual(RG.EXPECTED_END[RG.READING_FILE], undefined);
+  assert.notStrictEqual(RG.READING_FILE, RG.CONTROL_FILE);
+});
+
+test('refresh: exactly one page is declared to change, and it is the sources page', () => {
+  assert.deepStrictEqual(Object.keys(RG.EXPECTED_END), ['pages/Refresh Sources.md']);
+  for (const rel of Object.keys(RG.EXPECTED_END)) {
+    assert.ok(RG.PAGES[rel.slice('pages/'.length)], `${rel} is not a fixture page`);
+    assert.notStrictEqual(rel, RG.CONTROL_FILE);
+  }
+});
+
+test('refresh: the main target has sources that stay, join, and are removed', () => {
+  const src = RG.PAGES['Refresh Sources.md'];
+  const ref = `((${RG.UUID.tgtMain}))`;
+  const line = (id) => src.split('\n- ').find((l) => l.includes(`id:: ${id}`));
+  assert.ok(line(RG.UUID.srcKeep).includes(ref), 'the permanent source refers to the target');
+  assert.ok(line(RG.UUID.srcGone).includes(ref), 'the removed source refers to it too');
+  assert.ok(!line(RG.UUID.srcJoins).includes(ref),
+    'the joining source must NOT refer to it yet, or "it appears" could not fail');
+});
+
+test('refresh: the declared inbound counts match the fixture and each other', () => {
+  const src = RG.PAGES['Refresh Sources.md'];
+  const reading = RG.PAGES[RG.READING_FILE.slice('pages/'.length)];
+  const ref = new RegExp(`\\(\\(${RG.UUID.tgtMain}\\)\\)`, 'g');
+  const atStart = (src.match(ref) || []).length + (reading.match(ref) || []).length;
+  assert.strictEqual(RG.MAIN_INBOUND.atStart, atStart,
+    'the declared starting count is not what the fixture actually writes');
+  assert.strictEqual(RG.MAIN_INBOUND.afterJoin, RG.MAIN_INBOUND.atStart + 1);
+  assert.strictEqual(RG.MAIN_INBOUND.afterLeave, RG.MAIN_INBOUND.atStart);
+  assert.strictEqual(RG.MAIN_INBOUND.afterRemoval, RG.MAIN_INBOUND.atStart - 1);
+  assert.strictEqual(RG.MAIN_INBOUND.afterRejoin, RG.MAIN_INBOUND.afterRemoval + 1);
+});
+
+test('refresh: one source has a source of its own, so the walk has a level to enter', () => {
+  // The explorer only offers a step where the row's own probe found something.
+  // Without this block every row in the target's list is a dead end, and the
+  // inner walk a refresh resets could not be walked at all — which is exactly
+  // what the first packaged run of this scenario observed.
+  const src = RG.PAGES['Refresh Sources.md'];
+  assert.ok(src.includes(`${RG.TEXT.srcKeepRef} ((${RG.UUID.srcKeep}))`),
+    'nothing refers to the permanent source');
+  assert.ok(!src.includes(`${RG.TEXT.srcKeepRef} ((${RG.UUID.tgtMain}))`),
+    'and it must refer to the SOURCE, not to the target, or it would be a first-level row');
+});
+
+test('refresh: the second target has its own sources and its own host', () => {
+  const src = RG.PAGES['Refresh Sources.md'];
+  const ref = `((${RG.UUID.tgtOther}))`;
+  assert.ok(src.includes(`${RG.TEXT.srcOtherKeep} ${ref}`));
+  assert.ok(!src.includes(RG.TEXT.srcOtherJoinsAfter),
+    'the second target\'s joining source must not refer to it yet');
+  assert.ok(RG.PAGES[RG.READING_FILE.slice('pages/'.length)].includes(ref));
+  assert.notStrictEqual(RG.UUID.tgtMain, RG.UUID.tgtOther);
+});
+
+test('refresh: the mutual pair really is mutual, and is isolated on its own page', () => {
+  const cyc = RG.PAGES['Refresh Cycle.md'];
+  assert.ok(cyc.includes(`id:: ${RG.UUID.tgtCycle}`) && cyc.includes(`((${RG.UUID.cycOther}))`));
+  assert.ok(cyc.includes(`id:: ${RG.UUID.cycOther}`) && cyc.includes(`((${RG.UUID.tgtCycle}))`));
+  assert.ok(!cyc.includes(RG.UUID.tgtMain), 'the cycle page shares nothing with the other cases');
+});
+
+test('refresh: the stub identity is written NOWHERE but the one host that names it', () => {
+  // The unavailable state is only honest if nothing was ever written for the
+  // identity. Every page is checked, not just the target page.
+  for (const [file, body] of Object.entries(RG.PAGES)) {
+    assert.ok(!body.includes(`id:: ${RG.UUID.tgtStub}`), `${file} defines the stub block`);
+  }
+  const naming = Object.entries(RG.PAGES).filter(([, b]) => b.includes(RG.UUID.tgtStub));
+  assert.deepStrictEqual(naming.map(([f]) => f), [RG.READING_FILE.slice('pages/'.length)]);
+});
+
+test('refresh: every host block carries an identity, so a re-parse keeps it', () => {
+  const reading = RG.PAGES[RG.READING_FILE.slice('pages/'.length)];
+  for (const k of ['hostMain', 'hostOther', 'hostStub', 'hostCycle']) {
+    assert.ok(reading.includes(`id:: ${RG.UUID[k]}`), `${k} has no identity`);
+  }
+});
+
+test('refresh: what the run expects to ADD is not there already', () => {
+  const all = Object.values(RG.PAGES).join('\n');
+  for (const s of [RG.TEXT.srcJoinsAfter, RG.TEXT.srcJoinsRemoved, RG.TEXT.srcOtherJoinsAfter]) {
+    assert.ok(!all.includes(s), `${JSON.stringify(s.slice(0, 40))} is already in the fixture`);
+  }
+});
+
+test('refresh: what the run expects to REMOVE is there to begin with', () => {
+  for (const [rel, want] of Object.entries(RG.EXPECTED_END)) {
+    const start = RG.PAGES[rel.slice('pages/'.length)];
+    for (const s of (want.absent || [])) {
+      assert.ok(start.includes(s),
+        `${rel}: ${JSON.stringify(s.slice(0, 40))} is asserted absent at the end ` +
+        'but was never present, so the assertion could not fail');
+    }
+    // At least one asserted-present string must be NEW, or the whole end state
+    // could be satisfied by the fixture never having been touched at all.
+    const added = (want.present || []).filter((s) => !start.includes(s));
+    assert.ok(added.length > 0,
+      `${rel}: every asserted-present string is already in the fixture, so the ` +
+      'end state could be satisfied by nothing happening at all');
+  }
+});
+
+test('refresh: text the run adds and then removes is declared as such, separately', () => {
+  for (const [rel, want] of Object.entries(RG.EXPECTED_END)) {
+    for (const s of (want.absentAfterBeingAdded || [])) {
+      assert.ok(!RG.PAGES[rel.slice('pages/'.length)].includes(s),
+        `${rel}: ${JSON.stringify(s)} IS in the fixture, so it belongs in absent`);
+    }
+  }
+  assert.deepStrictEqual(RG.EXPECTED_END['pages/Refresh Sources.md'].absentAfterBeingAdded,
+                         [RG.TEXT.srcJoinsAfter]);
+});
+
+test('refresh: every fixture string an assertion quotes is distinctive', () => {
+  // The end-state checks are substring tests. Two source texts sharing a prefix
+  // would let a check that should fail pass.
+  const vals = Object.values(RG.TEXT);
+  for (const a of vals) {
+    for (const b of vals) {
+      if (a === b) continue;
+      assert.ok(!a.includes(b), `${JSON.stringify(b.slice(0, 30))} is a substring of another`);
+    }
   }
 });

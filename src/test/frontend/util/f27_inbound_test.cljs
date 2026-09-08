@@ -518,3 +518,56 @@
       "only a well-formed uuid reference is reduced")
   (is (nil? (f27in/plain-label nil)))
   (is (= "" (f27in/plain-label ""))))
+
+;; --- an explicit refresh of the whole explorer -------------------------------
+;;
+;; The explorer replays the level it read: Back and a path jump re-display a
+;; level without reading it again, which is what retaining the history is for.
+;; That makes an open section a SNAPSHOT, and an explicit refresh is how a
+;; reader asks for it to be read again.
+
+(deftest a-refresh-discards-the-walked-path-so-the-root-is-read-again
+  (let [origin (blk "a" "Page A")
+        second' (blk "b" "Page B")
+        walked {:repo "graph" :req 4
+                :trail [(step-for origin 3) (step-for second' 4)]}
+        reset (f27in/reset-trail walked)]
+    (testing "no level is held at all, so nothing stale can be displayed"
+      (is (= [] (:trail reset)))
+      (is (nil? (f27in/current-step (:trail reset)))))
+    (testing "the graph it belongs to is kept, so it is not read as another graph's"
+      (is (= "graph" (:repo reset))))
+    (testing "the request counter is kept, so the next read gets a HIGHER id"
+      (is (= 4 (:req reset))))
+    (testing "nothing at all is a usable input"
+      (is (= [] (:trail (f27in/reset-trail nil)))))))
+
+(deftest an-answer-still-in-flight-for-a-discarded-level-is-dropped
+  ;; The read that was in flight when the reader pressed Refresh must not land
+  ;; on the level the refresh started, or the refreshed section would display
+  ;; exactly the stale answer it was asked to replace.
+  (let [origin (blk "a" "Page A")
+        walked {:repo "graph" :req 7 :trail [(step-for origin 7)]}
+        reset (f27in/reset-trail walked)
+        restarted (assoc reset :req 8 :trail [(f27in/new-step origin 8)])]
+    (is (false? (f27in/accepts-result? (:trail restarted) 7)))
+    (is (true? (f27in/accepts-result? (:trail restarted) 8)))
+    (is (= 7 (:req (f27in/current-step (:trail walked)))))))
+
+(deftest an-open-explorer-holding-no-level-is-waiting-to-be-started
+  (let [origin (blk "a" "Page A")
+        walked {:repo "graph" :req 1 :trail [(step-for origin 1)]}]
+    (testing "the state a refresh leaves behind, and only that state"
+      (is (true? (f27in/awaiting-start? true (f27in/reset-trail walked)))))
+    (testing "an explorer that holds a level is not waiting for anything"
+      (is (false? (f27in/awaiting-start? true walked))))
+    (testing "a CLOSED explorer is never started; nothing is read until asked"
+      (is (false? (f27in/awaiting-start? false (f27in/reset-trail walked))))
+      (is (false? (f27in/awaiting-start? false walked)))
+      (is (false? (f27in/awaiting-start? nil nil))))
+    (testing "the ordinary walking operations never produce it"
+      (let [deep (f27in/push-step (:trail walked) (step-for (blk "b" "Page B") 2))]
+        (is (false? (f27in/awaiting-start? true {:repo "graph" :trail deep})))
+        (is (false? (f27in/awaiting-start? true {:repo "graph" :trail (f27in/pop-step deep)})))
+        (is (false? (f27in/awaiting-start? true {:repo "graph" :trail (f27in/truncate-trail deep 0)})))
+        (is (false? (f27in/awaiting-start? true {:repo "graph" :trail (f27in/reload-step deep 9)})))))))

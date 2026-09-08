@@ -22,7 +22,14 @@
     * A TARGET THAT CANNOT BE READ IS SAID TO BE UNREADABLE. The parser creates
       an entity for every identity anything refers to, so the existence test is
       `:block/content`, never `some?` of a lookup — the same fact the outgoing
-      slice recorded, for the same reason."
+      slice recorded, for the same reason.
+
+    * A REFRESH IS THE SAME PANEL, READ AGAIN. What the panel shows is a
+      snapshot — most visibly the incoming-reference explorer, which replays the
+      level it read. `refresh-panel` advances a GENERATION carried inside the
+      key-guarded state, so a refresh keeps the panel and its disclosures,
+      cannot reach a panel belonging to another reference, and cannot be
+      confused with closing and re-opening."
   (:require [clojure.string :as string]))
 
 ;; ---------------------------------------------------------------------------
@@ -115,9 +122,15 @@
 ;; Per-occurrence, per-target state
 ;; ---------------------------------------------------------------------------
 
+(def initial-generation
+  "The generation of a panel that has just been opened: its FIRST reading of the
+  target's context. Named rather than written as a literal, because 'has this
+  panel been refreshed' is asked in more than one place."
+  0)
+
 (def closed
   "The state of a panel that is not open. Also what a mismatched key reads as."
-  {:open? false :context? false})
+  {:open? false :context? false :gen initial-generation})
 
 (defn panel-state
   "What `stored` means for the panel identified by `k`.
@@ -132,7 +145,9 @@
   be open about."
   [stored k]
   (if (and k (= k (:key stored)))
-    {:open? (boolean (:open? stored)) :context? (boolean (:context? stored))}
+    {:open? (boolean (:open? stored))
+     :context? (boolean (:context? stored))
+     :gen (or (:gen stored) initial-generation)}
     closed))
 
 (defn toggle-panel
@@ -143,24 +158,29 @@
   [stored k]
   (let [{:keys [open?]} (panel-state stored k)]
     (if open?
-      {:key k :open? false :context? false}
-      {:key k :open? true :context? false})))
+      {:key k :open? false :context? false :gen initial-generation}
+      ;; A panel that is opened is being read for the FIRST time: nothing it
+      ;; shows was read before this moment, so it starts at the first
+      ;; generation rather than carrying one an earlier appearance reached.
+      {:key k :open? true :context? false :gen initial-generation})))
 
 (defn toggle-context
   "Open or close the SECOND disclosure. Meaningless while the panel is closed,
   and a no-op there rather than a state that could render context with no panel
   around it."
   [stored k]
-  (let [{:keys [open? context?]} (panel-state stored k)]
+  (let [{:keys [open? context? gen]} (panel-state stored k)]
     (if open?
-      {:key k :open? true :context? (not context?)}
+      ;; The generation is carried across: opening and closing the second
+      ;; disclosure is not a re-reading, and must not be counted as one.
+      {:key k :open? true :context? (not context?) :gen gen}
       (panel-state stored k))))
 
 (defn close-panel
   "Close everything for `k`. Used by Escape, by Close, and by the panel's own
   repeated action at its end."
   [_stored k]
-  {:key k :open? false :context? false})
+  {:key k :open? false :context? false :gen initial-generation})
 
 (defn stale?
   "True when `stored` belongs to a DIFFERENT reference than `k`.
@@ -194,6 +214,48 @@
   "True when the SECOND disclosure for `k` is open."
   [stored k]
   (:context? (panel-state stored k)))
+
+;; ---------------------------------------------------------------------------
+;; Reading it again, on purpose
+;; ---------------------------------------------------------------------------
+
+(defn generation
+  "Which READING of the target's context the panel for `k` is showing.
+
+  `initial-generation` while the panel shows what it read when it was opened,
+  and one more for every explicit refresh since. The caller hands this to the
+  context subtree, which discards the sections it had cached when the number it
+  was last rendered with is no longer the number it is rendered with now.
+
+  It is inside the key-guarded state on purpose: a generation that lived beside
+  the guard rather than inside it could be carried into a panel belonging to
+  another reference by a reused component instance, and would then discard that
+  panel's context for a refresh its reader never asked for."
+  [stored k]
+  (:gen (panel-state stored k)))
+
+(defn refresh-panel
+  "The panel for `k`, told to read its context again.
+
+  The SAME panel: it is not closed and re-opened, its first disclosure is not
+  collapsed, and the second disclosure stays exactly as the reader left it. Only
+  the generation moves, which is what the caller uses to discard what the panel
+  had cached.
+
+  Two refusals, and both matter:
+
+    * a CLOSED panel is left alone. It holds no cached context to discard, and
+      opening it is the reader's decision rather than a side effect of a control
+      inside a panel that is not on screen;
+    * a panel whose stored key is not `k` is left alone, so a refresh can never
+      reach the panel of another graph, another host block or another target.
+      Two references in one sentence are two mounted occurrences with two atoms,
+      which is the first line of defence; this is the second."
+  [stored k]
+  (let [{:keys [open? context? gen]} (panel-state stored k)]
+    (if open?
+      {:key k :open? true :context? context? :gen (inc gen)}
+      stored)))
 
 ;; ---------------------------------------------------------------------------
 ;; What the panel may say about its target

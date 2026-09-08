@@ -228,3 +228,76 @@
   (is (false? (il/escape-key? "Enter")))
   (is (false? (il/escape-key? " ")))
   (is (false? (il/escape-key? nil))))
+
+;; ---------------------------------------------------------------------------
+;; Explicit refresh
+;;
+;; The panel is a SNAPSHOT: what it shows was read when it was opened, and the
+;; incoming-reference explorer replays the level it read rather than re-reading
+;; it. Refresh is the reader's explicit way to say "read it again", and these
+;; pin what that may and may not do.
+;; ---------------------------------------------------------------------------
+
+(deftest a-refresh-keeps-the-panel-open-and-keeps-both-disclosures
+  (let [k (il/panel-key {:repo repo :host host :target a})
+        deep (il/toggle-context (il/toggle-panel nil k) k)
+        refreshed (il/refresh-panel deep k)]
+    (testing "the panel is not closed and re-opened; it is the same panel"
+      (is (true? (il/open? refreshed k))))
+    (testing "the second disclosure the reader opened stays open"
+      (is (true? (il/context-open? refreshed k))))
+    (testing "and a panel refreshed with its context CLOSED does not open it"
+      (let [shallow (il/refresh-panel (il/toggle-panel nil k) k)]
+        (is (true? (il/open? shallow k)))
+        (is (false? (il/context-open? shallow k)))))))
+
+(deftest a-refresh-advances-the-generation-so-cached-sections-are-discarded
+  (let [k (il/panel-key {:repo repo :host host :target a})
+        opened (il/toggle-panel nil k)]
+    (testing "a freshly opened panel is the first reading of its context"
+      (is (= il/initial-generation (il/generation opened k))))
+    (let [once (il/refresh-panel opened k)
+          twice (il/refresh-panel once k)]
+      (testing "each press is a NEW reading, so pressing it twice reads twice"
+        (is (not= (il/generation opened k) (il/generation once k)))
+        (is (not= (il/generation once k) (il/generation twice k)))))))
+
+(deftest re-opening-a-panel-starts-from-the-first-reading-again
+  (let [k (il/panel-key {:repo repo :host host :target a})
+        refreshed (il/refresh-panel (il/toggle-panel nil k) k)
+        reopened (il/toggle-panel (il/toggle-panel refreshed k) k)]
+    (is (= il/initial-generation (il/generation reopened k)))))
+
+(deftest refreshing-a-closed-panel-changes-nothing
+  (let [k (il/panel-key {:repo repo :host host :target a})]
+    (testing "there is no cached context to discard, so nothing is generated"
+      (is (= il/closed (il/panel-state (il/refresh-panel nil k) k)))
+      (is (= il/initial-generation (il/generation (il/refresh-panel nil k) k))))
+    (testing "a panel that was opened and closed again is closed for this too"
+      (let [shut (il/toggle-panel (il/toggle-panel nil k) k)]
+        (is (false? (il/open? (il/refresh-panel shut k) k)))
+        (is (= il/initial-generation (il/generation (il/refresh-panel shut k) k)))))))
+
+(deftest a-refresh-cannot-reach-a-panel-belonging-to-another-reference
+  ;; Two references in one sentence are two mounted occurrences with two atoms,
+  ;; which is the first line of defence. This is the second: even the SAME
+  ;; stored value, asked to refresh under another reference's key, refuses.
+  (let [ka (il/panel-key {:repo repo :host host :target a})
+        kb (il/panel-key {:repo repo :host host :target b})
+        khost (il/panel-key {:repo repo :host host2 :target a})
+        kgraph (il/panel-key {:repo repo2 :host host :target a})
+        opened (il/toggle-context (il/toggle-panel nil ka) ka)]
+    (doseq [other [kb khost kgraph nil]]
+      (let [attempted (il/refresh-panel opened other)]
+        (testing "the other reference's panel is not opened by it"
+          (is (= il/closed (il/panel-state attempted other))))
+        (testing "and this reference's own generation is left where it was"
+          (is (= (il/generation opened ka) (il/generation attempted ka))))))))
+
+(deftest a-refresh-never-changes-which-reference-the-state-belongs-to
+  (let [ka (il/panel-key {:repo repo :host host :target a})
+        kb (il/panel-key {:repo repo :host host :target b})
+        refreshed (il/refresh-panel (il/toggle-panel nil ka) ka)]
+    (is (true? (il/stale? refreshed kb)))
+    (is (false? (il/stale? refreshed ka)))
+    (is (nil? (il/forget-when-stale refreshed kb)))))

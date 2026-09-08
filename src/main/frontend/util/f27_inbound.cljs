@@ -444,6 +444,40 @@
                         :result nil :probes {} :req req))
       t)))
 
+(defn reset-trail
+  "Discard the walked path entirely, so the next start reads the ROOT level
+  again from the block the explorer was opened on.
+
+  This is what an explicit refresh of the surrounding panel leaves behind, and
+  it is deliberately a RESET rather than a reload of the level on screen. The
+  trail is a record of levels ALREADY READ — `pop-step` and `truncate-trail`
+  re-display them without reading anything — so a refresh that kept it would
+  keep displaying answers read before the reader asked for a new reading.
+
+  Two things are kept and both are load-bearing:
+
+    * `:repo`, so the empty explorer still belongs to this graph rather than
+      being read as another graph's and reset a second time;
+    * `:req`, so the read the refresh starts gets a HIGHER request id than the
+      one that may still be in flight. `accepts-result?` then drops the older
+      answer instead of letting it land on the refreshed level — which would
+      display exactly the stale result the refresh was asked to replace."
+  [ex]
+  (assoc (or ex {:repo nil :req 0}) :trail []))
+
+(defn awaiting-start?
+  "True when the explorer is OPEN and holds no level at all.
+
+  That combination is unreachable by the ordinary walking operations — a level
+  is created before the section is shown, and Back, a path jump and a reload all
+  leave at least the origin behind — so it names exactly one situation: a
+  refresh has discarded the trail and the read has not been asked for yet.
+
+  A CLOSED explorer is never started by it. Nothing here is read until the
+  reader opens the section, and a refresh does not change that."
+  [open? ex]
+  (boolean (and open? (empty? (:trail ex)))))
+
 (defn mark-retry
   "Count one retry of the current level's failed read and reload it. The count
   is what keeps the retry offer bounded rather than endless."
