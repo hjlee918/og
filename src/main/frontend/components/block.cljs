@@ -4745,11 +4745,25 @@
           ;; may say so.
           :empty [:div.f27-ctx-note (t :f27/outgoing-empty)]
 
-          ;; A bound stopped the scan before any link was found. What that
-          ;; means is said by the shared partial block below, which also offers
-          ;; the source; there is no count to show and no row to render.
-          :partial-empty nil
+          ;; A bound stopped the scan before any link was found. There is no
+          ;; count to show and no row to render — but there IS something to say,
+          ;; and it must not be the sentence `:empty` gets.
+          ;;
+          ;; This branch deliberately renders its own content rather than
+          ;; deferring to the shared note below, because a `case` clause whose
+          ;; result is literal `nil` is COMPILED AWAY inside a hiccup body: the
+          ;; next form becomes this clause's result, and the default disappears
+          ;; with it. That is not a hypothesis — it was read out of the emitted
+          ;; JavaScript, where `case "partial-empty"` returned the count-and-rows
+          ;; fragment and the default threw "No matching clause: ready" for every
+          ;; ordinary section. A live packaged run is what surfaced it.
+          :partial-empty
+          [:<>
+           [:div.f27-ctx-note.f27-ctx-capped (t :f27/outgoing-partial-empty)]
+           [:button.f27-out-open-source.f27-btn (f27-btn open-source! nil)
+            (t :f27/outgoing-open-source)]]
 
+          ;; :ready and :partial-ready
           [:<>
            [:div.f27-out-count (if partial?
                                  (t :f27/outgoing-count-partial found)
@@ -4763,16 +4777,12 @@
         (when (pos? (or (:malformed collected) 0))
           [:div.f27-ctx-note.f27-ctx-error
            (t :f27/outgoing-malformed (:malformed collected))])
-        ;; An incomplete scan, said once and always with the one control that
-        ;; can actually reach the rest of the text. `:partial-empty` says that
-        ;; nothing was found IN THE PART THAT WAS SCANNED; `:partial-ready`
-        ;; says the list above it is a floor.
-        (when partial?
+        ;; An incomplete scan that DID find links: the list above is a floor,
+        ;; and the source is the only place the rest of the text can be read.
+        ;; `:partial-empty` says its own version of this in its own branch.
+        (when (= :partial-ready status)
           [:<>
-           [:div.f27-ctx-note.f27-ctx-capped
-            (if (= :partial-empty status)
-              (t :f27/outgoing-partial-empty)
-              (t :f27/outgoing-truncated))]
+           [:div.f27-ctx-note.f27-ctx-capped (t :f27/outgoing-truncated)]
            [:button.f27-out-open-source.f27-btn (f27-btn open-source! nil)
             (t :f27/outgoing-open-source)]])
         (when (pos? (or (:remaining page) 0))

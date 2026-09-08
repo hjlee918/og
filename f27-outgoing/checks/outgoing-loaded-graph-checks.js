@@ -47,6 +47,9 @@ const EVIDENCE = path.join(FEATURE_DIR, 'evidence');
 
 const results = [];
 let ownedTree = [];
+// Counted here rather than inside the session, because it is reported after it.
+let repairs = 0;
+const pageErrors = [];
 const sleep = OP.sleep;
 function say(l) { try { fs.writeSync(1, l + '\n'); } catch (e) { console.log(l); } }
 function record(id, title, ok, detail) {
@@ -137,6 +140,17 @@ async function main() {
     appPid = await attempt('main pid', 20000, () => app.evaluate(() => process.pid), null);
     if (appPid) ownedTree = OP.descendants(appPid);
     const page = await withTimeout(app.firstWindow(), 60000, 'firstWindow');
+
+    // The window's own errors. A React render that throws unmounts the subtree
+    // it was rendering, which from outside looks exactly like "the panel
+    // disappeared" — and without this the harness can only report the symptom.
+    page.on('pageerror', (e) => {
+      pageErrors.push(String((e && e.stack) || (e && e.message) || e).slice(0, 600));
+    });
+    page.on('console', (m) => {
+      if (m.type() === 'error') pageErrors.push('console: ' + m.text().slice(0, 600));
+    });
+
     await withTimeout(page.waitForLoadState('domcontentloaded'), 60000, 'domcontentloaded');
     await sleep(7000);
 
@@ -216,27 +230,131 @@ async function main() {
     };
     const count = (sel) => page.evaluate((s) => document.querySelectorAll(s).length, sel);
 
-    await goTo('Outgoing Target');
-    if ((await count('.f27-ref-overview')) === 0) {
-      await attempt('open ref link', 15000,
-        () => page.locator('a.open-block-ref-link').first().click(), null);
-      await sleep(3000);
-    }
+    // Where the page is, and whether the overview is still on it. A click that
+    // lands on a block reference instead of a control NAVIGATES, and the whole
+    // overview then ceases to exist — which reads as "the row disappeared".
+    const pageState = () => page.evaluate(() => ({
+      hash: location.hash,
+      overviews: document.querySelectorAll('.f27-ref-overview').length,
+      rows: document.querySelectorAll('.f27-ref-row').length,
+    })).catch((e) => ({ error: String(e.message) }));
+
+    // OG renders its own hover preview (tippy) over a block reference, and it
+    // floats above this panel's controls. A recorded failure from slice 5: the
+    // preview swallowed a click. The pointer is therefore parked away from the
+    // text before every interaction, exactly as a reader's would not be resting
+    // on it.
+    const parkPointer = () => page.mouse.move(5, 5).catch(() => null);
+
+    // OG writes into a graph the first time it opens one — this run's own
+    // evidence: a brand-new graph gained `logseq/custom.css`. Each such write
+    // reaches the file watcher, which re-renders, which resets the reference
+    // overview's COMPONENT-LOCAL open state and closes it underneath whatever
+    // the harness was doing. The previous batch never saw it because it reused
+    // a graph that had already been through first-open housekeeping.
+    //
+    // So the graph is allowed to go quiet before any feature is touched. The
+    // directory is the run's own, already proved contained; nothing is written
+    // and nothing outside it is read.
+    const settleGraph = async (dir, quietMs, maxMs) => {
+      const stamp = () => {
+        const out = [];
+        (function walk(d) {
+          for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+            const p = path.join(d, e.name);
+            if (e.isDirectory()) walk(p);
+            else if (e.isFile()) {
+              const st = fs.statSync(p);
+              out.push(`${p}:${st.size}:${st.mtimeMs}`);
+            }
+          }
+        })(dir);
+        return out.sort().join('\n');
+      };
+      const started = Date.now();
+      let last = stamp();
+      let lastChange = Date.now();
+      for (;;) {
+        if (Date.now() - started > maxMs) return { quiet: false, ms: Date.now() - started };
+        await sleep(1000);
+        const now = stamp();
+        if (now !== last) { last = now; lastChange = Date.now(); }
+        else if (Date.now() - lastChange >= quietMs) {
+          return { quiet: true, ms: Date.now() - started };
+        }
+      }
+    };
+
+    const openOverview = async () => {
+      await goTo('Outgoing Target');
+      if ((await count('.f27-ref-overview')) === 0) {
+        await parkPointer();
+        await attempt('open ref badge', 20000,
+          () => page.locator('a.open-block-ref-link').first().click(), null);
+        await sleep(3500);
+      }
+    };
+
+    // Repairs, and SAYS it had to. A silent repair would hide exactly the
+    // instability that made this run necessary.
+    const ensureOverview = async (why) => {
+      const st = await pageState();
+      if (st.overviews > 0) return false;
+      repairs += 1;
+      say(`          (re-opening the overview before ${why}; page was ${JSON.stringify(st)})`);
+      await openOverview();
+      return true;
+    };
+
+    const rowLocator = (text) => page.locator('.f27-ref-row').filter({ hasText: text }).first();
+
+    const expandAllContexts = async () => {
+      const toggles = await count('.f27-ctx-toggle');
+      for (let i = 0; i < toggles; i++) {
+        const row = page.locator('.f27-ref-row').nth(i);
+        if ((await row.locator('.f27-out').count().catch(() => 0)) > 0) continue;
+        await parkPointer();
+        await attempt(`expand row ${i}`, 25000,
+          () => row.locator('.f27-ctx-toggle').first().click({ timeout: 20000 }), null);
+        await sleep(400);
+      }
+      await sleep(2000);
+      return toggles;
+    };
+
+    // The overview is open, this row exists, and its context is expanded.
+    const ensureRow = async (text) => {
+      await ensureOverview(`"${text}"`);
+      let row = rowLocator(text);
+      if ((await row.locator('.f27-out').count().catch(() => 0)) === 0) {
+        await parkPointer();
+        await attempt(`expand context for "${text}"`, 25000,
+          () => row.locator('.f27-ctx-toggle').first().click({ timeout: 20000 }), null);
+        await sleep(1200);
+        row = rowLocator(text);
+      }
+      return row;
+    };
+
+
+    const settled = await settleGraph(GRAPH, 5000, 90000);
+    record('O5.20', 'the graph went quiet before any feature was touched',
+      settled.quiet,
+      settled.quiet
+        ? `no file changed for 5s after ${(settled.ms / 1000).toFixed(1)}s`
+        : `still changing after ${(settled.ms / 1000).toFixed(1)}s; OG's first-open ` +
+          'housekeeping re-renders and resets the overview, so results below may be unstable');
+
+    await openOverview();
     const rowCount = await count('.f27-ref-row');
     record('O5.0', 'the reference overview lists every source, so every outgoing section is on screen',
       rowCount === 10, `${rowCount} row(s); the overview renders at most 10 and the graph has 10 sources`);
 
     // Expand every row's context — the outgoing control lives inside it.
-    const ctxToggles = await count('.f27-ctx-toggle');
-    for (let i = 0; i < ctxToggles; i++) {
-      await attempt(`expand row ${i}`, 10000,
-        () => page.locator('.f27-ctx-toggle').nth(i).click({ timeout: 5000 }), null);
-      await sleep(300);
-    }
-    await sleep(2500);
+    const ctxToggles = await expandAllContexts();
+    say(`          (after expanding: ${JSON.stringify(await pageState())})`);
 
-    const rowWith = (text) => page.locator('.f27-ref-row').filter({ hasText: text }).first();
-    const outState = (row) => row.evaluate((r) => {
+    const outStateRaw = (row) => row.evaluate((r) => {
       const sec = r.querySelector('.f27-out');
       if (!sec) return null;
       const body = sec.querySelector('.f27-out-body');
@@ -265,15 +383,33 @@ async function main() {
         text: (sec.innerText || ''),
       };
     });
+    // Never lets a slow render or a vanished row end the session: the check
+    // that asked for the state fails with a diagnosis instead.
+    const outState = async (row, label) => {
+      const st = await attempt(`read section (${label || 'row'})`, 60000,
+                               () => outStateRaw(row), null);
+      if (st === null) {
+        say(`          (page at failure: ${JSON.stringify(await pageState())})`);
+        if (pageErrors.length) {
+          say(`          (window errors so far, most recent last:)`);
+          for (const e of pageErrors.slice(-3)) say(`            ${e.replace(/\n/g, '\n            ')}`);
+        } else {
+          say('          (the window reported no error)');
+        }
+      }
+      return st;
+    };
+
     const openOutgoing = async (row, label) => {
-      await attempt(label, 20000, () => row.locator('.f27-out-toggle').first().click(), null);
+      await parkPointer();
+      await attempt(label, 30000, () => row.locator('.f27-out-toggle').first().click(), null);
       await sleep(1500);
-      return outState(row);
+      return outState(row, label);
     };
 
     // ---- source order, deduplication and the direction statement ----------
-    const orderedRow = rowWith('Ordered Links');
-    const closed = await outState(orderedRow);
+    const orderedRow = await ensureRow('Ordered Links');
+    const closed = await outState(orderedRow, 'ordered (closed)');
     record('O5.1', 'the control is offered inside the expanded context, collapsed, and counts the links',
       !!closed && !closed.open && /\(4\)/.test(closed.toggle),
       closed ? `control reads ${JSON.stringify(closed.toggle)}, open=${closed.open}` : 'no outgoing section rendered');
@@ -306,7 +442,7 @@ async function main() {
       'the source block mixes Korean, English and emoji between its links');
 
     // ---- repeats -----------------------------------------------------------
-    const repeated = await openOutgoing(rowWith('Repeated Links'), 'open repeated links');
+    const repeated = await openOutgoing(await ensureRow('Repeated Links'), 'open repeated links');
     const repeatRow = repeated ? repeated.rows.find((r) => /target-one/.test(r.label)) : null;
     record('O5.6', 'a target written three times is ONE row that counts its repeats',
       !!repeated && repeated.rows.length === 3 && !!repeatRow && /2/.test(repeatRow.repeats),
@@ -314,7 +450,7 @@ async function main() {
                  `repeat note ${JSON.stringify(repeatRow ? repeatRow.repeats : null)}` : 'n/a');
 
     // ---- self reference and missing target, in one section -----------------
-    const selfSec = await openOutgoing(rowWith('Self And Missing'), 'open self-and-missing');
+    const selfSec = await openOutgoing(await ensureRow('Self And Missing'), 'open self-and-missing');
     const selfRow = selfSec ? selfSec.rows.find((r) => r.self) : null;
     record('O5.7', 'a self-reference is marked, explained, and cannot be opened in place',
       !!selfRow && selfRow.mark === '↻' && !selfRow.canExpand &&
@@ -329,7 +465,7 @@ async function main() {
                 `${selfSec.rows.length} rows in one section` : 'n/a');
 
     // ---- genuinely empty, and an embed is not an inline block reference ----
-    const emptySec = await openOutgoing(rowWith('Embed Only'), 'open embed-only');
+    const emptySec = await openOutgoing(await ensureRow('Embed Only'), 'open embed-only');
     record('O5.9', 'a block that only EMBEDS the target has no inline block reference, and says so',
       !!emptySec && emptySec.rows.length === 0 &&
         emptySec.notes.some((n) => /No block reference is written/i.test(n)) &&
@@ -343,13 +479,14 @@ async function main() {
                  `control reads ${JSON.stringify(emptySec.toggle)}` : 'n/a');
 
     // ---- pagination and the retention cap ---------------------------------
-    const manyRow = rowWith('Many Links');
+    const manyRow = await ensureRow('Many Links');
     let many = await openOutgoing(manyRow, 'open many links');
     const firstPage = many ? many.rows.length : 0;
+    await parkPointer();
     await attempt('show more links', 20000,
       () => manyRow.locator('.f27-out-more').first().click(), null);
     await sleep(1500);
-    const many2 = await outState(manyRow);
+    const many2 = await outState(manyRow, 'many (page 2)');
     record('O5.10', 'links arrive a request at a time, and the continuation advances',
       firstPage === 5 && !!many2 && many2.rows.length === 10 && many.more,
       `${firstPage} shown, then ${many2 ? many2.rows.length : 0}; ` +
@@ -359,11 +496,12 @@ async function main() {
     for (let i = 0; i < 3; i++) {
       const has = await manyRow.locator('.f27-out-more').count().catch(() => 0);
       if (!has) break;
+      await parkPointer();
       await attempt(`show more links ${i + 2}`, 20000,
         () => manyRow.locator('.f27-out-more').first().click(), null);
       await sleep(1200);
     }
-    const capped = await outState(manyRow);
+    const capped = await outState(manyRow, 'many (capped)');
     record('O5.11', 'at the retention cap the remainder is STATED and the source is offered, not a dead control',
       !!capped && capped.rows.length === 20 && !capped.more && capped.openSource &&
         capped.notes.some((n) => /beyond the 20 kept here/i.test(n)),
@@ -377,8 +515,8 @@ async function main() {
     // block must be a floor rather than a total — in the collapsed control as
     // well as the body — and the source must be offered, because it is the only
     // place the rest of the text can be read.
-    const longRow = rowWith('Partial Links');
-    const partialClosed = await outState(longRow);
+    const longRow = await ensureRow('Partial Links');
+    const partialClosed = await outState(longRow, 'partial (closed)');
     record('O5.16', 'a partial count is qualified in the COLLAPSED control, never shown as a total',
       !!partialClosed && !partialClosed.open &&
         /at least 3/i.test(partialClosed.toggle) && !/\(3\)/.test(partialClosed.toggle),
@@ -406,7 +544,7 @@ async function main() {
       (document.activeElement && document.activeElement.className) || '');
     await attempt('press Enter', 15000, () => page.keyboard.press('Enter'), null);
     await sleep(2000);
-    const expanded = await outState(longRow);
+    const expanded = await outState(longRow, 'partial (expanded)');
     const targetRow = expanded ? expanded.rows.find((r) => r.target && r.target.length > 0) : null;
     const shownLen = targetRow ? [...targetRow.target].length : 0;
     record('O5.12', "one target's own text opens in place from the KEYBOARD, bounded",
@@ -441,7 +579,7 @@ async function main() {
     // reference is written inside this block" here would be a claim the scan
     // never established — and it is exactly what the code did before this
     // correction, immediately contradicted by a partial-scan warning below it.
-    const lateSec = await openOutgoing(rowWith('Late Link'), 'open late link');
+    const lateSec = await openOutgoing(await ensureRow('Late Link'), 'open late link');
     record('O5.18', 'a scan cut off BEFORE any link never claims the block has none',
       !!lateSec && lateSec.rows.length === 0 &&
         lateSec.notes.some((n) => /part of this block that could be scanned/i.test(n)) &&
@@ -459,7 +597,7 @@ async function main() {
       `complete: ${JSON.stringify(emptySec ? emptySec.notes : null)}; ` +
       `partial: ${JSON.stringify(lateSec ? lateSec.notes : null)}`);
 
-    const bothDirections = await rowWith('Ordered Links').evaluate((r) => ({
+    const bothDirections = await (await ensureRow('Ordered Links')).evaluate((r) => ({
       outgoing: !!r.querySelector('.f27-out'),
       inbound: !!r.querySelector('.f27-in'),
       outText: ((r.querySelector('.f27-out-head') || {}).innerText || '').trim(),
@@ -472,6 +610,11 @@ async function main() {
 
     // ---------- O6 : existing behaviour, unchanged ----------
     say('\nO6  existing F27 behaviour on the same graph');
+
+    // Whole-overview counts below only mean something if every row is expanded,
+    // so anything a mid-run reset collapsed is restored first.
+    await ensureOverview('the whole-overview checks');
+    await expandAllContexts();
 
     const overview = await page.evaluate(() => {
       const p = document.querySelector('.f27-ref-overview');
@@ -522,7 +665,7 @@ async function main() {
       clearedChips === crystalBefore, `${clearedChips} chip(s) after clearing (started at ${crystalBefore})`);
 
     // ---- children ----------------------------------------------------------
-    const orderedRow2 = rowWith('Ordered Links');
+    const orderedRow2 = await ensureRow('Ordered Links');
     const kidControls = await orderedRow2.locator('.f27-desc-toggle-all').count().catch(() => 0);
     if (kidControls > 0) {
       await attempt('show children', 20000,
@@ -534,7 +677,7 @@ async function main() {
       `${kidControls} control(s), ${descLines} descendant line(s)`);
 
     // ---- inbound following and the cycle ----------------------------------
-    const cycleRow = rowWith('Outgoing Cycle A');
+    const cycleRow = await ensureRow('Outgoing Cycle A');
     const inboundState = (row) => row.evaluate((r) => ({
       items: [...r.querySelectorAll('.f27-in-item')].map((e) => ({
         source: ((e.querySelector('.f27-in-crumb') || {}).innerText || '').trim(),
@@ -567,7 +710,7 @@ async function main() {
       `repeat stop=${repeat ? repeat.stop : null} explore=${repeat ? repeat.explore : null}`);
 
     // ---- assets ------------------------------------------------------------
-    const assetRow = rowWith('Attachments');
+    const assetRow = await ensureRow('Attachments');
     if ((await assetRow.locator('.f27-desc-toggle-all').count().catch(() => 0)) > 0) {
       await attempt('expand attachments', 20000,
         () => assetRow.locator('.f27-desc-toggle-all').first().click(), null);
@@ -590,7 +733,7 @@ async function main() {
       `srcs ${JSON.stringify(assets.srcs)}`);
 
     // ---- excerpts ----------------------------------------------------------
-    const embedRow = rowWith('Study Plan');
+    const embedRow = await ensureRow('Study Plan');
     if ((await embedRow.locator('.f27-desc-toggle-all').count().catch(() => 0)) > 0) {
       await attempt('expand study plan', 20000,
         () => embedRow.locator('.f27-desc-toggle-all').first().click(), null);
@@ -633,7 +776,7 @@ async function main() {
       graph: GRAPH, build: v.manifest.pilotBuildId,
       ordered, repeated, selfSec, emptySec, capped, expanded,
       partialClosed, partialOpen: longSec, lateSec,
-      overview, assets, excerpt, ogLeak, outLeak,
+      overview, assets, excerpt, ogLeak, outLeak, pageErrors,
     }, null, 2));
 
     // ---------- O7 : restore the stub ----------
@@ -674,6 +817,14 @@ async function main() {
 
   // ---------- O8 : integrity ----------
   say('\nO8  graph integrity');
+  record('O8.6', 'the window reported no error while the panels were used',
+    pageErrors.length === 0,
+    pageErrors.length ? `${pageErrors.length}: ${pageErrors[0].slice(0, 300)}` : 'none');
+  record('O8.5', 'how often the overview had to be re-opened mid-run', true,
+    repairs === 0
+      ? '0 — it stayed open for the whole run'
+      : `${repairs} — OG re-rendered and reset its component-local state; each ` +
+        'repair is logged above and the checks around it still had to pass');
   const after = GH.snapshot(GRAPH);
   const cmp = GH.compare(before, after);
   fs.writeFileSync(path.join(EVIDENCE, 'graph-content-diff.json'), JSON.stringify(cmp, null, 2));
