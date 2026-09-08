@@ -45,32 +45,105 @@ const CONFIG = `{:meta/version 1
  :preferred-workflow :now
  :feature/enable-journals? true
  :feature/enable-block-timestamps? false
- :default-home {:page "F27 Pilot Home"}}
+ :default-home {:page "Pilot Target"}}
 `;
 
+// Content templates, written here rather than copied from anywhere. The older
+// fixture directories outside the permitted root are never read.
+//
+// The shape is what F27 needs in order to have anything to show:
+//   * one TARGET page referenced from several sources, each with a breadcrumb
+//   * children under a reference, for the context/children control
+//   * a tag on some references, for the Crystal marker
+//   * a chain A -> B -> C and a cycle A <-> B, for chained/cyclic following
+//   * a real image, a missing one, and one pointing outside the graph
+//   * a block embed and a page embed, for the excerpt controls
+const UUID = {
+  // The ANCHOR block. F27's compact overview is reached from the incoming
+  // reference badge on a BLOCK (components/block.cljs `block-refs-count`,
+  // driven by :block/_refs), so every source below references this block with
+  // ((uuid)). Page links alone produce Linked References and no badge -- which
+  // is exactly why the first version of this graph rendered no F27 at all.
+  anchor: '65f27a11-0000-4000-8000-0000000000a0',
+  alpha: '65f27a11-0000-4000-8000-0000000000a1',
+  beta: '65f27a11-0000-4000-8000-0000000000b2',
+  // Following a reference means walking INCOMING block references, so a chain
+  // needs each step to be referenced by the next with ((uuid)). Outgoing
+  // [[page]] links produce no step at all -- measured, not assumed.
+  chain1: '65f27a11-0000-4000-8000-0000000000c1',
+  chain2: '65f27a11-0000-4000-8000-0000000000c2',
+  cycleA: '65f27a11-0000-4000-8000-0000000000d1',
+  cycleB: '65f27a11-0000-4000-8000-0000000000d2',
+};
+
+const A = `((${UUID.anchor}))`;
+
 const PAGES = {
-  'F27 Pilot Home.md': `- # F27 Pilot Home
-- This graph is synthetic test data generated for one isolated pilot run.
-- It contains no personal content.
-- Reference to [[F27 Pilot Assets]]
-- Reference to [[F27 Pilot Targets]]
+  'Pilot Target.md': `- # Pilot Target
+- The anchor block that every source references. Synthetic, no personal data.
+  id:: ${UUID.anchor}
 `,
-  'F27 Pilot Assets.md': `- # Assets
-- A locally generated image served over the internal assets protocol:
-- ![pilot dot](../assets/pilot-dot.png)
-- The image above exercises \`assets://\`; it is not user content.
+
+  'Weekly Review.md': `- Reviewing progress against ${A} #crystal
+	- A CHILD of the review block, which the context control reveals.
+		- A GRANDCHILD, which an excerpt must not flatten into the parent.
 `,
-  'F27 Pilot Targets.md': `- # Targets
-- target-block-alpha
-  id:: 65f27a11-0000-4000-8000-00000000a001
+
+  'Field Notes.md': `- ${'Padding text to make this reference long enough to be cut. '.repeat(12)}${A}
+	- Child note with **bold text** and \`inline code\` to exercise trimming.
+`,
+
+  'Reading List.md': `- Reading queue for ${A} #crystal
+	- Chapter one
+	- Chapter two
+`,
+
+  'Attachments.md': `- Attachments relating to ${A}
+	- A generated image: ![pilot dot](../assets/pilot-dot.png)
+	- A missing one: ![gone](../assets/does-not-exist.png)
+	- One pointing outside the graph, which must not be served: ![escape](../../../outside-the-graph.png)
+`,
+
+  'Study Plan.md': `- Plan referencing ${A}
+	- Block excerpt: {{embed ((${UUID.alpha}))}}
+	- Page excerpt: {{embed [[Pilot Excerpt Source]]}}
+`,
+
+  'Pilot Excerpt Source.md': `- First top-level block of the excerpt source.
+	- A CHILD that a page excerpt must report but not read.
+- Second top-level block.
+- Third top-level block.
+`,
+
+  'Pilot Blocks.md': `- target-block-alpha, referenced by the block excerpt above
+  id:: ${UUID.alpha}
 - target-block-beta
-  id:: 65f27a11-0000-4000-8000-00000000b002
+  id:: ${UUID.beta}
 `,
-  'F27 Pilot Embeds.md': `- # Embeds
-- Block embed:
-- {{embed ((65f27a11-0000-4000-8000-00000000a001))}}
-- Page embed:
-- {{embed [[F27 Pilot Targets]]}}
+
+  // Chain: the overview row is Chain 1; following incoming references reaches
+  // Chain 2, and from there Chain 3.
+  'Pilot Chain 1.md': `- Chain start, referencing ${A}
+  id:: ${UUID.chain1}
+`,
+  'Pilot Chain 2.md': `- Chain middle, referencing ((${UUID.chain1}))
+  id:: ${UUID.chain2}
+`,
+  'Pilot Chain 3.md': `- Chain end, referencing ((${UUID.chain2}))
+`,
+
+  // Cycle: A is referenced by B, and B is referenced by A. Following from the
+  // A row must stop rather than walk round for ever.
+  'Pilot Cycle A.md': `- Cycle side A, referencing ${A} and ((${UUID.cycleB}))
+  id:: ${UUID.cycleA}
+`,
+  'Pilot Cycle B.md': `- Cycle side B, referencing ((${UUID.cycleA}))
+  id:: ${UUID.cycleB}
+`,
+
+  'Link Check.md': `- Another source for ${A} #crystal
+`,
+  'Quick Capture.md': `- Captured thought about ${A}
 `,
 };
 
@@ -99,10 +172,10 @@ function build(opts = {}) {
     '- Synthetic journal entry for the F27 pilot run.\n');
   fs.writeFileSync(path.join(graph, 'assets', 'pilot-dot.png'), tinyPng());
 
-  return { graph, name, pages: Object.keys(PAGES).length };
+  return { graph, name, pages: Object.keys(PAGES).length, uuids: UUID };
 }
 
-module.exports = { build };
+module.exports = { build, PAGES, UUID };
 
 if (require.main === module) {
   const r = build();

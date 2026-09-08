@@ -36,6 +36,7 @@ const preflight = require(path.join(REPO, 'f27-pilot', 'src', 'pilot-preflight.j
 const snap = require('./os-snapshot.js');
 const B = require('./allowed-root.js');
 const graphGen = require('./make-synthetic-graph.js');
+const OP = require('./owned-process.js');
 
 const APP_DIR = path.join(PILOT_DIR, 'out', 'Logseq-OG-F27-Pilot-darwin-x64',
                           'Logseq-OG-F27-Pilot.app');
@@ -94,68 +95,15 @@ const shBoth = (cmd, args) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- process helpers ------------------------------------------------------
-function descendants(pid) {
-  const out = new Set([pid]);
-  const walk = (p) => {
-    const kids = sh('pgrep', ['-P', String(p)]).split('\n').map((s) => s.trim()).filter(Boolean);
-    for (const k of kids) { const n = Number(k); if (!out.has(n)) { out.add(n); walk(n); } }
-  };
-  walk(pid);
-  return [...out];
-}
+// All process handling is in checks/owned-process.js, which reaches every
+// process from a PID this harness retained and never matches by name.
+const descendants = OP.descendants;
+const listeningSockets = OP.listeningSockets;
+const alive = OP.alive;
 
-function listeningSockets(pids) {
-  if (!pids.length) return [];
-  const out = sh('lsof', ['-a', '-p', pids.join(','), '-i', '-P', '-n']);
-  return out.split('\n').filter((l) => /LISTEN/.test(l)).map((l) => l.trim());
-}
-
-function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return false; } }
-
-// Closing a PACKAGED Electron application is not the same as closing a node
-// process. SIGTERM to the main process alone was measured to leave all four
-// processes running, which then kept Electron's single-instance lock and made
-// the next launch quit at once (electron/core.cljs main).
-//
-// So the close is staged, gentlest first, and every stage targets ONLY pids
-// this harness started -- never a process matched by name:
-//
-//   1. ask the application to quit, by its own bundle id
-//   2. SIGTERM the owned process tree
-//   3. SIGKILL whatever is still owned and still running
-//
 async function closeGracefully(pid, label) {
-  const tree = descendants(pid);
-  const remaining = () => tree.filter(alive);
-
-  // 1. the application's own quit path
-  try {
-    execFileSync('/usr/bin/osascript',
-      ['-e', `tell application id "${ID.BUNDLE_ID}" to quit`],
-      { stdio: 'ignore', timeout: 15000 });
-  } catch (e) { /* not scriptable or already gone; the next stage covers it */ }
-  for (let i = 0; i < 150 && remaining().length; i++) await sleep(100);
-  if (!remaining().length) {
-    say(`         ${label}: quit cleanly (${tree.length} processes)`);
-    return [];
-  }
-
-  // 2. SIGTERM, whole owned tree
-  for (const p of remaining()) { try { process.kill(p, 'SIGTERM'); } catch (e) { /* gone */ } }
-  for (let i = 0; i < 100 && remaining().length; i++) await sleep(100);
-  if (!remaining().length) {
-    say(`         ${label}: closed on SIGTERM (${tree.length} processes)`);
-    return [];
-  }
-
-  // 3. last resort, still only owned pids
-  const stubborn = remaining();
-  say(`         ${label}: SIGKILL for ${stubborn.length} owned process(es) that ignored SIGTERM`);
-  for (const p of stubborn) { try { process.kill(p, 'SIGKILL'); } catch (e) { /* gone */ } }
-  for (let i = 0; i < 50 && remaining().length; i++) await sleep(100);
-  const still = remaining();
-  say(`         ${label}: closed (${still.length} of ${tree.length} still alive)`);
-  return still;
+  const r = await OP.stop(pid, (m) => say(`         ${label}: ${m}`));
+  return r.remaining;
 }
 
 // ---- lsregister -----------------------------------------------------------
@@ -364,7 +312,10 @@ async function main() {
         assets: protocol.isProtocolRegistered('assets'),
         lsp: protocol.isProtocolRegistered('lsp'),
       })), { assets: null, lsp: null });
-    record('P3.1', 'internal asset protocols still work (assets:// and lsp:// registered)',
+    // Registration is NOT evidence that content is served. That is proven
+    // separately, against a real graph, in checks/loaded-graph-checks.js (L5.6
+    // renders an actual image through assets:// and reads its pixels).
+    record('P3.1', 'internal asset protocols are registered (serving is proven in the loaded-graph checks)',
       registered.assets && registered.lsp, JSON.stringify(registered));
 
     const isDefault = await attempt('isDefaultProtocolClient', 20000,
@@ -419,10 +370,21 @@ async function main() {
     const graphs = await attempt('getGraphs', 30000, () => page.evaluate(async () => {
       try { return await window.apis.doAction(['getGraphs']); }
       catch (e) { return { error: String(e && e.message || e) }; }
-    }), []);
-    const graphList = Array.isArray(graphs) ? graphs : [];
-    record('P3.9', 'the pilot knows no graph at first start (nothing personal can be restored)',
-      graphList.length === 0, `getGraphs -> ${JSON.stringify(graphs).slice(0, 200)}`);
+    }), null);
+    // An error or a non-array is a FAILURE. Coercing it to an empty list would
+    // have turned "the call broke" into "there are no graphs", which reads as a
+    // pass and is not one.
+    const graphsIsList = Array.isArray(graphs);
+    const outsideGraphs = graphsIsList
+      ? graphs.map((g) => String(g).replace(/^logseq_local_/, ''))
+              .filter((g) => !B.isInsideAllowedRoot(g))
+      : [];
+    record('P3.9', 'every graph the pilot remembers is inside the permitted root',
+      graphsIsList && outsideGraphs.length === 0,
+      graphsIsList
+        ? `${graphs.length} remembered, ${outsideGraphs.length} outside the permitted root` +
+          (outsideGraphs.length ? `: ${JSON.stringify(outsideGraphs)}` : '')
+        : `getGraphs did not return a list: ${JSON.stringify(graphs).slice(0, 160)}`);
 
     const dotRoot = await attempt('getLogseqDotDirRoot', 30000, () => page.evaluate(async () => {
       try { return await window.apis.doAction(['getLogseqDotDirRoot']); }
@@ -541,7 +503,17 @@ async function main() {
 }
 
 main().catch(async (e) => {
-  console.error('\n' + String(e && e.stack || e) + '\n');
+  console.error('\n' + String((e && e.stack) || e) + '\n');
   for (const pid of owned) { try { await closeGracefully(pid, 'cleanup'); } catch (x) { /* best effort */ } }
+  // Evidence from a failed run is preserved, not discarded: a run that stops
+  // half way is exactly the one worth reading afterwards.
+  try {
+    fs.mkdirSync(EVIDENCE, { recursive: true });
+    fs.writeFileSync(path.join(EVIDENCE, 'pilot-checks-summary.json'), JSON.stringify({
+      at: new Date().toISOString(), aborted: String((e && e.message) || e),
+      passed: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length,
+      results,
+    }, null, 2));
+  } catch (x) { /* nothing further to do */ }
   process.exitCode = 2;
 });
