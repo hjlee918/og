@@ -97,21 +97,47 @@ test('the compiled pilot bundle is the one the manifest describes', () => {
 });
 
 test('the guard sources keep every change behind the closure define', () => {
-  // A reviewable source-level property: nothing in electron/ references the
-  // pilot namespace outside a PILOT-conditional, and PILOT defaults to false.
+  // A reviewable source-level property: PILOT defaults to false, and every
+  // reference to the pilot namespace is reached only through a PILOT test.
   const pilotNs = read(path.join(REPO, 'src', 'electron', 'electron', 'pilot.cljs'));
   assert.match(pilotNs, /\(goog-define PILOT false\)/,
     'the closure define no longer defaults to false');
 
-  for (const f of ['core.cljs', 'updater.cljs', 'server.cljs']) {
-    const src = read(path.join(REPO, 'src', 'electron', 'electron', f));
-    const refs = src.split('\n')
-      .map((line, i) => [i + 1, line])
+  // The whole pilot API, so a new entry point has to be added here deliberately
+  // rather than slipping in unnoticed.
+  // `\b` does not work here: Clojure names end in ! and ?, which are not word
+  // characters, so `pilot/record!\b` never matches.
+  const API = /pilot\/(PILOT|record!|refuse-js|guard-fs!|guard-source!|permitted-path\?|permitted-graphs)(?![A-Za-z0-9!?*<>=-])/;
+
+  for (const f of ['core.cljs', 'updater.cljs', 'server.cljs', 'handler.cljs', 'fs_watcher.cljs']) {
+    const lines = read(path.join(REPO, 'src', 'electron', 'electron', f)).split('\n');
+    const refs = lines
+      .map((l, i) => [i + 1, l])
       .filter(([, l]) => /pilot\//.test(l) && !/^\s*;/.test(l));
     assert.ok(refs.length > 0, `${f} has no guard`);
+
     for (const [n, line] of refs) {
-      assert.ok(/pilot\/PILOT|pilot\/record!|pilot\/refuse-js/.test(line),
-        `${f}:${n} references the pilot namespace in an unexpected way: ${line.trim()}`);
+      assert.match(line, API, `${f}:${n} uses an unknown pilot entry point: ${line.trim()}`);
+      if (/pilot\/PILOT/.test(line)) continue;
+      // Not the test itself: it must sit under one. Look back a few lines for
+      // the enclosing PILOT test rather than trusting the call on its own.
+      const window = lines.slice(Math.max(0, n - 8), n).join('\n');
+      assert.match(window, /pilot\/PILOT/,
+        `${f}:${n} calls the pilot namespace without a PILOT test above it: ${line.trim()}`);
     }
+  }
+});
+
+test('an ordinary build carries none of the downstream guards either', { timeout: 600000 }, () => {
+  // The watcher and copy guards were added after the first version of this
+  // suite; they must be absent from an ordinary build like everything else.
+  const t = read(nonpilot.build());
+  for (const s of ['followSymlinks', 'dropped watcher event',
+                   'recursive copy is not available', 'graph-select']) {
+    assert.ok(!t.includes(s), `an ordinary build contains pilot-only text ${JSON.stringify(s)}`);
+  }
+  // and it still watches, copies and exports
+  for (const s of ['chokidar', 'ensureDirSync']) {
+    assert.ok(t.includes(s), `an ordinary build lost ${JSON.stringify(s)}`);
   }
 });

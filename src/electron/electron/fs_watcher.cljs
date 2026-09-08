@@ -19,6 +19,8 @@
 ;; dir -> Watcher
 (defonce *file-watcher (atom {})) ;; val: [watcher watcher-del-f]
 
+(declare publish-file-event!*)
+
 (defonce file-watcher-chan "file-watcher")
 (defn- send-file-watcher! [dir type payload]
   (let [send-fn (fn [^js win]
@@ -46,6 +48,18 @@
 
 (defn- publish-file-event!
   [dir path event options]
+  ;; G5 (pilot only). The watched ROOT being permitted says nothing about the
+  ;; child path chokidar just emitted: a link inside the tree, or an entry
+  ;; produced while the tree changed underneath us, can name somewhere else
+  ;; entirely. This runs before the content read and the stat below, and a
+  ;; refused path is dropped rather than published.
+  (if (and pilot/PILOT (not (pilot/permitted-path? path "read")))
+    (pilot/record! :graph-boundary
+                   (str "dropped watcher event " event " " (pr-str path)))
+    (publish-file-event!* dir path event options)))
+
+(defn- publish-file-event!*
+  [dir path event options]
   (let [dir-path? (= dir path)
         content (when (and (not= event "unlink")
                            (not dir-path?)
@@ -62,16 +76,22 @@
 (defn- create-dir-watcher
   [dir options]
   (let [watcher-opts (clj->js
-                      {:ignored (fn [path]
-                                  (common-graph/ignored-path? dir path))
-                       :ignoreInitial true
+                      (cond-> {:ignored (fn [path]
+                                          (common-graph/ignored-path? dir path))
+                               :ignoreInitial true
                        :ignorePermissionErrors true
                        :interval polling-interval
                        :binaryInterval polling-interval
                        :persistent true
                        :disableGlobbing true
-                       :usePolling false
-                       :awaitWriteFinish true})
+                               :usePolling false
+                               :awaitWriteFinish true}
+                        ;; G5 (pilot only). chokidar follows symbolic links by
+                        ;; default, so the WATCHER ITSELF would walk out of the
+                        ;; graph and emit events for whatever it found there.
+                        ;; Suppressing those events afterwards is not the same
+                        ;; as never traversing; this stops the traversal.
+                        pilot/PILOT (assoc :followSymlinks false)))
         dir-watcher (.watch watcher dir watcher-opts)]
     ;; TODO: batch sender
     (.on dir-watcher "unlinkDir"
@@ -93,7 +113,11 @@
          ;; delay 500ms for syncing disks
          (fn [path]
            (logger/debug ::on-unlink {:path path})
-           (js/setTimeout #(when (not (fs/existsSync path))
+           ;; The probe below is itself an unchecked metadata operation on a
+           ;; child path, half a second after the event, so it is guarded too.
+           (js/setTimeout #(when (and (or (not pilot/PILOT)
+                                          (pilot/permitted-path? path "read"))
+                                      (not (fs/existsSync path)))
                              (publish-file-event! dir path "unlink" options))
                           500)))
     (.on dir-watcher "error"
@@ -142,20 +166,19 @@
   broadcasts its change events to all clients. This option needs to be passed to
   clients in order for them to identify the correct db"
   [dir options]
+  ;; G5 (pilot only). This guard sits BEFORE the branch on purpose. Placed
+  ;; inside the non-global arm, as it first was, a `:global-dir` watcher was
+  ;; created without any check at all. It also re-runs on every entry, which
+  ;; covers the five-second retry below re-entering after the handler's check.
+  (when pilot/PILOT (pilot/guard-fs! ::watch-dir "read" dir))
   (if (:global-dir options)
     (watch-global-dir! dir options)
     (when-not (get @*file-watcher dir)
-      (do
-        ;; G5 (pilot only). The retry below re-enters this function five seconds
-        ;; later, after the handler's check has already happened, so a directory
-        ;; that becomes a symlink in between would otherwise be watched
-        ;; unchecked. Re-validating on every entry closes that window.
-        (when pilot/PILOT (pilot/guard-fs! ::watch-dir "read" dir))
-        (if (fs/existsSync dir)
-          (create-and-save-watcher dir options)
-          ;; retry if the `dir` not exists, which is useful when a graph's folder is
-          ;; back after refreshing the window
-          (js/setTimeout #(watch-dir! dir options) 5000))))))
+      (if (fs/existsSync dir)
+        (create-and-save-watcher dir options)
+        ;; retry if the `dir` not exists, which is useful when a graph's folder is
+        ;; back after refreshing the window
+        (js/setTimeout #(watch-dir! dir options) 5000)))))
 
 (defn close-watcher!
   "If no `dir` provided, close all watchers;

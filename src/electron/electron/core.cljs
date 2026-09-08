@@ -126,6 +126,19 @@
   (p/let [app-path (. app getAppPath)
           asset-filenames (->> (js->clj asset-filenames) (remove nil?))
           root-dir (or output-path (handler/open-dir-dialog))]
+         ;; G5 (pilot only). `create-export` writes a whole tree into
+         ;; `root-dir`, and `root-dir` is whatever the folder dialog returned --
+         ;; the same untrusted input class as opening a graph, but on the write
+         ;; side, and it reads the graph's assets on the way. Both ends are
+         ;; validated before the export runs.
+         ;; `(when (and pilot/PILOT root-dir) ...)` did NOT fold away in an
+         ;; ordinary build: the test reaches Closure as truth_(false), which it
+         ;; will not evaluate, so the dead guard shipped. A bare `pilot/PILOT`
+         ;; test is a goog-define and folds.
+         (when pilot/PILOT
+           (when root-dir
+             (pilot/guard-fs! ::export-publish-assets-dest "write" root-dir)
+             (pilot/guard-fs! ::export-publish-assets-repo "graph-select" repo-path)))
          (when root-dir
            (publish-export/create-export
             html

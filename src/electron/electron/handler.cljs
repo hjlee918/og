@@ -378,6 +378,8 @@
 (defmethod handle :deleteGraph [_window [_ graph-name]]
   (when graph-name
     (when-let [file-path (get-graph-path graph-name)]
+      ;; A delete, on a path derived from a caller-supplied name.
+      (when pilot/PILOT (pilot/guard-fs! ::delete-graph "state" file-path))
       (when (fs/existsSync file-path)
         (fs-extra/removeSync file-path)))))
 
@@ -430,12 +432,16 @@
 (defn clear-cache!
   [window]
   (let [graphs-dir (get-graphs-dir)]
+    ;; Recursive deletes. Derived from Electron's own paths, but validated
+    ;; anyway: these are the operations where being wrong is least recoverable.
+    (when pilot/PILOT (pilot/guard-fs! ::clear-cache-graphs "state" graphs-dir))
     (fs-extra/removeSync graphs-dir))
 
   (let [path (.getPath ^object app "userData")]
     (doseq [dir ["search" "IndexedDB"]]
       (let [path (node-path/join path dir)]
         (try
+          (when pilot/PILOT (pilot/guard-fs! ::clear-cache-dir "state" path))
           (fs-extra/removeSync path)
           (catch :default e
             (logger/error "Clear cache:" e)))))
@@ -451,10 +457,25 @@
   (open-dir-dialog))
 
 (defmethod handle :copyDirectory [^js _window [_ src dest opts]]
-  (when pilot/PILOT
-    (pilot/guard-fs! ::copy-directory-src "read" src)
-    (pilot/guard-fs! ::copy-directory-dest "write" dest))
-  (fs-extra/copy src dest opts))
+  ;; G5 (pilot only). Refused outright rather than guarded.
+  ;;
+  ;; Validating src and dest only checks the two ROOTS. The recursive copy that
+  ;; follows walks the whole tree, and `opts` arrives from the renderer: the
+  ;; installed fs-extra switches from lstat to stat when `opts.dereference` is
+  ;; true (copy/copy.js:66), so a link anywhere inside src would be followed out
+  ;; of the boundary and its target copied in. That needs a fully guarded
+  ;; recursive copy, not a root check.
+  ;;
+  ;; The only caller is file sync (frontend/components/file_sync.cljs), which
+  ;; this pilot does not exercise, so the operation is refused instead. Ordinary
+  ;; builds keep the original behaviour untouched.
+  (if pilot/PILOT
+    (pilot/refuse-js :copy-directory "recursive copy is not available in the pilot")
+    (do
+      (when pilot/PILOT
+        (pilot/guard-fs! ::copy-directory-src "read" src)
+        (pilot/guard-fs! ::copy-directory-dest "write" dest))
+      (fs-extra/copy src dest opts))))
 
 (defmethod handle :getLogseqDotDirRoot []
   (utils/get-ls-dotdir-root))
