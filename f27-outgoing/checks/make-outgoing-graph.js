@@ -18,8 +18,14 @@
 //       order" is falsifiable rather than asserted;
 //     * the same target written twice, so dedup and the repeat count are
 //       observable;
-//     * a block that references ITSELF;
-//     * a reference to a uuid no block carries, so "missing" is on screen;
+//     * one block that references ITSELF *and* a uuid no block carries, so
+//       both stopping conditions are on screen in one section;
+//     * a block whose scan is CUT OFF after some links were found, so a
+//       partial count can be seen to be qualified rather than presented as a
+//       total;
+//     * a block whose scan is CUT OFF before any link was found, so "nothing
+//       was found in the part that was scanned" can be seen NOT to be said as
+//       "this block contains no link";
 //     * a block whose references are ONLY page links, tags, an embed and an
 //       address, so "no block reference is written inside this block" can be
 //       distinguished from a failure — and so a page link can be seen NOT to
@@ -118,6 +124,17 @@ for (let i = 0; i < 21; i++) {
 
 const A = `((${UUID.anchor}))`;
 
+// Filler that costs AST NODES rather than characters, so a block can exceed the
+// scan's node bound (`f27-outgoing/max-scan-nodes`, 4096) without being an
+// absurd wall of text.
+//
+// Measured against OG's own parser rather than guessed: one `*x* ` repetition
+// costs exactly 8 inline AST nodes (1 rep -> 9 visited, 10 -> 81, 100 -> 801).
+// 600 repetitions is 4,800 nodes in 2,400 characters — comfortably past the
+// bound, and small enough that the block still renders as ordinary text.
+const FILLER_REPS = 600;
+const FILLER = '*x* '.repeat(FILLER_REPS);
+
 // EXACTLY TEN blocks reference the anchor, because the compact overview renders
 // at most ten rows (`f27-ref-overview/max-rows`). An eleventh source would be
 // counted as a remainder and its row — and therefore its outgoing section —
@@ -140,13 +157,11 @@ const PAGES = {
   'Repeated Links.md': `- Source referencing ${A} that writes ((${UUID.t1})) twice more: ((${UUID.t1})) and again ((${UUID.t1})), plus ((${UUID.t2}))
 `,
 
-  // SELF: the block references its own id.
-  'Self Link.md': `- Source referencing ${A} that also refers to itself: ((${UUID.selfRef}))
+  // SELF and MISSING in ONE block, so both stopping conditions are visible in
+  // one section — and so the fixture stays within the compact overview's
+  // ten-row limit while the two partial-scan sources below are added.
+  'Self And Missing.md': `- Source referencing ${A} that also refers to itself ((${UUID.selfRef})) and to a block that is gone ((${UUID.ghost}))
   id:: ${UUID.selfRef}
-`,
-
-  // MISSING: a reference to a uuid no block carries.
-  'Missing Link.md': `- Source referencing ${A} with a link to a block that is gone: ((${UUID.ghost}))
 `,
 
   // GENUINELY EMPTY: this block reaches the anchor ONLY through an embed macro,
@@ -158,8 +173,21 @@ const PAGES = {
   'Embed Only.md': `- Source that only embeds the target: {{embed ${A}}} plus [[Outgoing Excerpt Source]], #focus and https://example.com/nothing
 `,
 
-  // BOUND: a long Korean/English/emoji target.
-  'Long Target Link.md': `- Source referencing ${A} pointing at a long block: ((${UUID.longKo}))
+  // PARTIAL SCAN, WITH LINKS FOUND. Three references, then enough nodes to
+  // exhaust the scan bound, then a fourth reference the scan never reaches.
+  // What the section may say about this block is "at least three" — never a
+  // total — and it must offer the source, which is the only place the rest of
+  // the text can be read. The last found link is the long Korean/English/emoji
+  // target, so the bounded one-hop expansion is checked here too.
+  'Partial Links.md': `- Source referencing ${A} then ((${UUID.t1})) 한국어 링크 🎯 ((${UUID.longKo})) then a long run: ${FILLER} and finally ((${UUID.t2}))
+`,
+
+  // PARTIAL SCAN, WITH NOTHING FOUND. This block reaches the anchor only
+  // through an embed macro — which this slice does not claim — so the scan
+  // finds no link before the bound stops it, and the real reference at the end
+  // is never reached. The section must say that nothing was found IN THE PART
+  // IT SCANNED, and must NOT say the block contains no link.
+  'Late Link.md': `- Source that only embeds the target: {{embed ${A}}} then a long run: ${FILLER} and finally ((${UUID.t1}))
 `,
 
   // PAGINATION AND CAP: 25 distinct targets written in one block.

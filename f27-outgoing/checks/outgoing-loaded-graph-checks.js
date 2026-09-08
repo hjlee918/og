@@ -247,6 +247,7 @@ async function main() {
         direction: ((sec.querySelector('.f27-out-direction') || {}).innerText || '').trim(),
         count: ((sec.querySelector('.f27-out-count') || {}).innerText || '').trim(),
         notes: [...sec.querySelectorAll('.f27-ctx-note')].map((n) => (n.innerText || '').trim()),
+        sourceControls: sec.querySelectorAll('.f27-out-open-source').length,
         rows: [...sec.querySelectorAll('.f27-out-row')].map((x) => ({
           pos: ((x.querySelector('.f27-out-pos') || {}).innerText || '').trim(),
           mark: ((x.querySelector('.f27-out-mark') || {}).innerText || '').trim(),
@@ -312,29 +313,33 @@ async function main() {
       repeated ? `${repeated.rows.length} row(s) ${JSON.stringify(repeated.rows.map((r) => r.label))}; ` +
                  `repeat note ${JSON.stringify(repeatRow ? repeatRow.repeats : null)}` : 'n/a');
 
-    // ---- self reference ----------------------------------------------------
-    const selfSec = await openOutgoing(rowWith('Self Link'), 'open self link');
+    // ---- self reference and missing target, in one section -----------------
+    const selfSec = await openOutgoing(rowWith('Self And Missing'), 'open self-and-missing');
     const selfRow = selfSec ? selfSec.rows.find((r) => r.self) : null;
     record('O5.7', 'a self-reference is marked, explained, and cannot be opened in place',
       !!selfRow && selfRow.mark === '↻' && !selfRow.canExpand &&
         selfSec.notes.some((n) => /itself/i.test(n)),
       selfSec ? `self row ${JSON.stringify(selfRow)}; notes ${JSON.stringify(selfSec.notes)}` : 'n/a');
 
-    // ---- missing target ----------------------------------------------------
-    const missingSec = await openOutgoing(rowWith('Missing Link'), 'open missing link');
-    const missingRow = missingSec ? missingSec.rows.find((r) => r.missing) : null;
+    const missingRow = selfSec ? selfSec.rows.find((r) => r.missing) : null;
     record('O5.8', 'a link whose target is gone says so and offers no control that cannot work',
       !!missingRow && missingRow.mark === '⚠' && !missingRow.canExpand && !missingRow.canOpen &&
-        !UUID_RE.test(missingSec.text),
-      missingSec ? `missing row ${JSON.stringify(missingRow)}` : 'n/a');
+        !UUID_RE.test(selfSec.text),
+      selfSec ? `missing row ${JSON.stringify(missingRow)}; ` +
+                `${selfSec.rows.length} rows in one section` : 'n/a');
 
     // ---- genuinely empty, and an embed is not an inline block reference ----
     const emptySec = await openOutgoing(rowWith('Embed Only'), 'open embed-only');
     record('O5.9', 'a block that only EMBEDS the target has no inline block reference, and says so',
       !!emptySec && emptySec.rows.length === 0 &&
         emptySec.notes.some((n) => /No block reference is written/i.test(n)) &&
-        !emptySec.notes.some((n) => /could not/i.test(n)),
+        !emptySec.notes.some((n) => /could not/i.test(n)) &&
+        // A COMPLETE scan found nothing. It must not borrow the partial
+        // sentence, and it must not offer the source as if more were unread.
+        !emptySec.notes.some((n) => /part of this block|too long to scan/i.test(n)) &&
+        emptySec.sourceControls === 0,
       emptySec ? `${emptySec.rows.length} row(s); notes ${JSON.stringify(emptySec.notes)}; ` +
+                 `source controls ${emptySec.sourceControls}; ` +
                  `control reads ${JSON.stringify(emptySec.toggle)}` : 'n/a');
 
     // ---- pagination and the retention cap ---------------------------------
@@ -365,11 +370,37 @@ async function main() {
       capped ? `${capped.rows.length} row(s), continuation offered: ${capped.more}, ` +
                `source offered: ${capped.openSource}; notes ${JSON.stringify(capped.notes.slice(-3))}` : 'n/a');
 
-    // ---- one hop, bounded, and the keyboard --------------------------------
-    const longRow = rowWith('Long Target Link');
-    const longSec = await openOutgoing(longRow, 'open long target link');
-    // Operated from the KEYBOARD, not clicked: focus the control and press Enter.
-    const expandBtn = longRow.locator('.f27-out-toggle-text').last();
+    // ---- partial scan, WITH links found ------------------------------------
+    //
+    // Three references are reachable, then the node bound stops the scan, then
+    // a fourth reference sits beyond it. Everything the section says about this
+    // block must be a floor rather than a total — in the collapsed control as
+    // well as the body — and the source must be offered, because it is the only
+    // place the rest of the text can be read.
+    const longRow = rowWith('Partial Links');
+    const partialClosed = await outState(longRow);
+    record('O5.16', 'a partial count is qualified in the COLLAPSED control, never shown as a total',
+      !!partialClosed && !partialClosed.open &&
+        /at least 3/i.test(partialClosed.toggle) && !/\(3\)/.test(partialClosed.toggle),
+      partialClosed ? `control reads ${JSON.stringify(partialClosed.toggle)}`
+                    : 'no outgoing section rendered');
+
+    const longSec = await openOutgoing(longRow, 'open partial links');
+    record('O5.17', 'the expanded body qualifies the count, says the scan was incomplete, and offers the source',
+      !!longSec && longSec.rows.length === 3 &&
+        /at least 3/i.test(longSec.count) &&
+        longSec.notes.some((n) => /too long to scan completely/i.test(n)) &&
+        longSec.sourceControls > 0,
+      longSec ? `${longSec.rows.length} row(s); count ${JSON.stringify(longSec.count)}; ` +
+                `notes ${JSON.stringify(longSec.notes)}; ` +
+                `source controls ${longSec.sourceControls}` : 'n/a');
+
+    // Operated from the KEYBOARD, not clicked: focus the control and press
+    // Enter. The long Korean/English/emoji target is the LAST link found before
+    // the cut, and is addressed by its own text rather than by position.
+    const expandBtn = longRow.locator('.f27-out-row')
+      .filter({ hasText: '긴 한국어' }).first()
+      .locator('.f27-out-toggle-text').first();
     await attempt('focus expand control', 15000, () => expandBtn.focus(), null);
     const focused = await page.evaluate(() =>
       (document.activeElement && document.activeElement.className) || '');
@@ -401,6 +432,32 @@ async function main() {
       outLeak.editors === 0 && outLeak.embeds === 0 && outLeak.iframes === 0 &&
         outLeak.buttons > 0 && outLeak.nonButtons === 0,
       JSON.stringify(outLeak));
+
+    // ---- partial scan, with NOTHING found ----------------------------------
+    //
+    // This block's only reachable route to the anchor is an embed macro, and
+    // the real reference it contains sits beyond the node bound. The section
+    // must say that nothing was found IN THE PART IT SCANNED. Saying "No block
+    // reference is written inside this block" here would be a claim the scan
+    // never established — and it is exactly what the code did before this
+    // correction, immediately contradicted by a partial-scan warning below it.
+    const lateSec = await openOutgoing(rowWith('Late Link'), 'open late link');
+    record('O5.18', 'a scan cut off BEFORE any link never claims the block has none',
+      !!lateSec && lateSec.rows.length === 0 &&
+        lateSec.notes.some((n) => /part of this block that could be scanned/i.test(n)) &&
+        !lateSec.notes.some((n) => /No block reference is written inside this block/i.test(n)) &&
+        lateSec.sourceControls > 0 &&
+        lateSec.count === '',
+      lateSec ? `${lateSec.rows.length} row(s); notes ${JSON.stringify(lateSec.notes)}; ` +
+                `count ${JSON.stringify(lateSec.count)}; ` +
+                `source controls ${lateSec.sourceControls}; ` +
+                `control reads ${JSON.stringify(lateSec.toggle)}` : 'n/a');
+
+    record('O5.19', 'the two "found nothing" answers are different sentences on screen',
+      !!lateSec && !!emptySec &&
+        JSON.stringify(lateSec.notes) !== JSON.stringify(emptySec.notes),
+      `complete: ${JSON.stringify(emptySec ? emptySec.notes : null)}; ` +
+      `partial: ${JSON.stringify(lateSec ? lateSec.notes : null)}`);
 
     const bothDirections = await rowWith('Ordered Links').evaluate((r) => ({
       outgoing: !!r.querySelector('.f27-out'),
@@ -574,7 +631,8 @@ async function main() {
 
     fs.writeFileSync(path.join(EVIDENCE, 'outgoing-observations.json'), JSON.stringify({
       graph: GRAPH, build: v.manifest.pilotBuildId,
-      ordered, repeated, selfSec, missingSec, emptySec, capped, expanded,
+      ordered, repeated, selfSec, emptySec, capped, expanded,
+      partialClosed, partialOpen: longSec, lateSec,
       overview, assets, excerpt, ogLeak, outLeak,
     }, null, 2));
 

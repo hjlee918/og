@@ -378,6 +378,9 @@
 
  :f27/outgoing-show "Links in this block ({1})"
  :f27/outgoing-show-none "Links in this block"
+ :f27/outgoing-show-partial "Links in this block (at least {1})"
+ :f27/outgoing-count-partial "at least {1} block(s) linked from this block — its text was too long to scan completely"
+ :f27/outgoing-partial-empty "No block reference was found in the part of this block that could be scanned. Whether the rest of its text holds any is unknown."
  :f27/outgoing-hide "Hide links in this block"
  :f27/outgoing-head "Blocks that \"{1}\" links to"
  :f27/outgoing-head-plain "Blocks the selected block links to"

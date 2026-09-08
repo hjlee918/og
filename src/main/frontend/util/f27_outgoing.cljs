@@ -165,11 +165,37 @@
 
   Returns {:hits [{:id :labelled? :order}] :visited n :truncated? bool}, where
   `:truncated?` means a bound stopped the walk and the text may hold further
-  references this list does not name."
+  references this list does not name. A caller MUST carry `:truncated?` into
+  what it says: a bounded scan that found nothing has not established that
+  there is nothing, and a bounded scan that found three has not established
+  that there are three."
   [ast]
   (let [*n (volatile! 0)
         *cut (volatile! false)]
-    (letfn [(walk [node depth acc]
+    (letfn [(descend
+              ;; Fold the walk over `coll`, STOPPING ENUMERATION as soon as a
+              ;; bound has cut the walk.
+              ;;
+              ;; `reduce` alone is not enough, and this is the correction the
+              ;; supervisor's second finding names. A reducing function that
+              ;; returns immediately still gets CALLED for every remaining
+              ;; element, so `reduce` keeps pulling from the collection: the
+              ;; visited counter stops, and the traversal does not. On a vector
+              ;; that is the whole remaining tail walked for nothing; on a lazy
+              ;; sequence it is the whole remaining tail REALISED.
+              ;;
+              ;; `reduced` is what actually stops the fold. Every active level
+              ;; performs this same check after its own recursive call returns,
+              ;; so a cut set at any depth unwinds through all of them rather
+              ;; than only the level that set it.
+              [coll depth acc]
+              (reduce (fn [a c]
+                        (let [a' (walk c depth a)]
+                          (if @*cut (reduced a') a')))
+                      acc
+                      coll))
+
+            (walk [node depth acc]
               (cond
                 @*cut acc
                 (nil? node) acc
@@ -193,10 +219,10 @@
                       ;; reference written inside that label is not a second
                       ;; link the author wrote in THIS block.
                       (conj acc r)
-                      (reduce (fn [a c] (walk c (inc depth) a)) acc (rest node)))
+                      (descend (rest node) (inc depth) acc))
 
                     (coll? node)
-                    (reduce (fn [a c] (walk c (inc depth) a)) acc node)
+                    (descend node (inc depth) acc)
 
                     :else acc))))]
       (let [hits (walk ast 0 [])]
@@ -331,24 +357,55 @@
 (defn section-state
   "What the section as a whole must say.
 
-  `:error`    reading or parsing the block's own text threw. Whether it has any
-              links is UNKNOWN, and this is never reported as empty
-  `:no-text`  the block has no readable text at all to contain a link
-  `:empty`    the text was read and holds no inline block reference — a genuine
-              answer, said differently from a failure. Text that claimed a
-              reference whose identifier was unusable is `:empty` too, and the
-              malformed count is stated beside it rather than folded away
-  `:ready`    there is at least one link to show
+  `:error`          reading or parsing the block's own text threw. Whether it
+                    has any links is UNKNOWN, and this is never reported as
+                    empty
+  `:no-text`        the block has no readable text at all to contain a link
+  `:empty`          the WHOLE text was scanned and holds no inline block
+                    reference — a genuine answer, said differently from a
+                    failure. Text that claimed a reference whose identifier was
+                    unusable is `:empty` too, and the malformed count is stated
+                    beside it rather than folded away
+  `:partial-empty`  a bound stopped the scan BEFORE any link was found. Nothing
+                    was found *in the part that was scanned*, which is not the
+                    same statement as 'this block contains no link', and must
+                    never be said as if it were
+  `:ready`          the whole text was scanned and there is at least one link
+  `:partial-ready`  a bound stopped the scan after at least one link. What was
+                    found is real and is shown; the count is a FLOOR, never a
+                    total
 
-  A truncated scan is NOT a state of its own: whatever was found is shown and
-  the truncation is said beside it, because a bound that stopped the walk after
-  three links has still found three real links."
-  [{:keys [error? text collected]}]
+  Truncation used to be handled as a note beside the answer rather than as part
+  of it, on the reasoning that a bound which stopped after three links has still
+  found three real links. That is true of the three, and false of everything
+  else the answer implies: with no links found the section said 'No block
+  reference is written inside this block' and then contradicted itself with a
+  partial-scan warning underneath, and with links found the count — in the
+  collapsed control as well as the expanded body — read as a total. Completeness
+  is therefore part of the state, and the two partial states carry it into every
+  sentence the caller writes."
+  [{:keys [error? text collected truncated?]}]
   (cond
     error? :error
     (or (nil? text) (string/blank? (str text))) :no-text
-    (zero? (count (:links collected))) :empty
+    (zero? (count (:links collected))) (if truncated? :partial-empty :empty)
+    truncated? :partial-ready
     :else :ready))
+
+(defn partial-scan?
+  "True for the states produced by a scan that did not reach the end of the
+  block's text.
+
+  A caller must qualify every count it shows in such a state, must not say that
+  no link exists, and must offer the source block — the only place the rest of
+  the text can actually be read."
+  [state]
+  (contains? #{:partial-empty :partial-ready} state))
+
+(defn has-links?
+  "True for the states that render rows."
+  [state]
+  (contains? #{:ready :partial-ready} state))
 
 (defn readable-target?
   "Whether a resolved entity is a block this feature may show, or merely a STUB

@@ -41,6 +41,25 @@
   ([s] (ast s :markdown))
   ([s fmt] (gp-mldoc/inline->edn s (gp-mldoc/default-config fmt))))
 
+(defn- counting-lazy
+  "A lazy sequence of `n` nodes that RECORDS how many of its elements were
+  actually realised.
+
+  This is the instrument for the traversal bound. `:visited` cannot prove
+  bounded traversal — a reducing function that returns immediately is still
+  CALLED for every remaining element, so the counter stops while the fold keeps
+  pulling. Realisation is the thing that cannot be faked: an element of this
+  sequence does not exist until something asks for it.
+
+  `lazy-seq` is deliberately UNCHUNKED. A chunked source (`range`, `map` over
+  one) realises 32 elements at a time, and the count would then measure chunk
+  fill rather than the walk — the same trap the page-excerpt test corrected."
+  [*realised n make]
+  (lazy-seq
+   (when (pos? n)
+     (vswap! *realised inc)
+     (cons (make) (counting-lazy *realised (dec n) make)))))
+
 (defn- ids
   "The identities extracted from real markup, in source order."
   ([s] (ids s :markdown))
@@ -187,6 +206,53 @@
     (is (true? (:truncated? r)) "a bound that bit is reported, never silent")
     (is (<= (:visited r) (inc o/max-scan-nodes)))))
 
+(deftest the-node-bound-stops-ENUMERATING-not-only-processing
+  (testing "the remaining tail is never reached, proved by realisation"
+    (let [*realised (volatile! 0)
+          total 200000
+          r (o/scan (counting-lazy *realised total (fn [] ["Plain" "x"])))]
+      (is (true? (:truncated? r)))
+      (is (< @*realised total)
+          (str "the whole input was consumed: " @*realised " of " total
+               " elements realised. `reduce` keeps pulling even when its "
+               "reducing function does nothing; `reduced` is what stops it"))
+      (is (<= @*realised (+ o/max-scan-nodes 2))
+          (str @*realised " elements realised for a bound of " o/max-scan-nodes))
+      (is (<= (:visited r) (inc o/max-scan-nodes))))))
+
+(deftest the-bound-unwinds-through-every-active-level
+  (testing "a cut set deep inside stops the levels above it too"
+    (let [*inner (volatile! 0)
+          *outer (volatile! 0)
+          inner-total 200000
+          outer-total 200000
+          ;; One wrapper whose children exhaust the budget, followed by a long
+          ;; tail at the OUTER level. If only the level that set the cut
+          ;; stopped, the outer tail would still be enumerated.
+          outer (lazy-seq
+                 (cons ["Wrapper" (counting-lazy *inner inner-total
+                                                 (fn [] ["Plain" "x"]))]
+                       (counting-lazy *outer outer-total
+                                      (fn [] ["Plain" "y"]))))
+          r (o/scan outer)]
+      (is (true? (:truncated? r)))
+      (is (<= @*inner (+ o/max-scan-nodes 2))
+          (str "inner level realised " @*inner))
+      (is (zero? @*outer)
+          (str "the outer tail was enumerated after the cut: " @*outer
+               " of " outer-total " elements realised")))))
+
+(deftest an-unbounded-scan-still-reaches-every-element
+  (testing "the short circuit must not stop a scan that was never cut"
+    (let [*realised (volatile! 0)
+          total 50
+          nodes (counting-lazy *realised total (fn [] ["Plain" "x"]))
+          r (o/scan (concat nodes [["Link" {:url ["Block_ref" a] :label []}]]))]
+      (is (false? (:truncated? r)))
+      (is (= total @*realised) "every element of a complete scan is visited")
+      (is (= [a] (mapv :id (:hits r)))
+          "and the reference after them is still found"))))
+
 (deftest the-depth-bound-stops-the-scan-and-says-so
   (let [deep (reduce (fn [acc _] ["Emphasis" [["Bold"] [acc]]])
                      ["Block_reference" a]
@@ -241,6 +307,86 @@
 ;; Section state — empty, missing, capped and failed are four different things
 ;; ---------------------------------------------------------------------------
 
+(deftest a-bounded-scan-that-found-nothing-never-claims-there-is-nothing
+  (testing "the supervisor's reproduction: a cutoff before the first link"
+    ;; 5,000 plain nodes and then one reference. The bound bites first, so the
+    ;; reference is never reached — and the section used to answer `:empty`,
+    ;; which says the block contains no link. It does not know that.
+    (let [ast (vec (concat (repeat 5000 ["Plain" "x"])
+                           [["Link" {:url ["Block_ref" a] :label []}]]))
+          {:keys [hits truncated?]} (o/scan ast)
+          collected (o/collect hits)]
+      (is (= [] hits))
+      (is (true? truncated?))
+      (is (= :partial-empty
+             (o/section-state {:text "x" :collected collected :truncated? truncated?}))
+          "not :empty — nothing was found IN THE PART THAT WAS SCANNED")
+      (is (true? (o/partial-scan?
+                  (o/section-state {:text "x" :collected collected
+                                    :truncated? truncated?}))))
+      (is (false? (o/has-links?
+                   (o/section-state {:text "x" :collected collected
+                                     :truncated? truncated?})))
+          "there is no count to show, and no row to render"))))
+
+(deftest a-bounded-scan-that-found-links-presents-a-floor-not-a-total
+  (let [ast (vec (concat [["Link" {:url ["Block_ref" a] :label []}]
+                          ["Link" {:url ["Block_ref" b] :label []}]]
+                         (repeat 5000 ["Plain" "x"])
+                         [["Link" {:url ["Block_ref" c] :label []}]]))
+        {:keys [hits truncated?]} (o/scan ast)
+        collected (o/collect hits)
+        state (o/section-state {:text "x" :collected collected :truncated? truncated?})]
+    (is (= [a b] (mapv :id (:links collected)))
+        "what was found is real, is in source order, and is shown")
+    (is (true? truncated?))
+    (is (= :partial-ready state))
+    (is (true? (o/partial-scan? state)))
+    (is (true? (o/has-links? state))
+        "rows are rendered; only the COUNT is qualified")))
+
+(deftest a-complete-scan-is-never-qualified
+  (let [ast [["Plain" "x"] ["Link" {:url ["Block_ref" a] :label []}]]
+        {:keys [hits truncated?]} (o/scan ast)
+        collected (o/collect hits)
+        state (o/section-state {:text "x" :collected collected :truncated? truncated?})]
+    (is (false? truncated?))
+    (is (= :ready state))
+    (is (false? (o/partial-scan? state))
+        "a complete scan must not offer a partial-scan sentence")
+    (is (true? (o/has-links? state)))))
+
+(deftest completeness-never-outranks-a-failure-or-an-absence-of-text
+  (testing "the states that mean something else keep meaning it"
+    (is (= :error (o/section-state {:error? true :text "x"
+                                    :collected (o/collect []) :truncated? true}))
+        "a read that failed is not a partial scan")
+    (is (= :no-text (o/section-state {:text "   " :collected (o/collect [])
+                                      :truncated? true}))
+        "a block with no text has nothing to scan partially")))
+
+(deftest the-two-partial-states-are-the-only-partial-states
+  (doseq [st [:error :no-text :empty :ready]]
+    (is (false? (o/partial-scan? st)) (str st " must not be treated as partial")))
+  (doseq [st [:partial-empty :partial-ready]]
+    (is (true? (o/partial-scan? st))))
+  (doseq [st [:error :no-text :empty :partial-empty]]
+    (is (false? (o/has-links? st)) (str st " renders no rows"))))
+
+(deftest korean-text-around-a-cutoff-is-unaffected
+  (let [ast (vec (concat [["Plain" "한국어 🎯 "]
+                          ["Link" {:url ["Block_ref" a] :label []}]]
+                         (repeat 5000 ["Plain" "그리고 더"])
+                         [["Link" {:url ["Block_ref" b] :label []}]]))
+        {:keys [hits truncated?]} (o/scan ast)
+        collected (o/collect hits)]
+    (is (= [a] (mapv :id (:links collected))))
+    (is (true? truncated?))
+    (is (= :partial-ready (o/section-state {:text "한국어" :collected collected
+                                            :truncated? truncated?})))
+    (is (o/accounting-balances? collected)
+        "accounting still balances across a cutoff")))
+
 (deftest a-failed-read-is-never-reported-as-empty
   (is (= :error (o/section-state {:error? true :text "((x))" :collected (o/collect [])})))
   (is (= :error (o/section-state {:error? true :text nil :collected (o/collect [])}))
@@ -251,7 +397,12 @@
   (is (= :no-text (o/section-state {:text "   " :collected (o/collect [])}))))
 
 (deftest text-with-no-reference-is-a-genuine-empty
-  (is (= :empty (o/section-state {:text "just words" :collected (o/collect [])}))))
+  (testing "and only when the WHOLE text was scanned"
+    (is (= :empty (o/section-state {:text "just words" :collected (o/collect [])
+                                    :truncated? false})))
+    (is (= :empty (o/section-state {:text "just words" :collected (o/collect [])}))
+        "an absent flag is a complete scan, which is what a caller that has
+         not been cut passes")))
 
 (deftest text-whose-only-reference-was-unusable-is-empty-with-the-count-stated
   (let [collected (o/collect [{:id nil}])]

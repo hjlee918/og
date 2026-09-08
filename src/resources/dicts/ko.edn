@@ -433,6 +433,9 @@
 
  :f27/outgoing-show "이 블록 안의 링크 ({1})"
  :f27/outgoing-show-none "이 블록 안의 링크"
+ :f27/outgoing-show-partial "이 블록 안의 링크 (최소 {1})"
+ :f27/outgoing-count-partial "이 블록이 가리키는 블록 최소 {1}개 — 본문이 너무 길어 끝까지 확인하지 못했습니다"
+ :f27/outgoing-partial-empty "확인할 수 있었던 부분에서는 블록 참조를 찾지 못했습니다. 나머지 본문에 있는지는 알 수 없습니다."
  :f27/outgoing-hide "이 블록 안의 링크 숨기기"
  :f27/outgoing-head "\"{1}\"이(가) 가리키는 블록"
  :f27/outgoing-head-plain "선택한 블록이 가리키는 블록"

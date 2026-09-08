@@ -4570,7 +4570,11 @@
       {:text text
        :collected collected
        :truncated? (boolean truncated?)
-       :state (f27o/section-state {:text text :collected collected})})
+       ;; Completeness is part of the answer, not a note beside it: a bound that
+       ;; stopped before the first link has not established that there is none.
+       :state (f27o/section-state {:text text
+                                   :collected collected
+                                   :truncated? (boolean truncated?)})})
     (catch :default _
       {:text nil :collected (f27o/collect []) :truncated? false :state :error})))
 
@@ -4690,7 +4694,8 @@
   (let [host-uuid (:block/uuid ref-block)
         scan (f27-outgoing-scan ref-block)
         collected (:collected scan)
-        truncated? (:truncated? scan)
+        ;; Completeness now reaches this component through the STATE, not as a
+        ;; separate flag beside it — which is what let the two disagree.
         status (:state scan)
         shown @(::shown state)
         open? (pos? shown)
@@ -4702,6 +4707,7 @@
         ;; block links to. Repeated writings of the same target are counted on
         ;; the row itself, where the reader can see which target repeats.
         found (or (:distinct collected) 0)
+        partial? (f27o/partial-scan? status)
         open-source! (fn [] (when host-uuid
                               (route-handler/redirect-to-page! (str host-uuid))))]
     [:div.f27-out
@@ -4711,7 +4717,11 @@
                {:aria-expanded (if open? "true" "false")})
       (cond
         open? (t :f27/outgoing-hide)
+        ;; A floor, not a total. The collapsed control is where a partial count
+        ;; is most easily read as complete, so it is qualified here too.
+        (and (pos? found) partial?) (t :f27/outgoing-show-partial found)
         (pos? found) (t :f27/outgoing-show found)
+        ;; No count at all rather than a "0" a bounded scan never established.
         :else (t :f27/outgoing-show-none))]
      (when open?
        [:div.f27-out-body
@@ -4731,10 +4741,19 @@
 
           :no-text [:div.f27-ctx-note (t :f27/outgoing-no-text)]
 
+          ;; The WHOLE text was scanned and holds no reference. Only this state
+          ;; may say so.
           :empty [:div.f27-ctx-note (t :f27/outgoing-empty)]
 
+          ;; A bound stopped the scan before any link was found. What that
+          ;; means is said by the shared partial block below, which also offers
+          ;; the source; there is no count to show and no row to render.
+          :partial-empty nil
+
           [:<>
-           [:div.f27-out-count (t :f27/outgoing-count found)]
+           [:div.f27-out-count (if partial?
+                                 (t :f27/outgoing-count-partial found)
+                                 (t :f27/outgoing-count found))]
            [:div.f27-out-rows
             (for [[i l] (map-indexed vector (:rows page))]
               (rum/with-key (f27-outgoing-row config repo host-uuid l)
@@ -4744,8 +4763,18 @@
         (when (pos? (or (:malformed collected) 0))
           [:div.f27-ctx-note.f27-ctx-error
            (t :f27/outgoing-malformed (:malformed collected))])
-        (when truncated?
-          [:div.f27-ctx-note.f27-ctx-capped (t :f27/outgoing-truncated)])
+        ;; An incomplete scan, said once and always with the one control that
+        ;; can actually reach the rest of the text. `:partial-empty` says that
+        ;; nothing was found IN THE PART THAT WAS SCANNED; `:partial-ready`
+        ;; says the list above it is a floor.
+        (when partial?
+          [:<>
+           [:div.f27-ctx-note.f27-ctx-capped
+            (if (= :partial-empty status)
+              (t :f27/outgoing-partial-empty)
+              (t :f27/outgoing-truncated))]
+           [:button.f27-out-open-source.f27-btn (f27-btn open-source! nil)
+            (t :f27/outgoing-open-source)]])
         (when (pos? (or (:remaining page) 0))
           [:div.f27-ctx-note (t :f27/outgoing-remaining (:remaining page))])
         (when (f27o/can-continue? page)
