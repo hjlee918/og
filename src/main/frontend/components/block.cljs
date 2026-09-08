@@ -4991,15 +4991,103 @@
     {:whiteboard? (= :whiteboard-shape ls-type)
      :annotation? (or (= :annotation ls-type) (some? (:hl-type props)))}))
 
-(defn- f27-inline-panel
+(defn- f27-inline-target-snapshot
+  "What this panel is about, reduced to the two facts that decide what it shows:
+  WHICH entity the identity resolves to, and what that entity says. Comparing
+  these two is how the watcher below decides whether anything the reader can see
+  has actually changed."
+  [repo id]
+  (when-let [u (try (parse-uuid (str id)) (catch :default _ nil))]
+    (db/pull repo '[:db/id :block/content] [:block/uuid u])))
+
+;; ---------------------------------------------------------------------------
+;; Keeping an OPEN panel true, and why it cannot use the reactive query system.
+;;
+;; The obvious mechanism is `db/sub-block`, which every other reactive component
+;; here uses. It does not work for this, and the reason is worth writing down
+;; because it was measured rather than guessed:
+;;
+;;   * that query is keyed by DATABASE ID. A file changed on disk is re-parsed
+;;     by `handler.file/alter-file`, which retracts the page's blocks and
+;;     transacts new ones, so the block's IDENTITY survives and its database id
+;;     does not;
+;;
+;;   * worse, NO reactive query is refreshed at all on that path.
+;;     `outliner.pipeline/invoke-hooks` — the only caller of `react/refresh!` —
+;;     is guarded by `(not (:from-disk? tx-meta))`, and the watcher's
+;;     `alter-file` passes exactly that. So a `::block`, a `::page-blocks` and
+;;     even a `:custom` key are all equally silent;
+;;
+;;   * what OG does instead is `ui-handler/re-render-root!`, which requests a
+;;     render of the ROOT — and `rum/static` short-circuits the block subtree,
+;;     so it never arrives. That is why OG's own inline reference text is itself
+;;     stale after a from-disk change until its host block re-renders for some
+;;     other reason. This slice does not change that; the lifecycle scenario
+;;     records it as an observation.
+;;
+;; So the panel subscribes to the CONNECTION, which every transaction reaches
+;; whatever its metadata, and invalidates itself only when the two facts above
+;; actually differ. Scope and lifetime are the panel's own: registered in
+;; `:did-mount`, removed in `:will-unmount`, so nothing is watched while the
+;; panel is closed, after the host block is removed, or once the reader has
+;; navigated away. The cost while open is one `pull` of one entity per
+;; transaction, per open panel.
+;; ---------------------------------------------------------------------------
+
+(defn- f27-inline-watch-target!
+  [state]
+  (let [[_config repo id] (:rum/args state)
+        *seen (::seen state)
+        *tick (::tick state)
+        k (keyword "f27-inline" (str (gensym "panel")))]
+    (reset! *seen (f27-inline-target-snapshot repo id))
+    (when-let [conn (db/get-db repo false)]
+      (d/listen! conn k
+                 (fn [_tx-report]
+                   (let [now (f27-inline-target-snapshot repo id)]
+                     (when (not= now @*seen)
+                       (reset! *seen now)
+                       ;; A `rum/local` re-renders its component when it
+                       ;; changes, so this is the invalidation and nothing else.
+                       (swap! *tick inc))))))
+    (assoc state ::watch-key k)))
+
+(defn- f27-inline-unwatch-target!
+  [state]
+  (let [[_config repo] (:rum/args state)]
+    (when-let [k (::watch-key state)]
+      (when-let [conn (db/get-db repo false)]
+        (d/unlisten! conn k))))
+  (dissoc state ::watch-key))
+
+(rum/defcs f27-inline-panel <
+  ;; `rum/local` first: Rum collects before-render hooks MIXIN-major, so a map
+  ;; placed before it would run against state its `:will-mount` has not built
+  ;; yet. The same ordering fact that broke `f27-inline-ref` once.
+  (rum/local 0 ::tick)
+  {:init (fn [state _props]
+           ;; A PLAIN atom, deliberately: it records what was last seen so the
+           ;; watcher can tell a real change from any other transaction, and it
+           ;; must not itself re-render anything when it is set.
+           (assoc state ::seen (atom ::unset)))
+   :did-mount f27-inline-watch-target!
+   :will-unmount f27-inline-unwatch-target!}
   "The panel itself. Rendered ONLY while open, so everything it reads — the
   target, its breadcrumb, its Crystal matches and its context — is work that
   happens because the reader asked for it.
 
   `context?` is the second disclosure. The first names the target; the second
   is `f27-row-context` for the TARGET, which is where the ancestors,
-  descendants, outgoing and inbound sections come from, unchanged."
-  [config repo id panel-id context? on-context on-close]
+  descendants, outgoing and inbound sections come from, unchanged.
+
+  It is a component of its own, rather than a fragment of `f27-inline-ref`, so
+  that the target subscription above lives exactly as long as the panel does."
+  [state config repo id panel-id context? on-context on-close]
+  ;; Read so this panel re-renders when the watcher above sees its target
+  ;; change. The value carries no meaning: everything below is resolved fresh
+  ;; from the current database on every render, so it is already correct once
+  ;; something has caused one.
+  @(::tick state)
   (let [entity (f27-ref-target repo id)
         readable? (f27o/readable-target? entity)
         tstate (f27il/target-state {:identity? true :readable? readable?})
@@ -5076,12 +5164,44 @@
   ;; sits in, so a target that is deleted while its panel is open is re-resolved
   ;; and the panel says so on the next render, instead of showing an entity that
   ;; no longer exists because the arguments happened to compare equal.
+  ;;
+  ;; `rum/local` comes FIRST, and that order is load-bearing. Rum builds its
+  ;; before-render pipeline with `(collect* [:will-mount :unsafe/will-mount
+  ;; :before-render] mixins)`, which walks MIXIN-major: every hook of the first
+  ;; mixin, then every hook of the second. With the map first, this component's
+  ;; `:before-render` ran before `rum/local`'s `:will-mount` had created the
+  ;; atom, and dereferenced nil on the very first render — which threw for every
+  ;; inline reference on screen. Read out of the emitted JavaScript, not guessed.
+  (rum/local nil ::panel)
   {:init (fn [state _props]
            ;; One identity per MOUNTED OCCURRENCE, so two references in one
            ;; sentence never share a DOM id, and Escape in the second panel
            ;; cannot return focus to the first control.
-           (assoc state ::uid (str (gensym "f27il"))))}
-  (rum/local nil ::panel)
+           (assoc state ::uid (str (gensym "f27il"))))
+   :before-render
+   (fn [state]
+     ;; A mounted instance can be REUSED for a different reference: editing the
+     ;; host block's text off disk keeps the block, so React reconciles the same
+     ;; position and this component survives with another target under it.
+     ;;
+     ;; `panel-state` already refuses to display state whose key does not match,
+     ;; which is what stops one target's context appearing under another. On its
+     ;; own it is not enough: the stored value survives, so retargeting
+     ;; A -> B -> A found the old key matching again and a panel the reader had
+     ;; never re-opened reappeared. Observed live before it was fixed.
+     ;;
+     ;; Forgetting it here makes the mismatch permanent, which is what
+     ;; "a deliberate fresh disclosure state" means.
+     (let [[config repo id _label] (:rum/args state)
+           k (f27il/panel-key {:repo repo
+                               :host (get-in config [:block :block/uuid])
+                               :target id})
+           *panel (::panel state)]
+       ;; Guarded as well as ordered: a hook that assumes another mixin has
+       ;; already run is exactly what broke here once.
+       (when (and *panel (f27il/stale? @*panel k))
+         (reset! *panel (f27il/forget-when-stale @*panel k)))
+       state))}
   "One ordinary inline block reference, plus the explicit control that opens the
   TARGET's context in place.
 

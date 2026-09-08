@@ -1332,10 +1332,35 @@ async function main() {
     record('O6.9', 'the whole reading view still renders no OG embeds, iframes or editors',
       ogLeak.embeds === 0 && ogLeak.iframes === 0 && ogLeak.editors === 0, JSON.stringify(ogLeak));
 
-    const consoleDepth = await page.evaluate(() =>
-      document.body.innerText.includes('Block ref nesting is too deep'));
-    record('O6.10', 'no runaway reference substitution anywhere on the page', !consoleDepth,
-      consoleDepth ? 'OG printed its depth ceiling warning' : '0 depth warnings');
+    // Where OG's substitution ceiling is reached, and where it is not — the same
+    // treatment I5.8/I5.9 already give it. As a body-wide boolean this check
+    // could not say WHOSE notice it had found, and this batch's fixture is the
+    // first to put a mutual pair into ordinary reading content, which OG
+    // substitutes to `max-depth-of-links` exactly as it always has.
+    const depthHere = await page.evaluate(() => {
+      const NEEDLE = 'Block ref nesting is too deep';
+      const all = [...document.querySelectorAll('.warning')]
+        .filter((w) => (w.innerText || '').includes(NEEDLE));
+      const within = (sel) => all.filter((w) => w.closest(sel)).length;
+      return {
+        total: all.length,
+        inF27: within('.f27-il-panel, .f27-ctx, .f27-ref-overview'),
+        inSidebar: within('.sidebar-item'),
+        inEmbedSurface: within('.embed-block'),
+        inOgSubstitution: within('.block-ref-wrap'),
+        hosts: all.map((w) => {
+          const b = w.closest('[blockid]');
+          return (b ? (b.innerText || '') : '').replace(/\s+/g, ' ').trim().slice(0, 40);
+        }),
+      };
+    });
+    record('O6.10', 'no runaway reference substitution inside any F27 surface',
+      depthHere.inF27 === 0,
+      `${depthHere.inF27} inside an F27 panel, overview or context, of ${depthHere.total} ` +
+      `on the page (${depthHere.inSidebar} in the right sidebar, ` +
+      `${depthHere.inEmbedSurface} in an embed surface, ` +
+      `${depthHere.inOgSubstitution} inside OG's own substitution); ` +
+      `blocks ${JSON.stringify(depthHere.hosts)}`);
 
     fs.writeFileSync(path.join(EVIDENCE, 'inline-observations.json'), JSON.stringify({
       graph: GRAPH, build: v.manifest.pilotBuildId,

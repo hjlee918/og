@@ -160,6 +160,19 @@ test('the shapes that unmount a React subtree are reported separately as well', 
     'the primary gate fails them all regardless of what the render regex names');
 });
 
+test('a ClojureScript protocol dispatch on nil is named as a render failure', () => {
+  // This shape unmounted every inline reference on screen during the lifecycle
+  // batch while the render-failure list did not name it. The primary gate
+  // failed the run anyway; the list is widened so the narrower report agrees.
+  const { rec, ctx } = runWithPhases([
+    { phase: 'lifecycle', operation: 'edit-target-while-open' },
+    { kind: 'console', error: 'console: Error: No protocol method IDeref.-deref defined for type null' },
+  ]);
+  const s = C.summarise(rec.entries(), ctx);
+  assert.strictEqual(s.renderFailures.length, 1);
+  assert.strictEqual(s.unexpected.length, 1, 'and the primary gate fails it regardless');
+});
+
 test('the phase of every entry is recorded, not derived afterwards', () => {
   const { rec } = runWithPhases([
     { phase: 'startup' },

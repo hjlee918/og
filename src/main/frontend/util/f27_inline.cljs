@@ -162,6 +162,29 @@
   [_stored k]
   {:key k :open? false :context? false})
 
+(defn stale?
+  "True when `stored` belongs to a DIFFERENT reference than `k`.
+
+  `panel-state` already reports a mismatched key as closed, which is what stops
+  one reference's state being displayed against another. It is not enough on its
+  own: the stored value survives, so a mounted instance retargeted A -> B -> A
+  finds its old key matching again and the panel the reader never re-opened
+  reappears. Observed live, not inferred — see the lifecycle scenario.
+
+  A nil `k` with a stored key is stale too: the reference has lost the identity
+  the state belonged to."
+  [stored k]
+  (boolean (and stored (:key stored) (not= k (:key stored)))))
+
+(defn forget-when-stale
+  "`stored`, or nothing at all once it belongs to another reference.
+
+  Called before render rather than during it, so the panel's state is decided
+  once per render from a value that is already correct, and a mismatch is
+  permanent rather than latent."
+  [stored k]
+  (if (stale? stored k) nil stored))
+
 (defn open?
   "True when the panel for `k` is open at all."
   [stored k]

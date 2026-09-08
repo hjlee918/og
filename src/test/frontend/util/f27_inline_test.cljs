@@ -168,6 +168,38 @@
     (is (true? (il/open? moved kb)))
     (is (= il/closed (il/panel-state moved ka)))))
 
+(deftest state-belonging-to-another-reference-is-FORGOTTEN-not-merely-hidden
+  ;; Regression for a defect the lifecycle scenario observed live: refusing to
+  ;; DISPLAY mismatched state is not the same as discarding it. A mounted
+  ;; instance retargeted A -> B -> A found its old key matching again and a
+  ;; panel the reader had never re-opened reappeared.
+  (let [ka (il/panel-key {:repo repo :host host :target a})
+        kb (il/panel-key {:repo repo :host host :target b})
+        opened (il/toggle-context (il/toggle-panel nil ka) ka)]
+    (testing "it is stale under the other reference, and not under its own"
+      (is (true? (il/stale? opened kb)))
+      (is (false? (il/stale? opened ka))))
+    (testing "forgetting it under B makes coming back to A a fresh, closed panel"
+      (let [forgotten (il/forget-when-stale opened kb)]
+        (is (nil? forgotten))
+        (is (= il/closed (il/panel-state forgotten ka)))
+        (is (false? (il/open? forgotten ka)))))
+    (testing "without forgetting, returning to A would restore it — the defect"
+      (is (true? (il/open? opened ka))))
+    (testing "its own key is left exactly as it was"
+      (is (= opened (il/forget-when-stale opened ka))))))
+
+(deftest nothing-stored-and-no-identity-are-not-stale
+  (let [ka (il/panel-key {:repo repo :host host :target a})]
+    (is (false? (il/stale? nil ka)))
+    (is (false? (il/stale? {} ka)))
+    (is (nil? (il/forget-when-stale nil ka))))
+  (testing "a reference that lost its identity forgets state that named one"
+    (let [ka (il/panel-key {:repo repo :host host :target a})
+          opened (il/toggle-panel nil ka)]
+      (is (true? (il/stale? opened nil)))
+      (is (nil? (il/forget-when-stale opened nil))))))
+
 (deftest a-panel-with-no-target-identity-is-always-closed
   (let [opened (il/toggle-panel nil nil)]
     (is (= il/closed (il/panel-state opened nil)))

@@ -63,6 +63,12 @@ const RENDER_FAILURE = new RegExp([
   'Objects are not valid as a React child',
   'Too much recursion',
   'Maximum call stack size exceeded',
+  // Added after this shape unmounted every inline reference on screen while
+  // this list did not name it: a ClojureScript protocol dispatch on nil. The
+  // PRIMARY gate caught it, which is the whole reason the primary gate is "no
+  // unexpected error at all" rather than this regex.
+  'No protocol method',
+  'is not ISeqable',
 ].join('|'));
 
 const FILESYSTEM_HANDLER = /frontend\.handler\.web\.nfs/;

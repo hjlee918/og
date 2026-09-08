@@ -54,8 +54,13 @@ out of the guard source rather than restating them.
 node f27-inline/scripts/build-feature.js       # gulp + renderer + guarded main
 node f27-inline/scripts/package-feature.js     # electron-forge package, darwin/x64
 node f27-inline/scripts/run-feature-tests.js   # pilot guards + this build's own
-node f27-inline/checks/inline-loaded-graph-checks.js   # the packaged scenario
+node f27-inline/checks/inline-loaded-graph-checks.js   # static reading, 0 content changes
+node f27-inline/checks/inline-lifecycle-checks.js      # an OPEN panel while the graph changes
 ```
+
+The two packaged scenarios are separate sessions on separate graphs on purpose:
+one asserts that **nothing** in its graph changed, and the other changes its
+graph deliberately. Those claims cannot share a run.
 
 The ClojureScript tests are the ordinary ones:
 
@@ -87,7 +92,9 @@ them failing:
 | `checks/make-inline-graph.js` | this batch's synthetic graph — the outgoing fixture plus this slice's reading pages |
 | `checks/inline-batch-graph.js` | one graph per batch, reused only after per-file checks |
 | `checks/error-classifier.js` | **the harness improvement this batch owes**: phase-correlated window-error classification |
-| `checks/inline-loaded-graph-checks.js` | the packaged, loaded-graph scenario (section I is this slice) |
+| `checks/inline-loaded-graph-checks.js` | the packaged, loaded-graph scenario — STATIC reading, asserts zero content change (section I is this slice) |
+| `checks/make-lifecycle-graph.js` | the batch's MUTABLE synthetic graph, with every write declared as a whole-file body and one page that is never written |
+| `checks/inline-lifecycle-checks.js` | the packaged LIFECYCLE scenario: what happens to an OPEN panel while the graph changes underneath it |
 | `tests/feature-build.test.js` | identity, integrity and "this is neither accepted build" |
 | `tests/graph-fixture.test.js` | the fixture's own rules, without touching the graph root |
 | `tests/error-classifier.test.js` | the classification rules, driven deterministically |
@@ -106,6 +113,26 @@ error arriving during feature use **fails** — proved by a deterministic
 regression, by name, in `tests/error-classifier.test.js`. An error mentioning
 this run's own graph is never expected, anywhere. Expected refusals stay
 visible: they are counted, named and printed.
+
+## Keeping an open panel true
+
+A panel that is open when its target changes cannot be kept true by the reactive
+query system, and the reason is measured rather than assumed:
+`outliner.pipeline/invoke-hooks` — the only caller of `react/refresh!` — is
+guarded by `(not (:from-disk? tx-meta))`, and the file watcher's `alter-file`
+passes exactly that. So on a from-disk change **no** reactive query is refreshed:
+not `::block`, not `::page-blocks`, not even a `:custom` key. What OG does
+instead is `re-render-root!`, which `rum/static` stops from reaching the block
+subtree — which is why OG's own inline reference text is itself stale after such
+a change until its host re-renders for another reason. This slice does not
+change that, and the lifecycle scenario records it as an observation.
+
+The panel therefore listens to the datascript **connection**, which every
+transaction reaches whatever its metadata, and invalidates itself only when the
+target's `:db/id` or `:block/content` actually differs. It is registered in the
+panel's `:did-mount` and removed in `:will-unmount`, so nothing is watched while
+the panel is closed, after the host block is removed, or once the reader has
+navigated away.
 
 ## Graph data
 
