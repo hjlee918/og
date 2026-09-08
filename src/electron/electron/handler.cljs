@@ -44,24 +44,30 @@
 ;; original handler byte for byte. A helper would have left a real call behind.
 
 (defmethod handle :mkdir [_window [_ dir]]
-  (when pilot/PILOT (pilot/guard-fs! ::mkdir dir))
+  (when pilot/PILOT (pilot/guard-fs! ::mkdir "write" dir))
   (fs/mkdirSync dir))
 
 (defmethod handle :mkdir-recur [_window [_ dir]]
-  (when pilot/PILOT (pilot/guard-fs! ::mkdir-recur dir))
+  (when pilot/PILOT (pilot/guard-fs! ::mkdir-recur "write" dir))
   (fs/mkdirSync dir #js {:recursive true}))
 
 (defmethod handle :readdir [_window [_ dir]]
-  (when pilot/PILOT (pilot/guard-fs! ::readdir dir))
+  (when pilot/PILOT (pilot/guard-fs! ::readdir "read" dir))
   (common-graph/readdir dir))
 
 (defmethod handle :listdir [_window [_ dir flat?]]
-  (when pilot/PILOT (pilot/guard-fs! ::listdir dir))
+  (when pilot/PILOT (pilot/guard-fs! ::listdir "read" dir))
   (when (and dir (fs-extra/pathExistsSync dir))
     (js-utils/deepReadDir dir (if (boolean? flat?) flat? true))))
 
 (defmethod handle :unlink [_window [_ repo-dir path]]
-  (when pilot/PILOT (pilot/guard-fs! ::unlink path) (pilot/guard-fs! ::unlink repo-dir))
+  ;; The recycle destination is DERIVED from repo-dir below, so the repo is
+  ;; validated as a graph selection and both derived paths are validated before
+  ;; the directory is created or anything is moved into it.
+  (when pilot/PILOT
+    (pilot/guard-fs! ::unlink "write" path)
+    (pilot/guard-fs! ::unlink-repo "graph-select" repo-dir)
+    (pilot/guard-fs! ::unlink-recycle "write" (str repo-dir "/logseq/.recycle")))
   (if (or (plugin/dotdir-file? path)
           (plugin/assetsdir-file? path))
     (fs/unlinkSync path)
@@ -86,7 +92,23 @@
     (some (fn [a] (= -1 (first a))) result)))
 
 (defmethod handle :backupDbFile [_window [_ repo path db-content new-content]]
-  (when pilot/PILOT (pilot/guard-fs! ::backup-db-file path))
+  ;; `path` alone is not enough: backup-file DERIVES its destination from
+  ;; `repo`, so an allowed source with an outside repo would have written
+  ;; outside. The repo and the source are validated here, and every derived
+  ;; destination inside electron.backup-file before it touches the filesystem.
+  ;; `path` alone is not enough: backup-file DERIVES its destination from
+  ;; `repo`, so an allowed source with an outside repo would have written
+  ;; outside. Repo, source semantics and the derived destination are all
+  ;; validated here, before the call that creates directories and writes.
+  ;;
+  ;; Guarding at the callers rather than inside electron.backup-file is
+  ;; deliberate: that namespace does not otherwise depend on electron.pilot, and
+  ;; adding the dependency reordered namespace emission in ORDINARY builds. The
+  ;; functions were byte-identical but the invariant is worth keeping exact, and
+  ;; all four callers are in this file.
+  (when pilot/PILOT
+    (pilot/guard-source! ::backup-db-file repo path)
+    (pilot/guard-fs! ::backup-db-file-dest "write" (backup-file/get-backup-dir repo path)))
   (when (and (string? db-content)
              (string? new-content)
              (string-some-deleted? db-content new-content))
@@ -94,24 +116,28 @@
     (backup-file/backup-file repo :backup-dir path (node-path/extname path) db-content)))
 
 (defmethod handle :addVersionFile [_window [_ repo path content]]
-  (when pilot/PILOT (pilot/guard-fs! ::add-version-file path))
+  (when pilot/PILOT
+    (pilot/guard-source! ::add-version-file repo path)
+    (pilot/guard-fs! ::add-version-file-dest "write"
+                     (backup-file/get-version-file-dir repo path)))
   (backup-file/backup-file repo :version-file-dir path (node-path/extname path) content))
 
 (defmethod handle :openFileBackupDir [_window [_ repo path]]
-  (when pilot/PILOT (pilot/guard-fs! ::open-file-backup-dir path))
+  (when pilot/PILOT (pilot/guard-source! ::open-file-backup-dir repo path))
   (when (string? path)
     (let [dir (backup-file/get-backup-dir repo path)
           full-path (utils/to-native-win-path! dir)]
+      (when pilot/PILOT (pilot/guard-fs! ::open-file-backup-dir-derived "read" dir))
       (.openPath shell full-path))))
 
 (defmethod handle :openFileInFolder [_window [_ full-path]]
-  (when pilot/PILOT (pilot/guard-fs! ::open-file-in-folder full-path))
+  (when pilot/PILOT (pilot/guard-fs! ::open-file-in-folder "read" full-path))
   (when-let [full-path (utils/to-native-win-path! full-path)]
     (logger/info ::open-file-in-folder full-path)
     (.showItemInFolder shell full-path)))
 
 (defmethod handle :readFile [_window [_ path]]
-  (when pilot/PILOT (pilot/guard-fs! ::read-file path))
+  (when pilot/PILOT (pilot/guard-fs! ::read-file "read" path))
   (utils/read-file path))
 
 (defn writable?
@@ -129,12 +155,14 @@
     (cfgs/get-item :feature/enable-automatic-chmod?)))
 
 (defmethod handle :copyFile [_window [_ _repo from-path to-path]]
-  (when pilot/PILOT (pilot/guard-fs! ::copy-file from-path) (pilot/guard-fs! ::copy-file to-path))
+  (when pilot/PILOT
+    (pilot/guard-fs! ::copy-file-from "read" from-path)
+    (pilot/guard-fs! ::copy-file-to "write" to-path))
   (logger/info ::copy-file from-path to-path)
   (fs-extra/copy from-path to-path))
 
 (defmethod handle :writeFile [window [_ repo path content]]
-  (when pilot/PILOT (pilot/guard-fs! ::write-file path))
+  (when pilot/PILOT (pilot/guard-fs! ::write-file "write" path))
   (let [^js Buf (.-Buffer buffer)
         ^js content (if (instance? js/ArrayBuffer content)
                       (.from Buf content)
@@ -147,7 +175,14 @@
       (catch :default e
         (logger/warn ::write-file path e)
         (let [backup-path (try
-                            (backup-file/backup-file repo :backup-dir path (node-path/extname path) content)
+                            (do
+                              ;; The write-error fallback writes too, so it is
+                              ;; validated on the same terms as a direct backup.
+                              (when pilot/PILOT
+                                (pilot/guard-source! ::write-file-backup repo path)
+                                (pilot/guard-fs! ::write-file-backup-dest "write"
+                                                 (backup-file/get-backup-dir repo path)))
+                              (backup-file/backup-file repo :backup-dir path (node-path/extname path) content))
                             (catch :default e
                               (logger/error ::write-file "backup file failed:" e)))]
           (utils/send-to-renderer window "notification" {:type "error"
@@ -160,12 +195,14 @@
                                                                               ".")))}))))))
 
 (defmethod handle :rename [_window [_ old-path new-path]]
-  (when pilot/PILOT (pilot/guard-fs! ::rename old-path) (pilot/guard-fs! ::rename new-path))
+  (when pilot/PILOT
+    (pilot/guard-fs! ::rename-from "write" old-path)
+    (pilot/guard-fs! ::rename-to "write" new-path))
   (logger/info ::rename "from" old-path "to" new-path)
   (fs/renameSync old-path new-path))
 
 (defmethod handle :stat [_window [_ path]]
-  (when pilot/PILOT (pilot/guard-fs! ::stat path))
+  (when pilot/PILOT (pilot/guard-fs! ::stat "read" path))
   (utils/fs-stat->clj path))
 
 (defn- get-files
@@ -173,7 +210,7 @@
   [path]
   ;; Guarded here rather than only at the callers: :openDir, :getFiles and the
   ;; graph-restore path all funnel through this one enumeration.
-  (when pilot/PILOT (pilot/guard-fs! ::get-files path))
+  (when pilot/PILOT (pilot/guard-fs! ::get-files "graph-select" path))
   (->> (common-graph/get-files path)
        (map (fn [path]
               (let [stat (fs/statSync path)]
@@ -211,7 +248,7 @@
     (logger/debug ::open-dir {:path path})
     ;; A dialog result is not trusted just because a dialog produced it: a
     ;; stubbed or malicious result is refused here, before it is enumerated.
-    (when pilot/PILOT (pilot/guard-fs! ::open-dir path))
+    (when pilot/PILOT (pilot/guard-fs! ::open-dir "graph-select" path))
     (if path
       (try
         (p/resolved (bean/->js {:path path
@@ -226,7 +263,7 @@
       (p/rejected (js/Error "path empty")))))
 
 (defmethod handle :getFiles [_window [_ path]]
-  (when pilot/PILOT (pilot/guard-fs! ::get-files-ipc path))
+  (when pilot/PILOT (pilot/guard-fs! ::get-files-ipc "graph-select" path))
   (logger/debug ::get-files {:path path})
   (p/let [files (get-files path)]
     (bean/->js {:path path
@@ -283,7 +320,7 @@
 
 (defn- read-txid-info!
   [root]
-  (when pilot/PILOT (pilot/guard-fs! ::read-txid-info root))
+  (when pilot/PILOT (pilot/guard-fs! ::read-txid-info "graph-select" root))
   (try
     (let [txid-path (.join node-path root "logseq/graphs-txid.edn")]
       (when (fs/existsSync txid-path)
@@ -326,14 +363,14 @@
   ;; anything; guarding the name itself would refuse every graph.
   (when pilot/PILOT
     (when-let [dir (utils/get-graph-dir graph-name)]
-      (pilot/guard-fs! ::get-serialized-graph dir)))
+      (pilot/guard-fs! ::get-serialized-graph "graph-select" dir)))
   (get-serialized-graph graph-name))
 
 (defmethod handle :saveGraph [_window [_ graph-name value-str]]
   ;; NOTE: graph-name is a plain "local" for demo graph.
   (when pilot/PILOT
     (when-let [dir (utils/get-graph-dir graph-name)]
-      (pilot/guard-fs! ::save-graph dir)))
+      (pilot/guard-fs! ::save-graph "graph-select" dir)))
   (when (and graph-name value-str (not (= "local" graph-name)))
     (when-let [file-path (get-graph-path graph-name)]
       (fs/writeFileSync file-path value-str))))
@@ -414,7 +451,9 @@
   (open-dir-dialog))
 
 (defmethod handle :copyDirectory [^js _window [_ src dest opts]]
-  (when pilot/PILOT (pilot/guard-fs! ::copy-directory src) (pilot/guard-fs! ::copy-directory dest))
+  (when pilot/PILOT
+    (pilot/guard-fs! ::copy-directory-src "read" src)
+    (pilot/guard-fs! ::copy-directory-dest "write" dest))
   (fs-extra/copy src dest opts))
 
 (defmethod handle :getLogseqDotDirRoot []
@@ -490,7 +529,7 @@
 (defmethod handle :getAssetsFiles [^js win [_ {:keys [exts]}]]
   (when-let [graph-path (state/get-window-graph-path win)]
     (when-let [assets-path (.join node-path graph-path "assets")]
-      (when pilot/PILOT (pilot/guard-fs! ::get-assets-files assets-path))
+      (when pilot/PILOT (pilot/guard-fs! ::get-assets-files "graph-io" assets-path))
       (when (fs-extra/pathExistsSync assets-path)
         (p/let [^js files (js-utils/getAllFiles assets-path (clj->js exts))]
           files)))))
@@ -516,18 +555,18 @@
     ;; would break a graph that never touches the filesystem.
     (when pilot/PILOT
       (when-let [dir (utils/get-graph-dir graph-name)]
-        (pilot/guard-fs! ::set-current-graph dir)))
+        (pilot/guard-fs! ::set-current-graph "graph-select" dir)))
     (set-current-graph! window (utils/get-graph-dir graph-name))))
 
 (defmethod handle :runGit [_ [_ {:keys [repo command]}]]
   (when (seq command)
-    (when pilot/PILOT (pilot/guard-fs! ::run-git (utils/get-graph-dir repo)))
+    (when pilot/PILOT (pilot/guard-fs! ::run-git "graph-select" (utils/get-graph-dir repo)))
     (git/raw! (utils/get-graph-dir repo) command)))
 
 (defmethod handle :runGitWithinCurrentGraph [_ [_ {:keys [repo command]}]]
   (when (seq command)
     (when pilot/PILOT
-      (pilot/guard-fs! ::run-git-within-current-graph (utils/get-graph-dir repo)))
+      (pilot/guard-fs! ::run-git-within-current-graph "graph-select" (utils/get-graph-dir repo)))
     (git/init! (utils/get-graph-dir repo))
     (git/run-git2! (utils/get-graph-dir repo) (clj->js command))))
 
@@ -643,7 +682,7 @@
   ;;    1. there is no one window on the same dir
   ;;    2. reset file watcher to resend `add` event on window refreshing
   (when dir
-    (when pilot/PILOT (pilot/guard-fs! ::watch-dir dir))
+    (when pilot/PILOT (pilot/guard-fs! ::watch-dir "read" dir))
     (logger/debug ::watch-dir {:path dir})
     (watcher/watch-dir! dir options)
     nil))

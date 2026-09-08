@@ -80,7 +80,7 @@
              ;; G5 (pilot only). An assets:// URL comes from note content, so it
              ;; is untrusted input to the file protocol. A path outside the
              ;; permitted roots is answered as not-found rather than served.
-             (and pilot/PILOT (not (pilot/permitted-path? path)))
+             (and pilot/PILOT (not (pilot/permitted-path? path "read")))
              (do (pilot/record! :graph-boundary (str "refused assets:// " (pr-str path)))
                  (callback #js {:error -6}))
 
@@ -113,7 +113,7 @@
 
        ;; G5 (pilot only). lsp:// serves bundled resources and plugin files;
        ;; both are inside permitted roots, so anything else is refused.
-       (if (and pilot/PILOT (not (pilot/permitted-path? path')))
+       (if (and pilot/PILOT (not (pilot/permitted-path? path' "resource")))
          (do (pilot/record! :graph-boundary (str "refused lsp:// " (pr-str path')))
              (callback #js {:error -6}))
          (callback #js {:path path'})))))

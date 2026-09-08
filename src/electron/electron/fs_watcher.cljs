@@ -7,6 +7,7 @@
             ["chokidar" :as watcher]
             [electron.utils :as utils]
             [electron.logger :as logger]
+            [electron.pilot :as pilot]
             ["electron" :refer [app]]
             [electron.window :as window]
             [logseq.common.graph :as common-graph]))
@@ -144,11 +145,17 @@
   (if (:global-dir options)
     (watch-global-dir! dir options)
     (when-not (get @*file-watcher dir)
-      (if (fs/existsSync dir)
-        (create-and-save-watcher dir options)
-        ;; retry if the `dir` not exists, which is useful when a graph's folder is
-        ;; back after refreshing the window
-        (js/setTimeout #(watch-dir! dir options) 5000)))))
+      (do
+        ;; G5 (pilot only). The retry below re-enters this function five seconds
+        ;; later, after the handler's check has already happened, so a directory
+        ;; that becomes a symlink in between would otherwise be watched
+        ;; unchecked. Re-validating on every entry closes that window.
+        (when pilot/PILOT (pilot/guard-fs! ::watch-dir "read" dir))
+        (if (fs/existsSync dir)
+          (create-and-save-watcher dir options)
+          ;; retry if the `dir` not exists, which is useful when a graph's folder is
+          ;; back after refreshing the window
+          (js/setTimeout #(watch-dir! dir options) 5000))))))
 
 (defn close-watcher!
   "If no `dir` provided, close all watchers;

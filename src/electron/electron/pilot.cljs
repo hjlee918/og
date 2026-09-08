@@ -134,7 +134,7 @@
 
 (defn- read-graph-root
   "The one root Electron cannot tell us. Absent or malformed means every graph
-   path is refused; nothing falls back to a wider directory."
+   operation is refused; nothing falls back to a wider directory."
   [state-root]
   (let [cfg (when state-root (.join node-path state-root BOUNDARY-FILE))]
     (when (and cfg (.existsSync fs cfg))
@@ -154,11 +154,15 @@
         graph-root (read-graph-root state-root)]
     (when-not graph-root
       (logger/warn "[pilot]" (str "no permitted graph root is configured; "
-                                  "every graph path will be refused")))
-    {:graph-root graph-root
-     :impl (let [^js m (js/require (.join node-path js/__dirname "pilot-boundary.js"))]
-             (.boundaryFromRoots m (clj->js (remove string/blank?
-                                                   [graph-root state-root resources]))))}))
+                                  "every graph operation will be refused")))
+    (let [^js m (js/require (.join node-path js/__dirname "pilot-boundary.js"))
+          ^js impl (.boundaryFromCategories m #js {:graph     graph-root
+                                                   :state     state-root
+                                                   :resources resources})]
+      (doseq [^js d (array-seq (.dropped impl))]
+        (logger/error "[pilot] permitted root dropped, it could not be resolved"
+                      (str (.-category d) " " (.-declared d) " " (.-code d))))
+      {:graph-root graph-root :impl impl})))
 
 (defonce ^:private *boundary (atom nil))
 
@@ -167,30 +171,50 @@
   (or @*boundary (reset! *boundary (build-boundary))))
 
 (defn permitted-path?
-  [p]
+  "`policy` names what the path is being used FOR, because the categories differ:
+   `graph-select` accepts only a test-owned subfolder of the permitted graph
+   root, `write` never reaches bundled resources, and so on. Passing one merged
+   predicate for every operation is what let a state or resource path satisfy a
+   graph gate in the previous version."
+  [p policy]
   (if-not PILOT
     true
-    (.permitted ^js (:impl (boundary)) p)))
+    (.permitted ^js (:impl (boundary)) p policy)))
 
 (defn guard-fs!
-  "Refuse `p` unless it is inside a permitted root. Returns `p` when allowed and
-   throws otherwise, so a refused operation fails instead of quietly reading
-   somewhere it must not. Call sites wrap this in `(when PILOT ...)`, so nothing
-   here exists in an ordinary build."
-  [op p]
-  (if (permitted-path? p)
+  "Refuse `p` unless it is permitted for `policy`. Returns `p` when allowed and
+   throws otherwise, so a refused operation fails instead of quietly reading or
+   writing somewhere it must not. Call sites wrap this in `(when PILOT ...)`, so
+   nothing here exists in an ordinary build."
+  [op policy p]
+  (if (permitted-path? p policy)
     p
-    (let [^js verdict (.check ^js (:impl (boundary)) p)
-          detail (str (name op) " " (pr-str p)
+    (let [^js verdict (.check ^js (:impl (boundary)) p policy)
+          detail (str (name op) " [" policy "] " (pr-str p)
                       " [" (.-stage verdict) ": " (.-reason verdict) "]")]
       (record! :graph-boundary (str "refused " detail))
       (logger/warn "[pilot] refused a path outside the permitted roots" detail)
       (throw (js/Error. (str "Logseq OG F27 Pilot refused a path outside the "
                              "permitted graph-data root: " detail))))))
 
+(defn guard-source!
+  "A backup/version source as the backup code will actually interpret it: an
+   absolute input stands alone, a relative input is relative to the REPO. It is
+   deliberately never resolved against the process working directory, which
+   would widen the check to wherever the app happens to have been started."
+  [op repo relative-path]
+  (when PILOT
+    (guard-fs! op "graph-select" repo)
+    (when-not (string? relative-path)
+      (throw (js/Error. "Logseq OG F27 Pilot refused a non-string backup source")))
+    (guard-fs! op "write"
+               (if (.isAbsolute node-path relative-path)
+                 relative-path
+                 (.join node-path repo relative-path)))))
+
 (defn permitted-graphs
-  "Filter stored graph entries, dropping any whose directory lies outside the
-   permitted roots. Used where restoration enumerates what it remembers: an
+  "Filter stored graph entries, dropping any whose directory is not a permitted
+   graph selection. Used where restoration enumerates what it remembers: an
    outside graph must not come back, and one bad entry must not fail the call.
 
    `dir-fn` turns a stored entry into a directory, because the graph registry
@@ -199,9 +223,9 @@
   (if-not PILOT
     (vec entries)
     (let [{allowed true refused false}
-          (group-by #(boolean (permitted-path? (dir-fn %))) entries)]
+          (group-by #(boolean (permitted-path? (dir-fn %) "graph-select")) entries)]
       (when (seq refused)
         (record! :graph-boundary
                  (str "dropped " (count refused)
-                      " remembered graph(s) outside the permitted roots")))
+                      " remembered graph(s) that are not permitted graph selections")))
       (vec allowed))))
