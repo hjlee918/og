@@ -401,7 +401,18 @@ async function main() {
       `"${dp.status}" — more:${dp.hasMore} hide:${dp.hasHide}`);
     record('P6.5', 'it says its content was read when it was opened',
       dp.snapshot.length > 0, `"${dp.snapshot.slice(0, 90)}…"`);
-    record('P6.6', 'no level OG already shows is repeated in the panel',
+    // The defect this run found the first time it was run: `:block/content` is
+    // the raw file text, so an ancestor carrying a persisted `id::` showed
+    // 36 characters of identifier as part of its step. Every ancestor of a
+    // referable block is liable to have one, so this is not an edge case.
+    const idLeak = dp.steps.filter((s) => /id::|[0-9a-f]{8}-[0-9a-f]{4}-/.test(s.text));
+    record('P6.6', 'no step shows a block identifier: `id::` is not part of what a block says',
+      idLeak.length === 0,
+      idLeak.length ? `${idLeak.length} step(s) leak an identifier: ` +
+                      JSON.stringify(idLeak.map((s) => s.text))
+                    : `0 of ${dp.steps.length} steps mention id:: or a uuid; ` +
+                      `the fixture's outermost ancestor carries one (${U.deepTop})`);
+    record('P6.8', 'no level OG already shows is repeated in the panel',
       RG.PATHS.deepA.slice(D.deepA.hidden)
         .every((t) => !dp.steps.some((s) => s.text.includes(head(t)))),
       `panel has ${dp.steps.length}; OG's row still has ${deep.ogSteps.length}`);

@@ -6724,7 +6724,15 @@
   `n` is the level's position counted from the source page, or nil when the walk
   has not reached the page and no position can honestly be claimed."
   [e n]
-  (let [content (f27ctx/block-label e)
+  (let [;; `:block/content` is the RAW FILE TEXT, so a block carrying a
+        ;; persisted `id::` carries that line with it — and every ancestor of a
+        ;; referable block is liable to have one. The first run of the packaged
+        ;; scenario showed `L1 · 최상위 조상 — the outermost level id::
+        ;; 65f28a00-…` as a path step. Stripped through the SAME function
+        ;; `block-content` and the F27 panels use, so the step and the block
+        ;; agree on what the block says. The block on disk is untouched.
+        content (f27-display-content (or (:block/format e) :markdown)
+                                     (f27ctx/block-label e))
         {:keys [heading marker text]} (f28/step-prefix content)
         label (f27c/preview-label (or text content) f28/max-step-chars)]
     [:li.f28-path-step
