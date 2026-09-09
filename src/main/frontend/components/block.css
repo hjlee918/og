@@ -1988,6 +1988,7 @@ html.is-mac {
 
 .f28-path-step {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 0.35rem;
   padding: 0.1rem 0;
@@ -1995,6 +1996,43 @@ html.is-mac {
 }
 
 .f28-path-step + .f28-path-step { margin-left: 0.75rem; }
+
+/* A disclosed level is now a destination. The BUTTON carries the row's layout,
+   so the label, the level number and the badges keep the shape they had when
+   the step was inert — the element changed, not what it says. */
+
+.f28-path-step-open.f27-btn,
+.f28-path-step-inert {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  text-align: left;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+}
+
+.f28-path-step-open.f27-btn { cursor: pointer; }
+
+.f28-path-step-open.f27-btn:hover .f28-path-text,
+.f28-path-step-open.f27-btn:focus-visible .f28-path-text {
+  color: var(--ls-link-text-color);
+  text-decoration: underline;
+}
+
+/* Said against the step that refused, not once for the whole panel: a path of
+   identical rows would otherwise leave the reader to guess which one is gone. */
+
+.f28-path-gone {
+  flex-basis: 100%;
+  margin: 0.15rem 0 0.25rem 0;
+  opacity: 0.85;
+  font-size: 0.9em;
+}
 
 .f28-path-level {
   flex: 0 0 auto;

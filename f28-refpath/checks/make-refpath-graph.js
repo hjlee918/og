@@ -34,9 +34,14 @@
 //   depth 7   four ancestors behind the `⋯`, on two branches that share their
 //             upper levels, so a path that is merely "deep" is distinguishable
 //             from the CORRECT path;
-//   depth 4   with every ancestor carrying the SAME TEXT, so a disclosure that
-//             shows ancestors without their order or position reads as four
-//             identical rows and cannot be called a path.
+//   depth 6   with every ancestor carrying the SAME TEXT, so a disclosure that
+//             shows ancestors without their order or position reads as six
+//             identical rows and cannot be called a path. Three of the six are
+//             ELIDED by OG, so three visually identical rows are offered as
+//             three different destinations — which is the only shape in which
+//             "a step travels on its identity, never on its label" can be
+//             measured rather than asserted. Each of the six carries its own
+//             `id::` for exactly that reason.
 //
 // And the surrounding conditions the supervisor named:
 //
@@ -81,6 +86,17 @@ const UUID = {
   // a second source page
   other: '65f28a00-0000-4000-8000-0000000000d1',
   same: '65f28a00-0000-4000-8000-0000000000d2',
+
+  // The six ancestors of `same`, outermost first. They all carry EXACTLY the
+  // same text, and each carries its own identity, so "which of these identical
+  // rows did the reader open?" is a question with a checkable answer. Three of
+  // them are elided by OG and are therefore the ones the disclosure offers.
+  same1: '65f28a00-0000-4000-8000-0000000000d3',
+  same2: '65f28a00-0000-4000-8000-0000000000d4',
+  same3: '65f28a00-0000-4000-8000-0000000000d5',
+  same4: '65f28a00-0000-4000-8000-0000000000d6',
+  same5: '65f28a00-0000-4000-8000-0000000000d7',
+  same6: '65f28a00-0000-4000-8000-0000000000d8',
 
   // the journal
   journal: '65f28a00-0000-4000-8000-0000000000e1',
@@ -198,7 +214,7 @@ const DEPTH = {
   deepB:  { depth: 7, visible: 3, hidden: 4 },
   branch: { depth: 6, visible: 3, hidden: 3 },
   other:  { depth: 4, visible: 3, hidden: 1 },
-  same:   { depth: 4, visible: 3, hidden: 1 },
+  same:   { depth: 6, visible: 3, hidden: 3 },
   journal:{ depth: 4, visible: 3, hidden: 1 },
   deepest:{ depth: 14, visible: 3, hidden: 11 },
 };
@@ -216,7 +232,8 @@ const PATHS = {
   two:    [TEXT.t2a, TEXT.t2b],
   flat:   [],
   other:  [TEXT.o1, TEXT.o2, TEXT.o3, TEXT.o4],
-  same:   [TEXT.sameName, TEXT.sameName, TEXT.sameName, TEXT.sameName],
+  same:   [TEXT.sameName, TEXT.sameName, TEXT.sameName,
+           TEXT.sameName, TEXT.sameName, TEXT.sameName],
   journal:[TEXT.j1, TEXT.j2, TEXT.j3, TEXT.j4],
   deepest: DEEPEST_LEVELS,
 };
@@ -286,11 +303,19 @@ const PAGES = {
 \t\t\t\t- ${TEXT.other}
 \t\t\t\t  id:: ${UUID.other}
 - ${TEXT.sameName}
+  id:: ${UUID.same1}
 \t- ${TEXT.sameName}
+\t  id:: ${UUID.same2}
 \t\t- ${TEXT.sameName}
+\t\t  id:: ${UUID.same3}
 \t\t\t- ${TEXT.sameName}
-\t\t\t\t- ${TEXT.same}
-\t\t\t\t  id:: ${UUID.same}
+\t\t\t  id:: ${UUID.same4}
+\t\t\t\t- ${TEXT.sameName}
+\t\t\t\t  id:: ${UUID.same5}
+\t\t\t\t\t- ${TEXT.sameName}
+\t\t\t\t\t  id:: ${UUID.same6}
+\t\t\t\t\t\t- ${TEXT.same}
+\t\t\t\t\t\t  id:: ${UUID.same}
 `,
 
   [`${FILTER_TAG}.md`]: `- # ${FILTER_TAG}
@@ -364,8 +389,18 @@ function readPage(graph, rel) {
   return fs.readFileSync(p, 'utf8');
 }
 
+/**
+ * The identical-label chain, OUTERMOST FIRST.
+ *
+ * Exported so a scenario names the ancestor it means by IDENTITY. Every one of
+ * these six blocks reads exactly `같은 이름 Same Name`, so a check that matched
+ * on text could not tell them apart — which is the property the disclosure's
+ * navigation has to get right.
+ */
+const SAME_CHAIN = ['same1', 'same2', 'same3', 'same4', 'same5', 'same6'];
+
 module.exports = {
-  build, readPage, PAGES, TEXT, UUID, CONFIG, DEPTH, PATHS,
+  build, readPage, PAGES, TEXT, UUID, CONFIG, DEPTH, PATHS, SAME_CHAIN,
   DEEPEST_LEVELS, DEEPEST_PRESSES, CONTROL_FILE, ANCHOR, FILTER_TAG,
   DEEP_PAGE, OTHER_PAGE, DEEPEST_PAGE, journalName, journalBody,
 };

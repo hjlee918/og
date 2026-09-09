@@ -234,6 +234,180 @@ test('a CLOSED control performs no ancestor walk — the one cost claim that is 
     'the F28 feature must contain exactly one ancestor walk, inside the panel');
 });
 
+// --- opening a disclosed level ----------------------------------------------
+//
+// The first slice left every step inert. Now one can be opened, which is the
+// half where a wrong answer does real damage: OG's own `redirect-to-page!`
+// CREATES a page when it is handed a name that does not resolve (#3511), and a
+// path may legitimately contain several levels reading exactly the same words.
+// Each rule below is read out of the source, because each is a property of the
+// shape rather than of one rendered outcome.
+
+/** The F28 feature's own source, from its first function to OG's container. */
+function f28Source() {
+  const src = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.cljs'), 'utf8');
+  const start = src.indexOf('(defn- f28-surface');
+  const end = src.indexOf('(rum/defcs breadcrumb-with-container <');
+  assert.ok(start > 0 && end > start, 'the F28 region was renamed or removed');
+  return { all: src, region: src.slice(start, end) };
+}
+
+/** One top-level form out of the region, by its opening text. */
+function form(region, head) {
+  const at = region.indexOf(head);
+  assert.ok(at >= 0, `${head} was renamed or removed`);
+  let depth = 0;
+  for (let i = at; i < region.length; i++) {
+    if (region[i] === '(') depth += 1;
+    else if (region[i] === ')') { depth -= 1; if (depth === 0) return region.slice(at, i + 1); }
+  }
+  assert.fail(`${head} is unbalanced`);
+  return '';
+}
+
+test('a disclosed level is re-resolved by IDENTITY at the moment it is activated', () => {
+  const { region } = f28Source();
+  const open = form(region, '(fn [k e]');
+
+  // Exactly one lookup, and it is a lookup ref on `:block/uuid`. Two call sites
+  // would mean two chances for one of them to resolve by something else.
+  assert.strictEqual((region.match(/db\/entity/g) || []).length, 1,
+    'the feature must contain exactly one entity lookup');
+  assert.match(open, /db\/entity repo \[:block\/uuid captured\]/,
+    'the destination must be re-resolved by the identity the step carries');
+  assert.match(open, /f28\/step-identity e/,
+    'the identity must come from the step, through the pure accessor');
+  assert.match(open, /f28\/navigation captured lookup/,
+    'the decision must be the pure one, not an inline cond');
+
+  // The lookup happens INSIDE the activation, not once when the panel rendered.
+  assert.ok(!/db\/entity/.test(form(region, '(rum/defc f28-source-path-panel')),
+    'the panel must not resolve destinations while rendering');
+});
+
+test('nothing about a destination is decided from what a level SAYS', () => {
+  const { region } = f28Source();
+  const open = form(region, '(fn [k e]');
+  for (const forbidden of ['block/content', 'block-label', 'preview-label',
+                           'f27-display-content', 'step-prefix', 'block/name',
+                           'block/original-name', 'label']) {
+    assert.ok(!open.includes(forbidden),
+      `the activation reads ${forbidden}; a destination must come from identity alone`);
+  }
+});
+
+test('a refusal navigates nowhere, and creates nothing', () => {
+  const { region } = f28Source();
+  const open = form(region, '(fn [k e]');
+
+  // One navigation, in the branch that has a proved destination.
+  assert.strictEqual((region.match(/route-handler\/redirect-to-page!/g) || []).length, 1,
+    'the feature must navigate from exactly one place');
+  assert.match(open, /if-let \[target \(f28\/opened decision\)\]/,
+    'navigation must be guarded by the pure decision');
+  assert.match(open, /route-handler\/redirect-to-page! target/,
+    'the destination must be the identity the decision proved, never a name');
+  assert.match(open, /reset! \*refusal \{:key k :reason \(f28\/refused decision\)\}/,
+    'a refusal must be recorded against the step that refused');
+
+  // Nothing in this feature may write, create or transact — the same boundary
+  // the first slice declared, now that a control can act.
+  for (const forbidden of ['page-handler', 'editor-handler', 'outliner',
+                           'transact!', 'save-block', 'create!', 'set-block-property']) {
+    assert.ok(!region.includes(forbidden),
+      `the F28 feature must not reach ${forbidden}`);
+  }
+});
+
+test('a level with no stable identity is not offered as a destination at all', () => {
+  const { region } = f28Source();
+  const panel = form(region, '(rum/defc f28-source-path-panel');
+  assert.match(panel, /\(when \(f28\/navigable-step\? e\)/,
+    'the control must exist only where an identity does');
+  const step = form(region, '(rum/defc f28-path-step');
+  assert.match(step, /\(if on-open/, 'the step must fall back to a plain label');
+  assert.match(step, /f28-path-step-inert/, 'the inert form must still exist');
+});
+
+test('collapsing from inside the path returns focus to THAT group\'s own control', () => {
+  const { region } = f28Source();
+  const wrapper = form(region, '(rum/defcs f28-source-path <');
+  assert.match(wrapper, /toggle-id \(str panel-id "-toggle"\)/,
+    "the control's id must be derived from this group's own panel id");
+  assert.match(wrapper, /:on-hide \(fn \[\][\s\S]{0,120}?focus-toggle!\)/,
+    'hiding from inside the panel must return focus to the control');
+  assert.match(wrapper, /gdom\/getElement toggle-id/,
+    'focus must be returned by id, so it can only reach this group');
+  // Two panels open at once must not share state: both atoms are this
+  // component's own locals, and the refusal travels down as a value.
+  assert.match(wrapper, /\(rum\/local nil ::press\) \(rum\/local nil ::refusal\)/,
+    'both pieces of per-group state must be component locals');
+});
+
+test('opening and continuing a path clear a refusal the reader has moved past', () => {
+  const { region } = f28Source();
+  const wrapper = form(region, '(rum/defcs f28-source-path <');
+  for (const re of [/:on-more \(fn \[n\] \(reset! \*refusal nil\)/,
+                    /:on-hide \(fn \[\] \(reset! \*refusal nil\)/,
+                    /f27-btn #\(do \(reset! \*refusal nil\)/]) {
+    assert.match(wrapper, re, `a stale refusal survives: ${re}`);
+  }
+});
+
+test('every refusal reason has a sentence in both languages', () => {
+  const pure = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'util', 'f28_refpath.cljs'), 'utf8');
+  const listed = form(pure, '(def navigation-refusals');
+  const reasons = (listed.match(/:[a-z-]+\]/) ? listed : listed)
+    .slice(listed.lastIndexOf('['), listed.lastIndexOf(']') + 1)
+    .replace(/[[\]]/g, '').trim().split(/\s+/);
+  assert.deepStrictEqual(reasons.slice().sort(),
+    [':missing', ':mismatch', ':no-identity', ':page', ':unreadable'].sort());
+
+  const { region } = f28Source();
+  const step = form(region, '(rum/defc f28-path-step');
+  // Four sentences: `:no-identity` and `:page` share the one that says the step
+  // cannot be opened at all, and neither can be reached from a rendered
+  // control — the step is not drawn as one.
+  for (const key of [':f28/path-step-gone', ':f28/path-step-unreadable',
+                     ':f28/path-step-changed', ':f28/path-step-not-openable']) {
+    assert.ok(step.includes(key), `the panel never says ${key}`);
+  }
+  for (const dict of ['en.edn', 'ko.edn']) {
+    const body = fs.readFileSync(path.join(REPO, 'src', 'resources', 'dicts', dict), 'utf8');
+    for (const key of [':f28/path-open-step', ':f28/path-step-gone',
+                       ':f28/path-step-unreadable', ':f28/path-step-changed',
+                       ':f28/path-step-not-openable']) {
+      assert.ok(body.includes(key), `${dict} has no ${key}`);
+    }
+  }
+});
+
+/** One form with its prose removed, so a docstring naming a function is not
+ *  mistaken for a call to it. */
+function code(text) {
+  return text.replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/;;[^\n]*/g, '');
+}
+
+test('making a level actionable introduces no renderer, no fetch and no macro', () => {
+  // Limit L1: a step is plain text. The element changed; what it says did not.
+  const { region } = f28Source();
+  const step = code(form(region, '(rum/defc f28-path-step'));
+  for (const forbidden of ['inline-text', 'map-inline', 'markup-elements-cp',
+                           'block-content', 'f27-body-text', '->elem',
+                           'dangerouslySetInnerHTML', 'fetch', ':href', 'asset-link',
+                           'macro', 'iframe', ':img']) {
+    assert.ok(!step.includes(forbidden),
+      `a path step reaches ${forbidden}; it must stay a plain bounded label`);
+  }
+  assert.match(step, /f27c\/preview-label/, 'the same bounded label must still be used');
+  // The only elements it may build.
+  const tags = [...step.matchAll(/\[:([a-z]+)[.\s\]]/g)].map((m) => m[1]);
+  assert.deepStrictEqual([...new Set(tags)].sort(), ['button', 'div', 'li', 'span'],
+    `a path step builds ${[...new Set(tags)].join(', ')}`);
+});
+
 test('the panel does not claim a snapshot it does not take', () => {
   // The corrected sentence must not promise that closing and reopening is the
   // only way the content changes, because the walk is in the render body.

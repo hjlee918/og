@@ -167,8 +167,37 @@ test('two branches SHARE their upper levels and differ only near the reference',
 test('one path has ancestors that all carry the SAME text', () => {
   const p = gen.PATHS.same;
   assert.strictEqual(new Set(p).size, 1, 'they must be identical');
-  assert.strictEqual(p.length, 4);
+  assert.strictEqual(p.length, gen.SAME_CHAIN.length);
   assert.ok(p[0].trim().length > 0);
+});
+
+test('the identical ancestors run PAST the limit, and each has its own identity', () => {
+  // A chain of four left only ONE identical row disclosed, which cannot show
+  // that a step travels on its identity rather than on its label: one row is
+  // never ambiguous. Six leaves three identical rows in the panel, so choosing
+  // the wrong one is a mistake the run can actually catch.
+  const want = gen.DEPTH.same;
+  assert.strictEqual(gen.SAME_CHAIN.length, want.depth);
+  assert.ok(want.hidden >= 3,
+    `only ${want.hidden} identical row(s) are disclosed; at least three are needed`);
+
+  const ids = gen.SAME_CHAIN.map((k) => {
+    const u = gen.UUID[k];
+    assert.ok(u, `${k} has no identity`);
+    return u;
+  });
+  assert.strictEqual(new Set(ids).size, ids.length, 'the identical rows share an identity');
+
+  // Written outermost-first, one level apart, all reading the same words.
+  gen.SAME_CHAIN.forEach((k, i) => {
+    const b = byId(gen.UUID[k]);
+    assert.ok(b, `${k} is declared but nothing carries it`);
+    assert.strictEqual(b.depth, i, `${k} is written at depth ${b.depth}, expected ${i}`);
+    assert.strictEqual(b.text, gen.TEXT.sameName, `${k} does not carry the shared text`);
+  });
+
+  // And the reference itself hangs off the innermost of them.
+  assert.strictEqual(byId(gen.UUID.same).depth, gen.SAME_CHAIN.length);
 });
 
 test('the sources are four different pages, one of them a journal', () => {

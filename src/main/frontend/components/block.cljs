@@ -6711,7 +6711,7 @@
        (string/replace (str (:id config) "-" block-id) #"[^A-Za-z0-9_-]" "_")))
 
 (rum/defc f28-path-step
-  "One disclosed ancestor, as PLAIN TEXT.
+  "One disclosed ancestor: PLAIN TEXT, and — new in this batch — a way to go there.
 
   Deliberately NOT rendered through OG's inline renderer. A source path answers
   where a reference sits, and rendering ancestor content on a new surface is
@@ -6721,9 +6721,18 @@
   reference markup reduced to what a person reads first, and a heading level or
   task marker shown as structure instead of echoed as `##` or `TODO`.
 
+  MAKING IT ACTIONABLE CHANGES THE ELEMENT, NOT THE LABEL. The same characters
+  the inert step showed are wrapped in a native `<button>`; nothing is parsed
+  again, no macro runs, no reference is followed and no file is requested. If
+  this ever grows a renderer, the L1 boundary this feature was built around is
+  gone, so the packaged run keeps measuring a panel with no image, no media, no
+  macro container, no reference element and no anchor in it.
+
   `n` is the level's position counted from the source page, or nil when the walk
-  has not reached the page and no position can honestly be claimed."
-  [e n]
+  has not reached the page and no position can honestly be claimed. `on-open` is
+  nil for a step with no stable identity, which is then drawn exactly as it was
+  before: a label, not a control that would refuse when it was pressed."
+  [e n on-open refusal]
   (let [;; `:block/content` is the RAW FILE TEXT, so a block carrying a
         ;; persisted `id::` carries that line with it — and every ancestor of a
         ;; referable block is liable to have one. The first run of the packaged
@@ -6734,14 +6743,32 @@
         content (f27-display-content (or (:block/format e) :markdown)
                                      (f27ctx/block-label e))
         {:keys [heading marker text]} (f28/step-prefix content)
-        label (f27c/preview-label (or text content) f28/max-step-chars)]
+        label (f27c/preview-label (or text content) f28/max-step-chars)
+        said (if (string/blank? label) (t :f28/path-step-empty) label)
+        body [(when n [:span.f28-path-level {:aria-hidden "true"} (str n ".")])
+              (when heading [:span.f28-path-badge (str "H" heading)])
+              (when marker [:span.f28-path-badge marker])
+              (if (string/blank? label)
+                [:span.f28-path-text.f28-path-empty said]
+                [:span.f28-path-text label])]]
     [:li.f28-path-step
-     (when n [:span.f28-path-level {:aria-hidden "true"} (str n ".")])
-     (when heading [:span.f28-path-badge (str "H" heading)])
-     (when marker [:span.f28-path-badge marker])
-     (if (string/blank? label)
-       [:span.f28-path-text.f28-path-empty (t :f28/path-step-empty)]
-       [:span.f28-path-text label])]))
+     (if on-open
+       (into [:button.f28-path-step-open.f27-btn
+              (f27-btn on-open {:aria-label (t :f28/path-open-step said)
+                                :title (t :f28/path-open-step said)})]
+             body)
+       (into [:span.f28-path-step-inert] body))
+     ;; The refusal is shown HERE, against the step that refused, rather than as
+     ;; one line for the whole panel: a path of four identical rows would
+     ;; otherwise say "one of these is gone" and leave the reader to guess which.
+     (when refusal
+       [:div.f28-path-gone
+        [:span.f28-path-mark "⚠"] " "
+        (cond
+          (= refusal :missing) (t :f28/path-step-gone)
+          (= refusal :unreadable) (t :f28/path-step-unreadable)
+          (= refusal :mismatch) (t :f28/path-step-changed)
+          :else (t :f28/path-step-not-openable))])]))
 
 (rum/defc f28-source-path-panel
   "The part of one reference's ancestor path that OG's breadcrumb did not show.
@@ -6765,9 +6792,14 @@
   the other half: a CLOSED control renders no panel at all (`f28-source-path`
   guards this call with `when press`), so it performs no walk, no query and no
   probe. The walk is bounded either way — at most `request-limit` single-step
-  parent lookups, capped at `f27-context/hard-cap`."
-  [repo uuid panel-id press *press]
-  (let [loaded (f27ctx/load-ancestors (f27-parent-fn repo) uuid (f28/request-limit press))
+  parent lookups, capped at `f27-context/hard-cap`.
+
+  `actions` carries this GROUP's own callbacks and its own refusal, so two
+  panels open at once cannot reach into each other: the atoms they read and
+  write belong to their own `f28-source-path` instance."
+  [repo uuid panel-id press actions]
+  (let [{:keys [on-more on-hide on-open-step refusal]} actions
+        loaded (f27ctx/load-ancestors (f27-parent-fn repo) uuid (f28/request-limit press))
         {:keys [steps page hidden depth status complete?]}
         (f28/disclosure loaded f28/og-visible-levels)
         more-press (f28/next-press press loaded)]
@@ -6783,8 +6815,19 @@
                              (t :f28/path-nothing-hidden))]
        [:ol.f28-path-steps
         (map-indexed (fn [i e]
-                       (rum/with-key (f28-path-step e (when complete? (inc i)))
-                         (f28/step-key i e)))
+                       (let [k (f28/step-key i e)]
+                         (rum/with-key
+                           (f28-path-step e (when complete? (inc i))
+                                          ;; A step with no stable identity is
+                                          ;; not offered at all — deciding that
+                                          ;; while rendering is what keeps a
+                                          ;; control from existing only to say
+                                          ;; no.
+                                          (when (f28/navigable-step? e)
+                                            #(on-open-step k e))
+                                          (when (= k (:key refusal))
+                                            (:reason refusal)))
+                           k)))
                      steps)])
      ;; `cond`, not `case`: the outgoing batch found that a `case` clause whose
      ;; result is a literal `nil` is compiled away inside a hiccup body, taking
@@ -6809,16 +6852,16 @@
      [:div.f28-path-actions
       (when more-press
         [:button.f28-path-more.f27-btn
-         (f27-btn #(reset! *press more-press) {:aria-label (t :f28/path-more)})
+         (f27-btn #(on-more more-press) {:aria-label (t :f28/path-more)})
          (t :f28/path-more)])
       [:button.f28-path-hide.f27-btn
-       (f27-btn #(reset! *press nil) {:aria-label (t :f28/path-hide)
-                                      :aria-controls panel-id})
+       (f27-btn on-hide {:aria-label (t :f28/path-hide)
+                         :aria-controls panel-id})
        (t :f28/path-hide)]]
      (when (and (pos? depth) (not complete?))
        [:div.f28-path-note.f28-path-incomplete (t :f28/path-not-complete)])]))
 
-(rum/defcs f28-source-path < (rum/local nil ::press)
+(rum/defcs f28-source-path < (rum/local nil ::press) (rum/local nil ::refusal)
   "OG's breadcrumb for one linked-reference group, plus the source-path
   disclosure attached to the point where OG cut the path.
 
@@ -6830,15 +6873,66 @@
   Not `rum/static`: OG's breadcrumb is a plain function called from here, so
   this component must re-render whenever `breadcrumb-with-container` does, or
   the crumb would stop following the database — a regression in OG's own
-  behaviour rather than a limit of this feature."
+  behaviour rather than a limit of this feature.
+
+  BOTH atoms belong to THIS group. `::press` is how far up this path has been
+  read, and `::refusal` is the one step that was pressed and could not be
+  opened. Nothing is shared between groups and nothing is remembered across
+  navigation, which is what makes two open panels independent without either of
+  them knowing the other exists."
   [state config repo block-id opts]
   (let [*press (::press state)
+        *refusal (::refusal state)
         press @*press
         panel-id (f28-panel-id config block-id)
+        toggle-id (str panel-id "-toggle")
+        ;; The control keeps its place inside the breadcrumb row whether the
+        ;; panel is open or closed, so this returns focus to THIS group's own
+        ;; control — never to another group's, because the id is derived from
+        ;; the list and the block this breadcrumb is drawn for.
+        ;;
+        ;; Focused twice on purpose. Rum re-renders after this handler returns,
+        ;; and if React replaces the control's DOM node the synchronous focus
+        ;; went with it; the deferred pass re-asserts it once the re-render has
+        ;; happened, and does nothing when focus already arrived.
+        focus-toggle! (fn []
+                        (some-> (gdom/getElement toggle-id) (.focus))
+                        (js/setTimeout
+                         (fn []
+                           (when-let [el (gdom/getElement toggle-id)]
+                             (when-not (identical? el (.-activeElement js/document))
+                               (.focus el))))
+                         0))
+        ;; RE-RESOLVE, THEN DECIDE. The steps on screen were read when this
+        ;; panel last rendered; the destination is looked up again here, by
+        ;; identity, at the moment the reader asks for it. Anything other than
+        ;; "this exact block is there now" refuses and says why — it never
+        ;; creates a block or a page, never falls back to the source page, and
+        ;; never looks for a block that merely reads the same.
+        open-step! (fn [k e]
+                     (let [captured (f28/step-identity e)
+                           lookup (try
+                                    {:found (when captured
+                                              (db/entity repo [:block/uuid captured]))}
+                                    ;; A lookup that could not be performed is
+                                    ;; NOT the same fact as a block that is
+                                    ;; gone, and is not reported as one.
+                                    (catch :default _ {:error true}))
+                           decision (f28/navigation captured lookup)]
+                       (if-let [target (f28/opened decision)]
+                         (do (reset! *refusal nil)
+                             ;; OG's own navigation, by identity. The uuid comes
+                             ;; from the entity the lookup above proved, so this
+                             ;; can never be handed a name that does not resolve
+                             ;; — which is the case in which OG's own
+                             ;; `redirect-to-page!` creates a page (#3511).
+                             (route-handler/redirect-to-page! target))
+                         (reset! *refusal {:key k :reason (f28/refused decision)}))))
         control (fn []
                   [:button.f28-path-toggle.f27-btn
-                   (f27-btn #(swap! *press (fn [p] (when-not p 1)))
-                            {:id (str panel-id "-toggle")
+                   (f27-btn #(do (reset! *refusal nil)
+                                 (swap! *press (fn [p] (when-not p 1))))
+                            {:id toggle-id
                              :aria-expanded (if press "true" "false")
                              :aria-controls panel-id
                              :aria-label (if press (t :f28/path-hide) (t :f28/path-show))
@@ -6848,7 +6942,16 @@
     [:div.f28-path
      (breadcrumb (assoc config :f28/more-control control) repo block-id opts)
      (when press
-       (f28-source-path-panel repo block-id panel-id press *press))]))
+       (f28-source-path-panel
+        repo block-id panel-id press
+        {:on-more (fn [n] (reset! *refusal nil) (reset! *press n))
+         ;; Collapsing from INSIDE the path returns focus to the control that
+         ;; opened it. Without this the reader's focus is on a button that has
+         ;; just been removed from the document, and the next Tab starts from
+         ;; the top of the page.
+         :on-hide (fn [] (reset! *refusal nil) (reset! *press nil) (focus-toggle!))
+         :on-open-step open-step!
+         :refusal @*refusal}))]))
 
 (rum/defcs breadcrumb-with-container < rum/reactive db-mixins/query
   {:init (fn [state]

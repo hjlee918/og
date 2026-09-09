@@ -249,3 +249,111 @@
   and a key made from text alone would collapse them into one row."
   [idx e]
   (str idx "-" (or (:block/uuid e) (:db/id e) "?")))
+
+;; ---------------------------------------------------------------------------
+;; Where a disclosed step goes
+;;
+;; The first slice deliberately left every disclosed step INERT (limit L5): the
+;; reader could see where a reference sat and could not go there. This is the
+;; other half, and it is the half where guessing would do real damage — so the
+;; decision is pure, and it is made from IDENTITY alone.
+;;
+;; Three rules, each its own falsifiable test:
+;;
+;;   * a step travels on its `:block/uuid` and on nothing else. Not its text,
+;;     not its position in the panel, not the page it was read from. A path may
+;;     legitimately contain several levels reading exactly the same words — the
+;;     fixture's `같은 이름 Same Name` chain is precisely that — so a
+;;     destination found by label would be a coin toss between them;
+;;
+;;   * the identity is RE-RESOLVED at the moment of activation, and the answer
+;;     that decides is the fresh one. The panel's steps were read when the panel
+;;     last rendered, which may be some time ago and is not kept current by
+;;     anything (L4);
+;;
+;;   * anything other than "this exact block is there now" REFUSES. It does not
+;;     fall back to the page, to a parent, to a block with the same text, or to
+;;     creating what is missing. `route-handler/redirect-to-page!` creates a
+;;     page when it is handed a name that does not resolve — which is why a name
+;;     is never what this hands it.
+;; ---------------------------------------------------------------------------
+
+(defn step-identity
+  "The stable identity one disclosed step travels on, or nil when it has none.
+
+  `:block/uuid` and nothing else. `:db/id` is a datascript-internal number that
+  does not survive a re-index and means nothing outside the current database
+  value, so a step carrying only that one is not offered as a destination at
+  all rather than being sent somewhere plausible."
+  [e]
+  (:block/uuid e))
+
+(defn navigable-step?
+  "True when this step can be offered as a destination.
+
+  Asked while RENDERING, so a step with no stable identity is drawn as the
+  plain label it always was instead of as a control that would refuse when it
+  was pressed."
+  [e]
+  (some? (step-identity e)))
+
+(def navigation-refusals
+  "Every reason activating a step does NOT navigate, in the order checked.
+
+  Data rather than a bare `false`, for the same reason `exclusion-reasons` is:
+  each one is a separate test, and each one gets its own sentence on screen. A
+  refusal that cannot say why it refused is indistinguishable from a control
+  that is simply broken."
+  [:no-identity :unreadable :missing :mismatch :page])
+
+(defn navigation
+  "What activating one disclosed step must do.
+
+  `captured` is the identity the step was rendered with. `lookup` is what the
+  caller got when it re-resolved THAT identity just now — the caller performs
+  it, because only the caller may touch a database:
+
+    {:found entity-or-nil}   the lookup answered; nil means nothing is there
+    {:error true}            the lookup could not be performed at all
+
+  Answers:
+
+    {:action :open  :uuid …}      go to this block, by identity
+    {:action :refuse :reason …}   say so, and do nothing else
+
+  `:unreadable` and `:missing` are kept apart on purpose, the same way
+  `load-ancestors` keeps a failed lookup apart from reaching the top: 'this
+  block is gone' and 'this could not be checked' are different facts about the
+  reader's notes, and a refusal that merges them tells them something that may
+  not be true.
+
+  `:mismatch` cannot arise from a lookup by `:block/uuid` alone and is kept
+  anyway: it is the difference between 'the caller proved the destination' and
+  'the caller looked something up', so a future caller resolving by another
+  route is refused here rather than trusted.
+
+  `:page` is the same kind of guard. `disclosure` separates the source page out
+  of the steps, so a page cannot reach this; if one ever does, the honest answer
+  is that this control does not know where it would be sending the reader."
+  [captured lookup]
+  (let [fresh (:found lookup)]
+    (cond
+      (nil? captured)                     {:action :refuse :reason :no-identity}
+      (:error lookup)                     {:action :refuse :reason :unreadable}
+      (nil? fresh)                        {:action :refuse :reason :missing}
+      (not= captured (:block/uuid fresh)) {:action :refuse :reason :mismatch}
+      (f27c/page-entity? fresh)           {:action :refuse :reason :page}
+      :else                               {:action :open :uuid (:block/uuid fresh)})))
+
+(defn opened
+  "The identity `navigation` decided to open, or nil when it refused.
+
+  Named so a caller cannot navigate by reading `:uuid` off a refusal that never
+  set one."
+  [decision]
+  (when (= :open (:action decision)) (:uuid decision)))
+
+(defn refused
+  "The reason `navigation` refused, or nil when it did not."
+  [decision]
+  (when (= :refuse (:action decision)) (:reason decision)))

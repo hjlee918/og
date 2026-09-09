@@ -205,12 +205,23 @@ async function main() {
               role: panel.getAttribute('role'),
               label: panel.getAttribute('aria-label') || '',
               pageLine: clean((panel.querySelector('.f28-path-page') || {}).innerText),
-              steps: [...panel.querySelectorAll('.f28-path-step')].map((li) => ({
-                level: clean((li.querySelector('.f28-path-level') || {}).innerText),
-                badges: [...li.querySelectorAll('.f28-path-badge')]
-                  .map((b) => clean(b.innerText)),
-                text: clean((li.querySelector('.f28-path-text') || {}).innerText),
-              })),
+              steps: [...panel.querySelectorAll('.f28-path-step')].map((li) => {
+                const open = li.querySelector('.f28-path-step-open');
+                return {
+                  level: clean((li.querySelector('.f28-path-level') || {}).innerText),
+                  badges: [...li.querySelectorAll('.f28-path-badge')]
+                    .map((b) => clean(b.innerText)),
+                  text: clean((li.querySelector('.f28-path-text') || {}).innerText),
+                  // The step as a DESTINATION: is it a real button, does it take
+                  // focus, and is it saying it could not be opened?
+                  open: open ? {
+                    tag: open.tagName, type: open.getAttribute('type'),
+                    label: open.getAttribute('aria-label') || '',
+                    focusable: open.tabIndex >= 0,
+                  } : null,
+                  gone: clean((li.querySelector('.f28-path-gone') || {}).innerText),
+                };
+              }),
               status: clean((panel.querySelector('.f28-path-status') || {}).innerText),
               snapshot: clean((panel.querySelector('.f28-path-snapshot') || {}).innerText),
               incomplete: clean((panel.querySelector('.f28-path-incomplete') || {}).innerText),
@@ -256,20 +267,73 @@ async function main() {
       return null;
     };
 
-    /** Press one group's toggle, by the identity of a block inside it. */
-    const pressToggle = async (key, how) => {
-      const id = await page.evaluate((uuid) => {
+    /** The DOM id of one group's disclosure control, by a block inside it. */
+    const toggleIdOf = (key) => page.evaluate((uuid) => {
+      for (const bc of document.querySelectorAll(
+        '.references.page-linked .blocks-container')) {
+        const ids = [...bc.querySelectorAll('[blockid]')]
+          .map((b) => b.getAttribute('blockid'));
+        if (!ids.includes(uuid)) continue;
+        const holder = bc.parentElement;
+        const t = holder && holder.querySelector('.f28-path-toggle');
+        return t ? t.id : null;
+      }
+      return null;
+    }, U[key]).catch(() => null);
+
+    /** Whatever currently has focus, named the way a reader would name it. */
+    const focusNow = () => page.evaluate(() => {
+      const a = document.activeElement;
+      if (!a || a === document.body) return { id: null, tag: 'BODY' };
+      return { id: a.id || null, tag: a.tagName,
+               cls: a.getAttribute('class') || '',
+               label: a.getAttribute('aria-label') || '' };
+    }).catch(() => null);
+
+    const hashNow = () => page.evaluate(() => location.hash).catch(() => null);
+
+    /** Move focus somewhere neutral, so a focus check cannot pass by accident. */
+    const blurAll = () => page.evaluate(() => {
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      document.body.focus && document.body.focus();
+    }).catch(() => null);
+
+    /**
+     * Activate one DISCLOSED level of one group's open panel, by its position.
+     *
+     * Position, not text: the identical-label chain has three rows reading
+     * exactly the same words, which is the case this exists to exercise.
+     */
+    const pressStep = async (key, idx, how) => {
+      const ok = await page.evaluate(([uuid, i, mode]) => {
         for (const bc of document.querySelectorAll(
           '.references.page-linked .blocks-container')) {
           const ids = [...bc.querySelectorAll('[blockid]')]
             .map((b) => b.getAttribute('blockid'));
           if (!ids.includes(uuid)) continue;
           const holder = bc.parentElement;
-          const t = holder && holder.querySelector('.f28-path-toggle');
-          return t ? t.id : null;
+          const btns = holder
+            ? [...holder.querySelectorAll('.f28-path-panel .f28-path-step-open')] : [];
+          if (!btns[i]) return false;
+          if (mode === 'click') btns[i].click(); else btns[i].focus();
+          return true;
         }
-        return null;
-      }, U[key]).catch(() => null);
+        return false;
+      }, [U[key], idx, how]).catch(() => false);
+      if (ok && how === 'focus') await page.keyboard.press('Enter');
+      await sleep(2800);
+      return ok;
+    };
+
+    /** OG's own history, the way a reader leaves a place they went to. */
+    const goBack = async () => {
+      await page.evaluate(() => window.history.back()).catch(() => null);
+      await sleep(3500);
+    };
+
+    /** Press one group's toggle, by the identity of a block inside it. */
+    const pressToggle = async (key, how) => {
+      const id = await toggleIdOf(key);
       if (!id) return null;
       if (how === 'keyboard-enter' || how === 'keyboard-space') {
         await page.evaluate((i) => document.getElementById(i).focus(), id);
@@ -425,9 +489,14 @@ async function main() {
     refs = await readRefs();
     const samePanel = ((groupOf(refs, 'same') || {}).group || {}).panel;
     record('P6.7', 'a path whose ancestors share one text is numbered and ordered',
-      !!samePanel && samePanel.steps.length === 1 && samePanel.steps[0].level === '1.' &&
-        samePanel.steps[0].text.includes(head(T.sameName)),
-      samePanel ? JSON.stringify(samePanel.steps) : 'no panel');
+      !!samePanel && samePanel.steps.length === D.same.hidden &&
+        samePanel.steps.map((s) => s.level).join(',') ===
+          Array.from({ length: D.same.hidden }, (_, i) => `${i + 1}.`).join(',') &&
+        samePanel.steps.every((s) => s.text.includes(head(T.sameName))) &&
+        new Set(samePanel.steps.map((s) => s.text)).size === 1,
+      samePanel ? `${samePanel.steps.length} identical row(s), levels ` +
+                  JSON.stringify(samePanel.steps.map((s) => s.level))
+                : 'no panel');
 
     // ---------- P7 : two panels, independent ----------
     say('\nP7  two panels at once, each its own');
@@ -597,8 +666,185 @@ async function main() {
       !!textOk && textOk.hangul && textOk.emoji && !textOk.mojibake,
       JSON.stringify(textOk));
 
-    // ---------- P11 : the right sidebar, a NAMED exclusion ----------
-    say('\nP11 the same list in the right sidebar gets nothing at all');
+    // ---------- P11 : collapsing a path, and where focus goes ----------
+    say('\nP11 collapsing from inside a path returns focus to its own control');
+    phase('focus', 'collapse-one-of-two-open-paths');
+
+    // Two paths open at once, in two different groups on two different pages.
+    // `deepA` is already open from P10.
+    await pressToggle('same', 'click');
+    refs = await readRefs();
+    const deepToggleId = await toggleIdOf('deepA');
+    const sameToggleId = await toggleIdOf('same');
+    record('P11.1', 'two paths are open, in two groups, each with its own control',
+      refs.panels === 2 && !!deepToggleId && !!sameToggleId &&
+        deepToggleId !== sameToggleId,
+      `controls ${deepToggleId} and ${sameToggleId}; ${refs.panels} panel(s) open`);
+
+    // Focus is parked away from both, so "focus returned" cannot pass by
+    // never having moved.
+    await blurAll();
+    const before = await focusNow();
+    record('P11.2', 'focus is parked away from both controls before collapsing',
+      !!before && before.id !== sameToggleId && before.id !== deepToggleId,
+      JSON.stringify(before));
+
+    await pressInPanel('same', '.f28-path-hide');
+    const after = await focusNow();
+    refs = await readRefs();
+    record('P11.3', "collapsing from inside the path returns focus to THAT path's control",
+      !!after && after.id === sameToggleId,
+      `focus is ${JSON.stringify(after)}; this group's control is ${sameToggleId}`);
+    record('P11.4', 'and the other group is untouched: still open, and not focused',
+      refs.panels === 1 && !!(groupOf(refs, 'deepA') || {}).group.panel &&
+        (!after || after.id !== deepToggleId),
+      `${refs.panels} panel(s); deep still open: ` +
+      `${!!(groupOf(refs, 'deepA') || {}).group.panel}`);
+    record('P11.5', "the collapsed group is back to OG's own row, and says it is closed",
+      (() => { const g = (groupOf(refs, 'same') || {}).group;
+               return !!g && !g.panel && g.ogSteps.length === D.same.visible &&
+                      g.toggle && g.toggle.expanded === 'false'; })(),
+      (() => { const g = (groupOf(refs, 'same') || {}).group;
+               return g ? `${g.ogSteps.length} OG step(s), expanded=` +
+                          `${g.toggle && g.toggle.expanded}, panel: ${!!g.panel}`
+                        : 'not found'; })());
+
+    // ---------- P12 : opening a level of the path ----------
+    say('\nP12 a disclosed level opens the block it names');
+    phase('navigate', 'read-the-disclosed-levels-as-destinations');
+
+    refs = await readRefs();
+    const deepPanel = ((groupOf(refs, 'deepA') || {}).group || {}).panel;
+    record('P12.1', 'every disclosed level is a real button, focusable and labelled',
+      !!deepPanel && deepPanel.steps.length > 0 &&
+        deepPanel.steps.every((st) => st.open && st.open.tag === 'BUTTON' &&
+                                      st.open.type === 'button' &&
+                                      st.open.focusable === true &&
+                                      st.open.label.length > 0),
+      deepPanel ? JSON.stringify(deepPanel.steps.map((st) => st.open)) : 'no panel');
+    record('P12.2', 'making it actionable added no renderer: still no image, media, macro, ' +
+      'reference element or anchor in the panel',
+      !!deepPanel && deepPanel.images === 0 && deepPanel.iframes === 0 &&
+        deepPanel.macros === 0 && deepPanel.refs === 0 && deepPanel.anchors === 0,
+      deepPanel ? `${deepPanel.images} img, ${deepPanel.iframes} media, ` +
+                  `${deepPanel.macros} macro, ${deepPanel.refs} ref, ` +
+                  `${deepPanel.anchors} anchor, ${deepPanel.buttons} button(s)`
+                : 'no panel');
+    record('P12.3', 'no level says it could not be opened before anything was pressed',
+      !!deepPanel && deepPanel.steps.every((st) => st.gone === ''),
+      deepPanel ? JSON.stringify(deepPanel.steps.map((st) => st.gone)) : 'no panel');
+
+    // The OUTERMOST level of the seven-deep path is `deepTop`, an identity the
+    // fixture declares. Clicking it must land on that block and nothing else.
+    phase('navigate', 'click-the-outermost-disclosed-level');
+    const fromHash = await hashNow();
+    const clicked = await pressStep('deepA', 0, 'click');
+    let nowHash = await hashNow();
+    observations.navigation = { fromHash, afterClick: nowHash, want: U.deepTop };
+    record('P12.4', 'clicking the outermost disclosed level opens THAT block, by identity',
+      clicked === true && typeof nowHash === 'string' &&
+        nowHash.toLowerCase().includes(U.deepTop),
+      `${fromHash} → ${nowHash} (wanted the block ${U.deepTop})`);
+
+    // What it opened is the block that was already there — not a page created
+    // for a name that did not resolve, which is what OG's own
+    // `redirect-to-page!` does when it is handed one (#3511).
+    const landed = await page.evaluate(() => {
+      const main = document.querySelector('#main-content-container');
+      return { text: (main ? main.innerText : '').replace(/\s+/g, ' ').trim().slice(0, 400),
+               blocks: document.querySelectorAll('#main-content-container [blockid]').length,
+               editors: document.querySelectorAll('textarea[aria-label="editing block"]').length };
+    }).catch(() => null);
+    observations.landedOnAncestor = landed;
+    record('P12.5', 'it opened an existing block with its own children, and no editor',
+      !!landed && landed.blocks > 1 && landed.editors === 0 &&
+        landed.text.includes(head(T.d1)),
+      landed ? `${landed.blocks} block(s) on screen, ${landed.editors} editor(s): ` +
+               `"${landed.text.slice(0, 120)}…"` : 'nothing read');
+
+    phase('navigate', 'return-through-history');
+    await goBack();
+    await settle('after going back');
+    refs = await readRefs();
+    record('P12.6', 'going back returns to the list, whole and grouped as it was',
+      refs.present === true && refs.items.length === 4 && refs.heading.includes('11') &&
+        (await hashNow()) === `#/page/${encodeURIComponent(RG.ANCHOR)}`,
+      `${refs.items.length} page(s), "${refs.heading}", hash ${await hashNow()}`);
+    record('P12.7', 'and no path is left open: nothing is remembered across navigation',
+      refs.panels === 0,
+      `${refs.panels} panel(s) open after returning`);
+
+    // The keyboard, on a level rather than on the control that disclosed it.
+    phase('keyboard', 'open-a-level-without-a-mouse');
+    await pressToggle('deepA', 'click');
+    const keyed = await pressStep('deepA', 0, 'focus');
+    nowHash = await hashNow();
+    record('P12.8', 'Enter on a focused level opens the same block the mouse did',
+      keyed === true && typeof nowHash === 'string' &&
+        nowHash.toLowerCase().includes(U.deepTop),
+      `${nowHash} (wanted ${U.deepTop})`);
+    await goBack();
+    await settle('after the keyboard case');
+
+    // Identical labels, different blocks. Three rows reading exactly the same
+    // words; each must open its own.
+    phase('navigate', 'three-identical-rows-three-different-blocks');
+    const sameWant = ['same1', 'same2', 'same3'];
+    const sameGot = [];
+    for (let i = 0; i < sameWant.length; i++) {
+      await pressToggle('same', 'click');
+      const sp = ((groupOf(await readRefs(), 'same') || {}).group || {}).panel;
+      const ok = await pressStep('same', i, 'click');
+      sameGot.push({ i, pressed: ok, hash: await hashNow(),
+                     rows: sp ? sp.steps.map((st) => st.text) : null });
+      await goBack();
+      await settle(`after identical row ${i + 1}`);
+    }
+    observations.identicalRows = { want: sameWant.map((k) => U[k]), got: sameGot };
+    record('P12.9', 'three rows reading exactly the same words are three different blocks',
+      sameGot.every((r, i) => typeof r.hash === 'string' &&
+                              r.hash.toLowerCase().includes(U[sameWant[i]])) &&
+        new Set(sameGot.map((r) => r.hash)).size === sameWant.length,
+      sameGot.map((r, i) => `row ${i + 1} → ${String(r.hash).slice(-14)} ` +
+                            `(wanted …${U[sameWant[i]].slice(-14)})`).join('; '));
+    record('P12.10', 'and they really were indistinguishable by their text',
+      !!sameGot[0].rows && new Set(sameGot[0].rows).size === 1,
+      sameGot[0].rows ? JSON.stringify(sameGot[0].rows) : 'no rows read');
+
+    // OG's own breadcrumb steps must keep the behaviour they had. In this
+    // container OG hands them a `:navigating-block` atom, so activating one
+    // re-scopes the group IN PLACE and does not navigate at all.
+    phase('regression', "og's-own-breadcrumb-steps");
+    refs = await readRefs();
+    const ogBefore = { hash: await hashNow(),
+                       blocks: (groupOf(refs, 'deepA') || {}).group.blocks.slice() };
+    const ogClicked = await page.evaluate((uuid) => {
+      for (const bc of document.querySelectorAll(
+        '.references.page-linked .blocks-container')) {
+        const ids = [...bc.querySelectorAll('[blockid]')].map((b) => b.getAttribute('blockid'));
+        if (!ids.includes(uuid)) continue;
+        const holder = bc.parentElement;
+        const crumb = holder && holder.querySelector('.breadcrumb');
+        const step = crumb && crumb.querySelector('a');
+        if (!step) return false;
+        step.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        return true;
+      }
+      return false;
+    }, U.deepA).catch(() => false);
+    await sleep(2500);
+    const ogAfter = { hash: await hashNow() };
+    observations.ogBreadcrumbStep = { clicked: ogClicked, before: ogBefore, after: ogAfter };
+    record('P12.11', "OG's own breadcrumb steps still do what OG made them do: " +
+      'they re-scope the group in place and do not navigate',
+      ogClicked === true && ogAfter.hash === ogBefore.hash,
+      `clicked: ${ogClicked}; ${ogBefore.hash} → ${ogAfter.hash}`);
+
+    await goTo(RG.ANCHOR);
+    await settle('back at the anchor page');
+
+    // ---------- P13 : the right sidebar, a NAMED exclusion ----------
+    say('\nP13 the same list in the right sidebar gets nothing at all');
     phase('regression', 'open-the-anchor-page-in-the-right-sidebar');
     await goTo(RG.DEEP_PAGE);
     await sleep(2500);
@@ -643,14 +889,14 @@ async function main() {
       wrappers: document.querySelectorAll('.sidebar-item .f28-path').length,
     })).catch(() => null);
     observations.sidebar = sidebar;
-    record('P11.1', "the anchor's linked references really are rendered in the right sidebar",
+    record('P13.1', "the anchor's linked references really are rendered in the right sidebar",
       !!sidebar && sidebar.items > 0 && sidebar.refs > 0 && sidebar.crumbs > 0,
       JSON.stringify(sidebar) + ` (shift-click found the link: ${opened.found})`);
-    record('P11.2', 'and they carry NO control, no panel and no wrapper — an excluded surface',
+    record('P13.2', 'and they carry NO control, no panel and no wrapper — an excluded surface',
       !!sidebar && sidebar.toggles === 0 && sidebar.panels === 0 && sidebar.wrappers === 0,
       sidebar ? `${sidebar.toggles} control(s), ${sidebar.panels} panel(s), ` +
                 `${sidebar.wrappers} wrapper(s)` : 'no reading');
-    record('P11.3', "OG's own inert marker is still there instead, exactly as it was",
+    record('P13.3', "OG's own inert marker is still there instead, exactly as it was",
       !!sidebar && sidebar.inertMore > 0,
       sidebar ? `${sidebar.inertMore} "⋯" marker(s) in the sidebar's breadcrumbs` : 'no reading');
   } finally {
@@ -659,7 +905,7 @@ async function main() {
     // direction this must fail in.
     errorEvidence = await session.collectErrorEvidence();
     const closed = await APP.close(session, { say });
-    record('P11.9', 'every owned process stopped, addressed by retained PID only',
+    record('P13.9', 'every owned process stopped, addressed by retained PID only',
       closed.stillAlive.length === 0,
       `${ownedTree.length} process(es) owned at launch (pids ${ownedTree.join(', ')}), ` +
       `stage ${closed.stage}` +
@@ -667,21 +913,21 @@ async function main() {
                                 : ', none still alive'));
   }
 
-  // ---------- P12 : the graph, afterwards ----------
-  say('\nP12 the graph, after the application closed');
+  // ---------- P14 : the graph, afterwards ----------
+  say('\nP14 the graph, after the application closed');
   errors.endPhase();
 
   const after = GH.snapshot(GRAPH);
   const cmp = GH.compare(before, after);
-  record('P12.1', 'no content file changed: the disclosure only ever read',
+  record('P14.1', 'no content file changed: the disclosure only ever read',
     cmp.content.length === 0,
     cmp.content.length ? JSON.stringify(cmp.content.map((c) => `${c.change} ${c.file}`))
                        : `0 content changes across ${cmp.afterCount} files`);
   const controlAfter = after[RG.CONTROL_FILE];
-  record('P12.2', 'the control page is byte-identical',
+  record('P14.2', 'the control page is byte-identical',
     !!controlAfter && !!controlBefore && controlAfter.sha256 === controlBefore.sha256,
     controlAfter ? `${controlAfter.sha256.slice(0, 16)}…, unchanged` : 'missing');
-  record('P12.3', 'OG housekeeping is recorded separately rather than counted as content', true,
+  record('P14.3', 'OG housekeeping is recorded separately rather than counted as content', true,
     cmp.housekeeping.length
       ? `${cmp.housekeeping.length}: ` +
         cmp.housekeeping.map((c) => `${c.change} ${c.file}`).slice(0, 6).join('; ')
@@ -714,14 +960,14 @@ async function main() {
         `${String(r.text).slice(0, 160)}`);
   }
   for (const line of EC.describe(split.remaining, 5)) say(`          UNEXPECTED: ${line}`);
-  record('P12.4', 'every window error was entitled; ONLY the exact browser notice is ever exempted',
+  record('P14.4', 'every window error was entitled; ONLY the exact browser notice is ever exempted',
     split.remaining.length === 0,
     `${errors.entries().length} captured across ${JSON.stringify(cls.byPhase)}; ` +
     `${cls.expected.length} expected, ${split.noise.length} exempted, ` +
     `${split.refused.length} handler line(s) refused by the rule, ` +
     `${split.remaining.length} unexplained` +
     (split.remaining.length ? `: ${EC.describe(split.remaining, 1)[0]}` : ''));
-  record('P12.7', "the browser's own ErrorEvent log was collected, as CONTEXT for a reader",
+  record('P14.7', "the browser's own ErrorEvent log was collected, as CONTEXT for a reader",
     split.evidence.collected === true,
     split.evidence.collected
       ? `${split.evidence.windowErrorEvents} window ErrorEvent(s), ` +
@@ -730,13 +976,13 @@ async function main() {
         '[frontend.handler] line is always unexpected'
       : "the page's ErrorEvent log could not be collected; nothing depends on it, but a " +
         'reader loses the corroboration that the browser really did signal');
-  record('P12.5', 'nothing that unmounts a React subtree was thrown',
+  record('P14.5', 'nothing that unmounts a React subtree was thrown',
     cls.renderFailures.length === 0,
     cls.renderFailures.length ? String(cls.renderFailures[0].text).slice(0, 250)
                               : `0 render failures among ${errors.entries().length} line(s)`);
   const duringFeature = errors.entries().filter(
     (e) => e.phase === 'disclose' || e.phase === 'keyboard');
-  record('P12.6', 'no error at all arrived while the disclosure was being operated',
+  record('P14.6', 'no error at all arrived while the disclosure was being operated',
     duringFeature.length === 0,
     duringFeature.length ? `${duringFeature.length}: ${duringFeature[0].text.slice(0, 200)}`
                          : '0 during the disclose and keyboard phases');

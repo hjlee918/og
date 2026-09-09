@@ -263,3 +263,88 @@
   (testing "the walk asks for more than OG reads, which is the whole point:
             OG reads level-limit + 1 and therefore never learns the depth"
     (is (> (f28/request-limit 1) (inc f28/og-visible-levels)))))
+
+;; ---------------------------------------------------------------------------
+;; Where a disclosed step goes
+;;
+;; The first slice left every step inert. These are the rules that let one be
+;; opened without ever guessing where the reader meant to go.
+;; ---------------------------------------------------------------------------
+
+(deftest a-step-travels-on-its-identity-and-on-nothing-else
+  (let [e (assoc (blk 1 "L1 · 조상") :block/uuid "u-one")]
+    (is (= "u-one" (f28/step-identity e)))
+    (is (true? (f28/navigable-step? e))))
+  (testing "a step with no `:block/uuid` is not offered as a destination at all,
+            because `:db/id` does not survive a re-index"
+    (is (nil? (f28/step-identity {:db/id 42 :block/content "L1"})))
+    (is (false? (f28/navigable-step? {:db/id 42 :block/content "L1"})))
+    (is (false? (f28/navigable-step? {})))))
+
+(deftest the-fresh-lookup-is-what-decides
+  (testing "the block is there now: go to it, by the identity that was proved"
+    (let [d (f28/navigation "u-one" {:found {:block/uuid "u-one" :db/id 7}})]
+      (is (= :open (:action d)))
+      (is (= "u-one" (f28/opened d)))
+      (is (nil? (f28/refused d)))))
+  (testing "the destination opened is the FRESH entity's identity, not the
+            captured one — they are equal by the check above, and reading it off
+            the entity is what makes that true rather than assumed"
+    (is (= "u-one" (:uuid (f28/navigation "u-one" {:found {:block/uuid "u-one"}}))))))
+
+(deftest a-destination-that-is-gone-refuses-and-says-which-kind-of-gone
+  (testing "nothing is there now"
+    (let [d (f28/navigation "u-one" {:found nil})]
+      (is (= :refuse (:action d)))
+      (is (= :missing (f28/refused d)))
+      (is (nil? (f28/opened d)))))
+  (testing "the lookup itself could not be performed — a DIFFERENT fact, kept
+            apart the same way `load-ancestors` keeps a failed lookup apart from
+            reaching the top of the outline"
+    (let [d (f28/navigation "u-one" {:error true})]
+      (is (= :unreadable (f28/refused d)))
+      (is (nil? (f28/opened d)))))
+  (testing "a lookup that answered with something else is refused, never followed"
+    (is (= :mismatch (f28/refused (f28/navigation "u-one"
+                                                  {:found {:block/uuid "u-two"}})))))
+  (testing "a page is refused too: `disclosure` never puts one in the steps, and
+            a control that does not know what it would open does not open it"
+    (is (= :page (f28/refused (f28/navigation "u-one"
+                                              {:found {:block/uuid "u-one"
+                                                       :block/name "source page"}})))))
+  (testing "a step with no identity refuses before any lookup is even considered"
+    (is (= :no-identity (f28/refused (f28/navigation nil {:found {:block/uuid "u-one"}}))))
+    (is (= :no-identity (f28/refused (f28/navigation nil {:error true}))))))
+
+(deftest identical-text-never-decides-a-destination
+  (testing "four levels reading exactly the same words are four different
+            destinations; only the identity separates them, and the decision
+            never reads the text at all"
+    (let [same "같은 이름 Same Name"
+          levels (map-indexed (fn [i _] {:block/uuid (str "u-same-" i)
+                                         :block/content same})
+                              (range 4))]
+      (doseq [e levels]
+        (is (= (:block/uuid e)
+               (f28/opened (f28/navigation (f28/step-identity e) {:found e})))))
+      (testing "and a lookup answering with a DIFFERENT block of the same text
+                is refused rather than accepted as close enough"
+        (is (= :mismatch
+               (f28/refused (f28/navigation "u-same-0"
+                                            {:found {:block/uuid "u-same-3"
+                                                     :block/content same}}))))))))
+
+(deftest every-refusal-reason-is-declared
+  (testing "the reasons are data, so a new one cannot be added without also
+            being listed — which is what keeps each of them a separate test and
+            a separate sentence on screen"
+    (is (= #{:no-identity :unreadable :missing :mismatch :page}
+           (set f28/navigation-refusals)))
+    (doseq [r f28/navigation-refusals]
+      (is (keyword? r)))))
+
+(deftest a-refusal-carries-no-destination-to-read-by-accident
+  (doseq [lookup [{:found nil} {:error true} {:found {:block/uuid "other"}}]]
+    (let [d (f28/navigation "u-one" lookup)]
+      (is (nil? (f28/opened d)))
+      (is (nil? (:uuid d))))))
