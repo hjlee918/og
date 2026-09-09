@@ -445,7 +445,7 @@
  :f28/path-unreadable "Some levels could not be read, so what is above this point is unknown."
  :f28/path-capped "Only the nearest {1} levels are loaded for one path; anything above that is not read."
  :f28/path-not-complete "This is not the whole path."
- :f28/path-snapshot "Read when you opened this. Close it and open it again for the current path; nothing here is written to your notes."
+ :f28/path-snapshot "This path is re-read whenever this result redraws, and nothing keeps it up to date on its own. Close it and open it again to be sure it is current. Nothing here is written to your notes."
  :linked-references/filter-search "Search in linked pages"
  :linked-references/unexpected-error "Linked References: Unexpected error. Please re-index your graph first."
  :linked-references/filter-heading "Filter"

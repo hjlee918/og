@@ -40,7 +40,7 @@ const PILOT_FILES = ['preflight.test.js', 'isolation.test.js', 'guards.test.js',
   .map((f) => path.join('f27-pilot', 'tests', f));
 
 const F28_FILES = ['feature-build.test.js', 'graph-fixture.test.js',
-                   'browser-noise.test.js']
+                   'browser-noise.test.js', 'packaged-app.test.js']
   .map((f) => path.join('f28-refpath', 'tests', f));
 
 // The inherited F27 suites that are still true in this checkout: the fixture
@@ -71,7 +71,8 @@ status |= run(
   'replaced in f28-refpath/tests/feature-build.test.js)',
   ['--test', `--test-skip-pattern=${SKIP}`].concat(PILOT_FILES));
 
-status |= run('F28 build identity, fixture rules and the named browser notice',
+status |= run('F28 build identity, fixture rules, the named browser notice, ' +
+              'the exact-path gate and the launcher\'s cleanup ownership',
               ['--test'].concat(F28_FILES));
 
 status |= run('inherited F27 tooling regression (fixtures and error classification)',

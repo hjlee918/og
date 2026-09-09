@@ -206,6 +206,52 @@ test('every inherited build script refuses to run on this branch', () => {
   assert.match(mine, /const PROTECTED_CHECKOUTS = \['f27-slice-1', 'f27-pilot', 'f27-outgoing-context'\];/);
 });
 
+test('a CLOSED control performs no ancestor walk — the one cost claim that is structural', () => {
+  // The specification's original "one walk per press, nothing between presses"
+  // was not true and has been corrected: the walk runs in the panel's render
+  // body. What remains true, and is the claim that actually matters, is that a
+  // closed control renders no panel at all. That is a property of the SOURCE
+  // shape, so it is read out of the source rather than described.
+  const src = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.cljs'), 'utf8');
+
+  const start = src.indexOf('(rum/defcs f28-source-path <');
+  assert.ok(start > 0, 'f28-source-path was renamed or removed');
+  const wrapper = src.slice(start, src.indexOf('(rum/defcs breadcrumb-with-container'));
+  assert.match(wrapper, /\(when press\s*\n?\s*\(f28-source-path-panel/,
+    'the panel must be rendered only when the control has been pressed');
+  assert.ok(!wrapper.includes('load-ancestors'),
+    'the wrapper, which renders for every group, must never walk ancestors itself');
+
+  // And the walk must live in exactly one place, so "closed costs nothing"
+  // cannot be quietly undone by a second call site.
+  const panelStart = src.indexOf('(rum/defc f28-source-path-panel');
+  assert.ok(panelStart > 0);
+  const panel = src.slice(panelStart, start);
+  assert.strictEqual((panel.match(/f27ctx\/load-ancestors/g) || []).length, 1);
+  const f28Region = src.slice(src.indexOf('(defn- f28-surface'), start);
+  assert.strictEqual((f28Region.match(/f27ctx\/load-ancestors/g) || []).length, 1,
+    'the F28 feature must contain exactly one ancestor walk, inside the panel');
+});
+
+test('the panel does not claim a snapshot it does not take', () => {
+  // The corrected sentence must not promise that closing and reopening is the
+  // only way the content changes, because the walk is in the render body.
+  const en = fs.readFileSync(
+    path.join(REPO, 'src', 'resources', 'dicts', 'en.edn'), 'utf8');
+  const line = en.split('\n').find((l) => l.includes(':f28/path-snapshot'));
+  assert.ok(line, 'the sentence is missing');
+  assert.match(line, /re-read whenever this result redraws/);
+  assert.match(line, /nothing keeps it up to date on its own/);
+  assert.ok(!/^.*Read when you opened this/.test(line),
+    'the withdrawn snapshot wording must not come back');
+  const ko = fs.readFileSync(
+    path.join(REPO, 'src', 'resources', 'dicts', 'ko.edn'), 'utf8');
+  assert.ok(ko.split('\n').some((l) => l.includes(':f28/path-snapshot') &&
+                                        l.includes('다시 그려질 때마다')),
+    'the Korean sentence must carry the same correction');
+});
+
 test('the F28 renderer really carries this feature and the F27 slices it builds on', () => {
   // Identity checks prove which BUILD this is. This proves what is IN it: the
   // renderer must carry the F28 source-path namespace as well as the F27 work

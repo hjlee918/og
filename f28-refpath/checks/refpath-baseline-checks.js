@@ -39,6 +39,7 @@ const EC = require(path.join(REPO, 'f27-inline', 'checks', 'error-classifier.js'
 const RG = require('./make-refpath-graph.js');
 const APP = require('./packaged-app.js');
 const NOISE = require('./browser-noise.js');
+const REC = require('./recorder.js');
 
 const EVIDENCE = path.join(FEATURE_DIR, 'evidence');
 // The packaged build that predates this feature.
@@ -46,8 +47,9 @@ const BASELINE_APP = 'Logseq-OG-F27-Inline';
 
 const results = [];
 let ownedTree = [];
-const errors = EC.createRecorder();
+const errors = REC.createRecorder();
 const observations = {};
+let errorEvidence = null;
 const sleep = OP.sleep;
 
 function say(l) { try { fs.writeSync(1, l + '\n'); } catch (e) { console.log(l); } }
@@ -419,6 +421,7 @@ async function main() {
         JSON.stringify(refs.items.map((i) => i.page)),
       JSON.stringify(stillOpen.items.map((i) => i.page)));
   } finally {
+    errorEvidence = await session.collectErrorEvidence();
     await APP.close(session, { say });
   }
 
@@ -437,24 +440,45 @@ async function main() {
 
   const cls = EC.summarise(errors.entries(),
     { outsidePath: BAD, graphPath: GRAPH, phases: errors.phases() });
+  const split = NOISE.partition(cls.unexpected, errors.entries(), errorEvidence);
   for (const line of EC.describe(cls.expected)) say(`          expected:   ${line}`);
-  for (const line of EC.describe(cls.unexpected, 5)) say(`          UNEXPECTED: ${line}`);
-  const split = NOISE.partition(cls.unexpected, errors.entries());
-  observations.errors = { entries: errors.entries(), phases: errors.phases(),
-                          expected: cls.expected.length,
-                          browserNoise: split.noise.map((e) => e.text.slice(0, 160)),
-                          unexpected: split.remaining.map((e) => e.text.slice(0, 300)) };
+  for (const line of EC.describe(split.noise, 3)) say(`          pre-existing: ${line}`);
+  for (const r of split.refused.slice(0, 5)) {
+    say(`          REFUSED BY THE RULE: ${r.refusedBecause}\n            ` +
+        `${String(r.text).slice(0, 160)}`);
+  }
+  for (const line of EC.describe(split.remaining, 5)) say(`          UNEXPECTED: ${line}`);
+  // RAW evidence, unconditionally, beside the classification rather than
+  // instead of it.
+  observations.errors = {
+    entries: errors.entries(),
+    phases: errors.phases(),
+    windowErrorEvents: errorEvidence,
+    expected: cls.expected.map((e) => ({ seq: e.seq, phase: e.phase, reason: e.reason,
+                                         text: e.text })),
+    browserNoise: split.noise.map((e) => ({ seq: e.seq, text: e.text,
+                                            pairedWithSeq: e.pairedWithSeq === undefined
+                                              ? null : e.pairedWithSeq })),
+    refusedByRule: split.refused.map((e) => ({ seq: e.seq, text: e.text,
+                                               refusedBecause: e.refusedBecause })),
+    unexpected: split.remaining.map((e) => ({ seq: e.seq, phase: e.phase, text: e.text })),
+    ruleAccounting: split.evidence,
+  };
   record('O9.4', 'every window error was entitled, once one pre-existing browser notice is named',
     split.remaining.length === 0,
     `${errors.entries().length} captured across ${JSON.stringify(cls.byPhase)}; ` +
-    `${cls.expected.length} expected, ${split.noise.length} pre-existing browser notice(s), ` +
+    `${cls.expected.length} expected, ${split.noise.length} exempted, ` +
+    `${split.refused.length} handler line(s) refused by the rule, ` +
     `${split.remaining.length} unexplained` +
     (split.remaining.length ? `: ${EC.describe(split.remaining, 1)[0]}` : ''));
-  record('O9.6', "the named notice is Chromium's ResizeObserver signal and OG's own log of it",
-    split.noise.every((e) => NOISE.RESIZE_NOTICE.test(e.text) || NOISE.HANDLER_LINE.test(e.text)),
-    split.noise.length
-      ? `${split.noise.length}: ${split.noise.map((e) => e.text.slice(0, 70)).join(' | ')}`
-      : 'none arrived in this run');
+  record('O9.6', 'the exemption rule was armed with the evidence it requires',
+    split.evidence.collected === true,
+    split.evidence.collected
+      ? `${split.evidence.windowErrorEvents} window ErrorEvent(s) collected, ` +
+        `${split.evidence.nullPayloadNotices} of them null-payload ResizeObserver notice(s); ` +
+        `${split.evidence.pairsClaimed} pair(s) claimed`
+      : "the page's ErrorEvent log could not be collected, so NO handler line could be " +
+        'exempted (this is the direction the rule fails in, not a pass)');
 
   const leftovers = ownedTree.filter(OP.alive);
   record('O9.5', 'every process this run owned has exited', leftovers.length === 0,

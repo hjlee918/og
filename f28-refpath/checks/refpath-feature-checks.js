@@ -49,14 +49,16 @@ const EC = require(path.join(REPO, 'f27-inline', 'checks', 'error-classifier.js'
 const RG = require('./make-refpath-graph.js');
 const APP = require('./packaged-app.js');
 const NOISE = require('./browser-noise.js');
+const REC = require('./recorder.js');
 
 const EVIDENCE = path.join(FEATURE_DIR, 'evidence');
 const APP_NAME = 'Logseq-OG-F28-RefPath';
 
 const results = [];
 let ownedTree = [];
-const errors = EC.createRecorder();
+const errors = REC.createRecorder();
 const observations = {};
+let errorEvidence = null;
 const sleep = OP.sleep;
 
 function say(l) { try { fs.writeSync(1, l + '\n'); } catch (e) { console.log(l); } }
@@ -652,6 +654,10 @@ async function main() {
       !!sidebar && sidebar.inertMore > 0,
       sidebar ? `${sidebar.inertMore} "⋯" marker(s) in the sidebar's breadcrumbs` : 'no reading');
   } finally {
+    // The structured evidence the error rule needs, taken while the window is
+    // still there. A run that could not collect it pairs NOTHING, which is the
+    // direction this must fail in.
+    errorEvidence = await session.collectErrorEvidence();
     const closed = await APP.close(session, { say });
     record('P11.9', 'every owned process stopped, addressed by retained PID only',
       closed.stillAlive.length === 0,
@@ -683,22 +689,46 @@ async function main() {
 
   const cls = EC.summarise(errors.entries(),
     { outsidePath: BAD, graphPath: GRAPH, phases: errors.phases() });
-  const split = NOISE.partition(cls.unexpected, errors.entries());
+  const split = NOISE.partition(cls.unexpected, errors.entries(), errorEvidence);
+  // RAW evidence first, and unconditionally: every captured line, every window
+  // ErrorEvent, and the rule's own accounting. Classification is recorded
+  // beside it, never instead of it.
   observations.errors = {
-    entries: errors.entries(), phases: errors.phases(),
-    expected: cls.expected.length,
-    browserNoise: split.noise.map((e) => e.text.slice(0, 160)),
-    unexpected: split.remaining.map((e) => e.text.slice(0, 300)),
+    entries: errors.entries(),
+    phases: errors.phases(),
+    windowErrorEvents: errorEvidence,
+    expected: cls.expected.map((e) => ({ seq: e.seq, phase: e.phase, reason: e.reason,
+                                         text: e.text })),
+    browserNoise: split.noise.map((e) => ({ seq: e.seq, text: e.text,
+                                            pairedWithSeq: e.pairedWithSeq === undefined
+                                              ? null : e.pairedWithSeq })),
+    refusedByRule: split.refused.map((e) => ({ seq: e.seq, text: e.text,
+                                               refusedBecause: e.refusedBecause })),
+    unexpected: split.remaining.map((e) => ({ seq: e.seq, phase: e.phase, text: e.text })),
+    ruleAccounting: split.evidence,
   };
   for (const line of EC.describe(cls.expected)) say(`          expected:   ${line}`);
   for (const line of EC.describe(split.noise, 3)) say(`          pre-existing: ${line}`);
+  for (const r of split.refused.slice(0, 5)) {
+    say(`          REFUSED BY THE RULE: ${r.refusedBecause}\n            ` +
+        `${String(r.text).slice(0, 160)}`);
+  }
   for (const line of EC.describe(split.remaining, 5)) say(`          UNEXPECTED: ${line}`);
   record('P12.4', 'every window error was entitled, once one pre-existing browser notice is named',
     split.remaining.length === 0,
     `${errors.entries().length} captured across ${JSON.stringify(cls.byPhase)}; ` +
-    `${cls.expected.length} expected, ${split.noise.length} pre-existing browser notice(s), ` +
+    `${cls.expected.length} expected, ${split.noise.length} exempted, ` +
+    `${split.refused.length} handler line(s) refused by the rule, ` +
     `${split.remaining.length} unexplained` +
     (split.remaining.length ? `: ${EC.describe(split.remaining, 1)[0]}` : ''));
+  record('P12.7', 'the exemption rule was armed with the evidence it requires',
+    split.evidence.collected === true,
+    split.evidence.collected
+      ? `${split.evidence.windowErrorEvents} window ErrorEvent(s) collected, ` +
+        `${split.evidence.nullPayloadNotices} of them null-payload ResizeObserver notice(s); ` +
+        `${split.evidence.pairsClaimed} pair(s) claimed`
+      : "the page's ErrorEvent log could not be collected, so NO handler line could be " +
+        'exempted (this is the direction the rule fails in, not a pass)');
   record('P12.5', 'nothing that unmounts a React subtree was thrown',
     cls.renderFailures.length === 0,
     cls.renderFailures.length ? String(cls.renderFailures[0].text).slice(0, 250)

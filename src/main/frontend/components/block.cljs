@@ -6755,7 +6755,17 @@
 
   A cycle, an unreadable ancestor and the hard cap are three different answers
   and each withdraws the continuation control for its own reason. None of them
-  is described as a complete path."
+  is described as a complete path.
+
+  WHEN THE WALK RUNS, said plainly because the first specification of this slice
+  claimed otherwise: it runs HERE, in the render body, so it runs on every
+  render of this panel — which is every render of the group's
+  `breadcrumb-with-container`, since neither this component nor its wrapper is
+  `rum/static`. It is not one walk per press. What IS structurally guaranteed is
+  the other half: a CLOSED control renders no panel at all (`f28-source-path`
+  guards this call with `when press`), so it performs no walk, no query and no
+  probe. The walk is bounded either way — at most `request-limit` single-step
+  parent lookups, capped at `f27-context/hard-cap`."
   [repo uuid panel-id press *press]
   (let [loaded (f27ctx/load-ancestors (f27-parent-fn repo) uuid (f28/request-limit press))
         {:keys [steps page hidden depth status complete?]}
@@ -6788,9 +6798,13 @@
         (= status :capped) [:span [:span.f28-path-mark "⚠"] " "
                             (t :f28/path-capped f27ctx/hard-cap)]
         :else "")]
-     ;; Stated on the panel rather than left to be inferred: this was read when
-     ;; the control was pressed, and closing and opening it again is what reads
-     ;; it afresh. Same honesty rule the F27 refresh increment established.
+     ;; Stated on the panel rather than left to be inferred — and stated
+     ;; ACCURATELY, which the first version of this sentence was not. The walk
+     ;; below runs in this component's RENDER BODY, and neither this component
+     ;; nor its wrapper is `rum/static`, so it re-runs whenever the surrounding
+     ;; `breadcrumb-with-container` re-renders. It is therefore not a snapshot
+     ;; taken at the press; nor is it live, because nothing subscribes on the
+     ;; panel's behalf. The sentence says exactly that.
      [:div.f28-path-snapshot (t :f28/path-snapshot)]
      [:div.f28-path-actions
       (when more-press
