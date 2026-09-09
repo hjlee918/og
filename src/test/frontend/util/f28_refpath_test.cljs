@@ -7,6 +7,7 @@
   read, and turning one walk result into steps the panel may honestly show."
   (:require [cljs.test :refer [deftest testing is]]
             [frontend.util.f27-context :as f27c]
+            [frontend.util.f27-outgoing :as f27o]
             [frontend.util.f28-refpath :as f28]))
 
 ;; ---------------------------------------------------------------------------
@@ -282,15 +283,22 @@
     (is (false? (f28/navigable-step? {})))))
 
 (deftest the-fresh-lookup-is-what-decides
+  ;; CORRECTED 2026-09-09. Both cases below were written with entities carrying
+  ;; an identity and no `:block/content`, and they passed — which is exactly the
+  ;; defect the supervisor found: a positive test built from a placeholder
+  ;; asserts that a placeholder opens. A real block has content.
   (testing "the block is there now: go to it, by the identity that was proved"
-    (let [d (f28/navigation "u-one" {:found {:block/uuid "u-one" :db/id 7}})]
+    (let [d (f28/navigation "u-one" {:found {:block/uuid "u-one" :db/id 7
+                                             :block/content "a real block"}})]
       (is (= :open (:action d)))
       (is (= "u-one" (f28/opened d)))
       (is (nil? (f28/refused d)))))
   (testing "the destination opened is the FRESH entity's identity, not the
             captured one — they are equal by the check above, and reading it off
             the entity is what makes that true rather than assumed"
-    (is (= "u-one" (:uuid (f28/navigation "u-one" {:found {:block/uuid "u-one"}}))))))
+    (is (= "u-one" (:uuid (f28/navigation "u-one"
+                                          {:found {:block/uuid "u-one"
+                                                   :block/content "a real block"}}))))))
 
 (deftest a-destination-that-is-gone-refuses-and-says-which-kind-of-gone
   (testing "nothing is there now"
@@ -338,7 +346,7 @@
   (testing "the reasons are data, so a new one cannot be added without also
             being listed — which is what keeps each of them a separate test and
             a separate sentence on screen"
-    (is (= #{:no-identity :unreadable :missing :mismatch :page}
+    (is (= #{:no-identity :unreadable :missing :mismatch :page :placeholder}
            (set f28/navigation-refusals)))
     (doseq [r f28/navigation-refusals]
       (is (keyword? r)))))
@@ -348,3 +356,114 @@
     (let [d (f28/navigation "u-one" lookup)]
       (is (nil? (f28/opened d)))
       (is (nil? (:uuid d))))))
+
+;; ---------------------------------------------------------------------------
+;; A matching identity is not a readable block
+;;
+;; Added 2026-09-09 after supervisor review. `navigation` accepted any non-page
+;; entity whose identity matched, so an identity-only placeholder reached
+;; `:open` and the control could navigate to a block nobody has written.
+;; ---------------------------------------------------------------------------
+
+(deftest a-uuid-only-placeholder-is-not-a-block
+  (testing "the exact shape the review named: identity and a db id, nothing else"
+    (let [stub {:block/uuid "u-one" :db/id 123}]
+      (is (false? (f28/readable-block? stub)))
+      (is (= :placeholder (f28/refused (f28/navigation "u-one" {:found stub}))))
+      (is (nil? (f28/opened (f28/navigation "u-one" {:found stub}))))))
+  (testing "identity alone, with nothing else at all"
+    (is (false? (f28/readable-block? {:block/uuid "u-one"})))
+    (is (= :placeholder (f28/refused (f28/navigation "u-one"
+                                                     {:found {:block/uuid "u-one"}}))))))
+
+(deftest content-that-is-not-text-is-not-content
+  (testing "an absent field and a field holding something that is not text are
+            the same fact for a reader, and neither is a block to open"
+    (doseq [c [nil 42 :a-keyword {} [] true]]
+      (let [e {:block/uuid "u-one" :block/content c}]
+        (is (false? (f28/readable-block? e)) (str "content " (pr-str c)))
+        (is (= :placeholder (f28/refused (f28/navigation "u-one" {:found e})))
+            (str "content " (pr-str c)))))))
+
+(deftest a-block-written-and-left-empty-is-still-a-block
+  (testing "`\"\"` is a real position in the outline with nothing written at it —
+            present, and a string. It opens; the panel already has a sentence
+            for a step with no text"
+    (let [empty-block {:block/uuid "u-one" :block/content ""}]
+      (is (true? (f28/readable-block? empty-block)))
+      (is (= "u-one" (f28/opened (f28/navigation "u-one" {:found empty-block}))))))
+  (testing "and so does one holding only whitespace, which is text somebody typed"
+    (let [ws {:block/uuid "u-one" :block/content "   "}]
+      (is (true? (f28/readable-block? ws)))
+      (is (= "u-one" (f28/opened (f28/navigation "u-one" {:found ws})))))))
+
+(deftest readability-agrees-with-the-f27-convention-it-reuses
+  (testing "the same question F27 already settled: `:block/content` PRESENT,
+            never `some?` of a lookup"
+    (is (true? (f27o/readable-target? {:block/content ""})))
+    (is (false? (f27o/readable-target? {:block/uuid "u"})))
+    (is (false? (f27o/readable-target? nil))))
+  (testing "F28 adds exactly one thing to it — the content must be a string"
+    (is (true? (f27o/readable-target? {:block/uuid "u" :block/content 42})))
+    (is (false? (f28/readable-block? {:block/uuid "u" :block/content 42})))))
+
+(deftest the-earlier-refusals-still-outrank-the-new-one
+  (testing "a mismatched identity is refused as a mismatch, not as a placeholder,
+            even when the entity that came back has no content either"
+    (is (= :mismatch (f28/refused (f28/navigation "u-one"
+                                                  {:found {:block/uuid "u-two"}})))))
+  (testing "a page is refused as a page, whatever its content field says"
+    (is (= :page (f28/refused (f28/navigation "u-one"
+                                              {:found {:block/uuid "u-one"
+                                                       :block/name "source page"}}))))
+    (is (= :page (f28/refused (f28/navigation "u-one"
+                                              {:found {:block/uuid "u-one"
+                                                       :block/name "source page"
+                                                       :block/content "# Source Page"}})))))
+  (testing "nothing found is still :missing, and a failed lookup still :unreadable"
+    (is (= :missing (f28/refused (f28/navigation "u-one" {:found nil}))))
+    (is (= :unreadable (f28/refused (f28/navigation "u-one" {:error true}))))))
+
+(deftest a-placeholder-never-yields-a-destination
+  (testing "nothing to read off the refusal, so no caller can navigate anyway"
+    (let [d (f28/navigation "u-one" {:found {:block/uuid "u-one" :db/id 9}})]
+      (is (nil? (f28/opened d)))
+      (is (nil? (:uuid d)))
+      (is (= :refuse (:action d))))))
+
+;; ---------------------------------------------------------------------------
+;; A redraw must not take the explanation away with the row
+;; ---------------------------------------------------------------------------
+
+(defn- step
+  [u] {:block/uuid u :block/content (str "level " u)})
+
+(deftest a-refusal-is-attached-by-identity-not-by-position
+  (let [rows [(step "a") (step "b") (step "c")]
+        refusal {:uuid "b" :reason :missing}]
+    (is (= {:on-step "b"} (f28/refusal-placement refusal rows)))
+    (testing "the second press prepends the outer levels, so every position
+              shifts — and the message stays on the same block"
+      (let [deeper [(step "x") (step "y") (step "a") (step "b") (step "c")]]
+        (is (= {:on-step "b"} (f28/refusal-placement refusal deeper)))))
+    (testing "and only that row carries it"
+      (is (true? (f28/refusal-on-step? (f28/refusal-placement refusal rows) (step "b"))))
+      (is (false? (f28/refusal-on-step? (f28/refusal-placement refusal rows) (step "a"))))
+      (is (false? (f28/refusal-on-step? (f28/refusal-placement refusal rows) (step "c")))))))
+
+(deftest a-row-that-has-gone-does-not-take-the-explanation-with-it
+  (testing "a walk that fails higher up returns fewer steps; the reader still
+            pressed something and is still owed an answer"
+    (let [refusal {:uuid "b" :reason :missing}]
+      (is (= {:on-panel true} (f28/refusal-placement refusal [(step "c")])))
+      (is (= {:on-panel true} (f28/refusal-placement refusal [])))
+      (is (= {:on-panel true} (f28/refusal-placement refusal nil)))))
+  (testing "a refusal with no identity cannot be attached to a row either, and
+            is said for the panel rather than dropped"
+    (is (= {:on-panel true} (f28/refusal-placement {:reason :no-identity}
+                                                   [(step "a")]))))
+  (testing "no refusal, nothing said"
+    (is (nil? (f28/refusal-placement nil [(step "a")])))
+    (is (nil? (f28/refusal-placement {} [(step "a")])))
+    (is (nil? (f28/refusal-placement {:uuid "a"} [(step "a")])))
+    (is (false? (f28/refusal-on-step? nil (step "a"))))))

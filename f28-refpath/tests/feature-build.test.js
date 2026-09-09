@@ -268,7 +268,7 @@ function form(region, head) {
 
 test('a disclosed level is re-resolved by IDENTITY at the moment it is activated', () => {
   const { region } = f28Source();
-  const open = form(region, '(fn [k e]');
+  const open = form(region, 'open-step! (fn [e]');
 
   // Exactly one lookup, and it is a lookup ref on `:block/uuid`. Two call sites
   // would mean two chances for one of them to resolve by something else.
@@ -288,7 +288,7 @@ test('a disclosed level is re-resolved by IDENTITY at the moment it is activated
 
 test('nothing about a destination is decided from what a level SAYS', () => {
   const { region } = f28Source();
-  const open = form(region, '(fn [k e]');
+  const open = form(region, 'open-step! (fn [e]');
   for (const forbidden of ['block/content', 'block-label', 'preview-label',
                            'f27-display-content', 'step-prefix', 'block/name',
                            'block/original-name', 'label']) {
@@ -299,7 +299,7 @@ test('nothing about a destination is decided from what a level SAYS', () => {
 
 test('a refusal navigates nowhere, and creates nothing', () => {
   const { region } = f28Source();
-  const open = form(region, '(fn [k e]');
+  const open = form(region, 'open-step! (fn [e]');
 
   // One navigation, in the branch that has a proved destination.
   assert.strictEqual((region.match(/route-handler\/redirect-to-page!/g) || []).length, 1,
@@ -308,8 +308,8 @@ test('a refusal navigates nowhere, and creates nothing', () => {
     'navigation must be guarded by the pure decision');
   assert.match(open, /route-handler\/redirect-to-page! target/,
     'the destination must be the identity the decision proved, never a name');
-  assert.match(open, /reset! \*refusal \{:key k :reason \(f28\/refused decision\)\}/,
-    'a refusal must be recorded against the step that refused');
+  assert.match(open, /reset! \*refusal \{:uuid captured\s*\n?\s*:reason \(f28\/refused decision\)\}/,
+    'a refusal must be recorded by the identity that refused, never by position');
 
   // Nothing in this feature may write, create or transact — the same boundary
   // the first slice declared, now that a control can act.
@@ -345,13 +345,77 @@ test('collapsing from inside the path returns focus to THAT group\'s own control
     'both pieces of per-group state must be component locals');
 });
 
-test('opening and continuing a path clear a refusal the reader has moved past', () => {
+test('a fresh disclosure clears a refusal; reading further up does NOT', () => {
+  // Corrected 2026-09-09. Continuing a path is not a fresh disclosure: the
+  // steps already on screen stay on screen, the refused one among them, so
+  // withdrawing the explanation there takes it away for a reason the reader
+  // never gave. Opening and collapsing ARE fresh disclosures, and clear it.
   const { region } = f28Source();
   const wrapper = form(region, '(rum/defcs f28-source-path <');
-  for (const re of [/:on-more \(fn \[n\] \(reset! \*refusal nil\)/,
-                    /:on-hide \(fn \[\] \(reset! \*refusal nil\)/,
+  for (const re of [/:on-hide \(fn \[\] \(reset! \*refusal nil\)/,
                     /f27-btn #\(do \(reset! \*refusal nil\)/]) {
     assert.match(wrapper, re, `a stale refusal survives: ${re}`);
+  }
+  assert.match(wrapper, /:on-more \(fn \[n\] \(reset! \*press n\)\)/,
+    'reading further up must not withdraw the explanation');
+  assert.ok(!/:on-more \(fn \[n\] \(reset! \*refusal nil\)/.test(wrapper),
+    'the withdrawn clear-on-continue must not come back');
+  // And a successful navigation clears it, because the reader got what they
+  // asked for.
+  const open = form(region, 'open-step! (fn [e]');
+  assert.match(open, /\(do \(reset! \*refusal nil\)/,
+    'a successful open must clear the previous refusal');
+});
+
+test('a matching identity is not accepted as a readable block', () => {
+  // The supervisor finding: `{:block/uuid captured :db/id 123}` reached :open.
+  const pure = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'util', 'f28_refpath.cljs'), 'utf8');
+  const nav = form(pure, '(defn navigation');
+  assert.match(nav, /\(not \(readable-block\? fresh\)\)\s+\{:action :refuse :reason :placeholder\}/,
+    'navigation must refuse an entity that is not a readable block');
+  // Order matters: the more specific refusals must still win.
+  const order = [':no-identity', ':unreadable', ':missing', ':mismatch', ':page', ':placeholder']
+    .map((r) => nav.indexOf(`:reason ${r}`));
+  assert.deepStrictEqual(order.slice().sort((a, b) => a - b), order,
+    'the refusals are checked out of order; a placeholder page would report the wrong reason');
+
+  const readable = form(pure, '(defn readable-block?');
+  assert.match(readable, /f27o\/readable-target\? e/,
+    "F28 must reuse F27's settled readability convention, not restate it");
+  assert.match(readable, /string\? \(:block\/content e\)/,
+    'the content must be text, not merely present');
+  assert.ok(!/some\?/.test(readable),
+    'a bare some? is what accepted a placeholder in the first place');
+});
+
+test('a redraw cannot take the explanation away with the row', () => {
+  const pure = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'util', 'f28_refpath.cljs'), 'utf8');
+  const place = form(pure, '(defn refusal-placement');
+  assert.match(place, /\{:on-step u\}/);
+  assert.match(place, /\{:on-panel true\}/);
+  assert.ok(!/step-key|:key/.test(place),
+    'placement must be decided by identity, never by a render key');
+
+  const { region } = f28Source();
+  const panel = form(region, '(rum/defc f28-source-path-panel');
+  assert.match(panel, /placement \(f28\/refusal-placement refusal steps\)/,
+    'placement must be decided from the steps this render actually produced');
+  assert.match(panel, /\(when \(:on-panel placement\)/,
+    'a refusal whose row has gone must still be said, for the panel');
+  assert.match(panel, /\(f28\/refusal-on-step\? placement e\)/,
+    'a rendered row must ask the placement, not compare keys itself');
+
+  // ONE sentence component, used in both places, so they cannot drift apart.
+  assert.strictEqual((region.match(/rum\/defc f28-refusal-line/g) || []).length, 1);
+  assert.strictEqual((region.match(/\(f28-refusal-line/g) || []).length, 2,
+    'the refusal sentence must be rendered from exactly two call sites');
+  const line = form(region, '(rum/defc f28-refusal-line');
+  for (const key of [':f28/path-step-gone', ':f28/path-step-unreadable',
+                     ':f28/path-step-changed', ':f28/path-step-placeholder',
+                     ':f28/path-step-not-openable']) {
+    assert.ok(line.includes(key), `the refusal sentence never says ${key}`);
   }
 });
 
@@ -363,22 +427,25 @@ test('every refusal reason has a sentence in both languages', () => {
     .slice(listed.lastIndexOf('['), listed.lastIndexOf(']') + 1)
     .replace(/[[\]]/g, '').trim().split(/\s+/);
   assert.deepStrictEqual(reasons.slice().sort(),
-    [':missing', ':mismatch', ':no-identity', ':page', ':unreadable'].sort());
+    [':missing', ':mismatch', ':no-identity', ':page', ':placeholder',
+     ':unreadable'].sort());
 
   const { region } = f28Source();
   const step = form(region, '(rum/defc f28-path-step');
   // Four sentences: `:no-identity` and `:page` share the one that says the step
   // cannot be opened at all, and neither can be reached from a rendered
   // control — the step is not drawn as one.
+  const line = form(region, '(rum/defc f28-refusal-line');
   for (const key of [':f28/path-step-gone', ':f28/path-step-unreadable',
-                     ':f28/path-step-changed', ':f28/path-step-not-openable']) {
-    assert.ok(step.includes(key), `the panel never says ${key}`);
+                     ':f28/path-step-changed', ':f28/path-step-placeholder',
+                     ':f28/path-step-not-openable']) {
+    assert.ok(line.includes(key), `the panel never says ${key}`);
   }
   for (const dict of ['en.edn', 'ko.edn']) {
     const body = fs.readFileSync(path.join(REPO, 'src', 'resources', 'dicts', dict), 'utf8');
     for (const key of [':f28/path-open-step', ':f28/path-step-gone',
                        ':f28/path-step-unreadable', ':f28/path-step-changed',
-                       ':f28/path-step-not-openable']) {
+                       ':f28/path-step-placeholder', ':f28/path-step-not-openable']) {
       assert.ok(body.includes(key), `${dict} has no ${key}`);
     }
   }
@@ -404,8 +471,13 @@ test('making a level actionable introduces no renderer, no fetch and no macro', 
   assert.match(step, /f27c\/preview-label/, 'the same bounded label must still be used');
   // The only elements it may build.
   const tags = [...step.matchAll(/\[:([a-z]+)[.\s\]]/g)].map((m) => m[1]);
-  assert.deepStrictEqual([...new Set(tags)].sort(), ['button', 'div', 'li', 'span'],
+  assert.deepStrictEqual([...new Set(tags)].sort(), ['button', 'li', 'span'],
     `a path step builds ${[...new Set(tags)].join(', ')}`);
+  // The refusal sentence is its own component now, and it is plain text too.
+  const line = code(form(region, '(rum/defc f28-refusal-line'));
+  const lineTags = [...line.matchAll(/\[:([a-z]+)[.\s\]]/g)].map((m) => m[1]);
+  assert.deepStrictEqual([...new Set(lineTags)].sort(), ['div', 'span'],
+    `the refusal sentence builds ${[...new Set(lineTags)].join(', ')}`);
 });
 
 test('the panel does not claim a snapshot it does not take', () => {

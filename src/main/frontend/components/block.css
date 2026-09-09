@@ -2025,13 +2025,19 @@ html.is-mac {
 }
 
 /* Said against the step that refused, not once for the whole panel: a path of
-   identical rows would otherwise leave the reader to guess which one is gone. */
+   identical rows would otherwise leave the reader to guess which one is gone.
+   When a redraw has taken that row away, the same sentence is said for the
+   panel instead — never dropped. */
 
 .f28-path-gone {
   flex-basis: 100%;
   margin: 0.15rem 0 0.25rem 0;
   opacity: 0.85;
   font-size: 0.9em;
+}
+
+.f28-path-gone-panel > .f28-path-gone {
+  margin-top: 0.3rem;
 }
 
 .f28-path-level {

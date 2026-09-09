@@ -33,7 +33,8 @@
       and the hard cap are three different answers, each withdrawing the
       continuation control for its own reason, and none of them is
       `:complete`."
-  (:require [frontend.util.f27-context :as f27c]))
+  (:require [frontend.util.f27-context :as f27c]
+            [frontend.util.f27-outgoing :as f27o]))
 
 ;; ---------------------------------------------------------------------------
 ;; Constants
@@ -297,6 +298,31 @@
   [e]
   (some? (step-identity e)))
 
+(defn readable-block?
+  "True when a freshly resolved entity is a block somebody actually wrote.
+
+  **Added 2026-09-09 after supervisor review.** `navigation` accepted any
+  non-page entity whose identity matched, so `{:block/uuid captured :db/id 123}`
+  reached `:open`. Entity existence is not proof of a readable source block: OG
+  can retain an identity-only entity for a reference nobody has written, and
+  transacting a lookup ref that resolves to nothing CREATES exactly that. The
+  promise this control makes — *it opens its existing source block* — was
+  therefore not kept for a placeholder.
+
+  `frontend.util.f27-outgoing/readable-target?` is the convention the F27 work
+  already settled on for this question, and it decides the same half here: an
+  entity with `:block/content` PRESENT. This adds one thing to it — the content
+  must be a STRING — because an absent field and a field holding something that
+  is not text are the same fact for a reader, and neither is a block to open.
+
+  A block somebody wrote and left EMPTY keeps its content as `\"\"`, which is
+  present and is a string, so it stays openable. That distinction is the whole
+  point: `\"\"` is a real position in the outline with nothing written at it,
+  and the panel already has a sentence for a step with no text."
+  [e]
+  (boolean (and (f27o/readable-target? e)
+                (string? (:block/content e)))))
+
 (def navigation-refusals
   "Every reason activating a step does NOT navigate, in the order checked.
 
@@ -304,7 +330,7 @@
   each one is a separate test, and each one gets its own sentence on screen. A
   refusal that cannot say why it refused is indistinguishable from a control
   that is simply broken."
-  [:no-identity :unreadable :missing :mismatch :page])
+  [:no-identity :unreadable :missing :mismatch :page :placeholder])
 
 (defn navigation
   "What activating one disclosed step must do.
@@ -334,7 +360,10 @@
 
   `:page` is the same kind of guard. `disclosure` separates the source page out
   of the steps, so a page cannot reach this; if one ever does, the honest answer
-  is that this control does not know where it would be sending the reader."
+  is that this control does not know where it would be sending the reader.
+
+  `:placeholder` is the one this function got wrong until 2026-09-09: a matching
+  identity was taken as proof of a block. It is not — see `readable-block?`."
   [captured lookup]
   (let [fresh (:found lookup)]
     (cond
@@ -343,6 +372,7 @@
       (nil? fresh)                        {:action :refuse :reason :missing}
       (not= captured (:block/uuid fresh)) {:action :refuse :reason :mismatch}
       (f27c/page-entity? fresh)           {:action :refuse :reason :page}
+      (not (readable-block? fresh))       {:action :refuse :reason :placeholder}
       :else                               {:action :open :uuid (:block/uuid fresh)})))
 
 (defn opened
@@ -357,3 +387,39 @@
   "The reason `navigation` refused, or nil when it did not."
   [decision]
   (when (= :refuse (:action decision)) (:reason decision)))
+
+(defn refusal-placement
+  "Where the panel must say that a step could not be opened.
+
+  **Added 2026-09-09 after supervisor review.** The refusal was recorded against
+  a step's RENDER KEY, which is `position-identity`. Two redraws break that, and
+  both are ordinary:
+
+    * the second press of a deep path prepends the outer levels, so every step
+      shifts position and the same block's key changes;
+    * a walk that fails higher up returns fewer steps, so the refused row leaves
+      the panel altogether.
+
+  In either case the message silently disappeared, and a reader who pressed
+  something was told nothing at all. Keyed by IDENTITY instead:
+
+    nil               nothing has been refused
+    {:on-step uuid}   a rendered step carries that identity — say it there
+    {:on-panel true}  it does not — say it for the panel, because the row going
+                      away is not a reason to stop explaining what happened
+
+  A refusal with no identity at all also lands on the panel: it cannot be
+  attached to a row, and dropping it would be the same silence."
+  [refusal steps]
+  (when (:reason refusal)
+    (let [u (:uuid refusal)]
+      (if (and u (some #(= u (:block/uuid %)) steps))
+        {:on-step u}
+        {:on-panel true}))))
+
+(defn refusal-on-step?
+  "True when this step is the one that refused. Asked once per rendered row, so
+  the comparison lives here rather than being spelled out in a hiccup body."
+  [placement e]
+  (boolean (and (:on-step placement)
+                (= (:on-step placement) (:block/uuid e)))))

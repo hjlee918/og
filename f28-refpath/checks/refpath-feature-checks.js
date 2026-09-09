@@ -49,6 +49,7 @@ const EC = require(path.join(REPO, 'f27-inline', 'checks', 'error-classifier.js'
 const RG = require('./make-refpath-graph.js');
 const APP = require('./packaged-app.js');
 const NOISE = require('./browser-noise.js');
+const FAULT = require('./lookup-fault.js');
 const REC = require('./recorder.js');
 
 const EVIDENCE = path.join(FEATURE_DIR, 'evidence');
@@ -222,6 +223,10 @@ async function main() {
                   gone: clean((li.querySelector('.f28-path-gone') || {}).innerText),
                 };
               }),
+              // The refusal said for the PANEL rather than for a row — where it
+              // goes when a redraw has taken the refused row away.
+              gonePanel: clean((panel.querySelector('.f28-path-gone-panel') || {}).innerText),
+              goneRows: [...panel.querySelectorAll('.f28-path-step .f28-path-gone')].length,
               status: clean((panel.querySelector('.f28-path-status') || {}).innerText),
               snapshot: clean((panel.querySelector('.f28-path-snapshot') || {}).innerText),
               incomplete: clean((panel.querySelector('.f28-path-incomplete') || {}).innerText),
@@ -843,6 +848,260 @@ async function main() {
     await goTo(RG.ANCHOR);
     await settle('back at the anchor page');
 
+    // ---------- N1 : the negative path, with a NARROW SIMULATED FAULT ----------
+    //
+    // SIMULATED EVIDENCE, AND SAID SO EVERYWHERE IT IS RECORDED.
+    //
+    // The refusal path can only be seen when a lookup answers badly, and every
+    // way of arranging that in the GRAPH removes the row before it can be
+    // pressed — deleting an ancestor takes it out of the ancestor walk, and
+    // usually takes the whole reference with it. So the fault is injected at
+    // the lookup, in the page, for ONE identity, for the length of one press,
+    // and removed again (`checks/lookup-fault.js`).
+    //
+    // What this establishes: the product refuses, says which kind of refusal it
+    // is, navigates nowhere, creates nothing, leaves the other group alone, and
+    // still works afterwards. What it does NOT establish: that any particular
+    // graph condition produces such an answer.
+    //
+    // NOTHING HERE WRITES TO THE GRAPH, so there are no setup mutations to keep
+    // apart from the navigation interval — and the graph is hashed either side
+    // of this section anyway, so the claim is about this section specifically
+    // rather than about the run as a whole.
+    say('\nN1  a destination that cannot be opened (SIMULATED lookup fault)');
+    phase('negative-destination', 'refuse-a-destination-that-cannot-be-opened');
+
+    const negativeBefore = GH.snapshot(GRAPH);
+    observations.negative = { simulated: true, scenes: [] };
+
+    // Everything closed, so each scene starts from a known state.
+    for (const k of ['deepA', 'same', 'deepest', 'four']) {
+      const g = (groupOf(await readRefs(), k) || {}).group;
+      if (g && g.panel) await pressInPanel(k, '.f28-path-hide');
+    }
+    refs = await readRefs();
+    record('N1.1', 'every path is closed before the negative scenes', refs.panels === 0,
+      `${refs.panels} panel(s)`);
+
+    // Two paths open at once: the refusal must stay inside the one that asked.
+    await pressToggle('deepA', 'click');
+    await pressToggle('same', 'click');
+    refs = await readRefs();
+    record('N1.2', 'two paths are open, and neither has been refused anything',
+      refs.panels === 2 &&
+        refs.items.every((i) => i.groups.every((gp) => !gp.panel ||
+          (gp.panel.goneRows === 0 && gp.panel.gonePanel === ''))),
+      `${refs.panels} panel(s), 0 refusals on screen`);
+
+    // Three ways a lookup can answer badly, on the SAME step — the outermost
+    // level of the seven-deep path, whose identity the fixture declares.
+    const sentences = {};
+    for (const mode of ['missing', 'throw', 'placeholder']) {
+      const put = await FAULT.install(page, 'entity', U.deepTop, mode);
+      if (!put.ok) {
+        record(`N1.3.${mode}`, `a narrow ${mode} fault could be installed`, false,
+          put.reason || 'refused');
+        continue;
+      }
+      const before = await FAULT.status(page);
+      const pressed = await pressStep('deepA', 0, 'click');
+      const hash = await hashNow();
+      const after = await FAULT.status(page);
+      const off = await FAULT.remove(page);
+      refs = await readRefs();
+      const gp = ((groupOf(refs, 'deepA') || {}).group || {}).panel;
+      const said = gp ? (gp.steps[0] || {}).gone : '';
+      sentences[mode] = said;
+      observations.negative.scenes.push({
+        simulated: true, mode, pressed, hash, said,
+        callsBeforePress: before.calls, hitsBeforePress: before.hits,
+        callsAfterPress: after.calls, hitsAfterPress: after.hits,
+        restored: off.restored,
+      });
+      record(`N1.3.${mode}`,
+        `a lookup that answers "${mode}" produces a visible refusal on that step, ` +
+        'and nothing else',
+        pressed === true && !!gp && said.length > 0 && gp.goneRows === 1 &&
+          gp.gonePanel === '' &&
+          hash === `#/page/${encodeURIComponent(RG.ANCHOR)}` &&
+          refs.editors === 0 && off.restored === true,
+        `"${said.slice(0, 110)}" — hash ${hash === `#/page/${encodeURIComponent(RG.ANCHOR)}`
+          ? 'unchanged' : hash}, ${gp ? gp.goneRows : '?'} row(s) refused, ` +
+        `${refs.editors} editor(s), restored ${off.restored}`);
+      record(`N1.4.${mode}`,
+        'the fault acted ONLY on the one identity it names',
+        after.hits > before.hits && after.calls > after.hits,
+        `${after.hits} hit(s) on ${U.deepTop} out of ${after.calls} lookup(s) ` +
+        'that passed through the wrapper');
+    }
+
+    record('N1.5', 'each kind of bad answer says something DIFFERENT',
+      new Set(Object.values(sentences).filter(Boolean)).size ===
+        Object.values(sentences).filter(Boolean).length &&
+        Object.keys(sentences).length === 3,
+      JSON.stringify(sentences, null, 0).slice(0, 400));
+    // The correction this batch exists for: an entity carrying only an identity
+    // is not a block, and must not be opened as one.
+    record('N1.6', 'an identity-only entity is refused as a placeholder, not opened',
+      !!sentences.placeholder && /identity but nothing written/i.test(sentences.placeholder),
+      sentences.placeholder ? `"${sentences.placeholder.slice(0, 150)}"`
+                            : 'nothing was said for the placeholder case');
+
+    refs = await readRefs();
+    const otherGroup = (groupOf(refs, 'same') || {}).group;
+    record('N1.7', 'the other open path was never told anything: its state is its own',
+      !!otherGroup && !!otherGroup.panel && otherGroup.panel.goneRows === 0 &&
+        otherGroup.panel.gonePanel === '' &&
+        otherGroup.panel.steps.length === D.same.hidden,
+      otherGroup && otherGroup.panel
+        ? `${otherGroup.panel.steps.length} step(s), ${otherGroup.panel.goneRows} refused, ` +
+          `panel-level "${otherGroup.panel.gonePanel}"`
+        : 'the other path is not open');
+    record('N1.8', 'nothing was created: the list is exactly what it was',
+      refs.items.length === 4 && refs.heading.includes('11') &&
+        [...new Set(refs.items.flatMap((i) => i.groups.flatMap((gp) => gp.blocks)))]
+          .length === 11,
+      `${refs.items.length} source page(s), "${refs.heading}"`);
+
+    // ---- the redraw: the row moves, and then it goes ----
+    //
+    // Two things a redraw does to a refused row, both ordinary, and the reason
+    // the refusal is recorded by identity rather than by position.
+    phase('negative-destination', 'redraw-a-panel-that-has-refused-something');
+    await pressInPanel('same', '.f28-path-hide');
+    await pressInPanel('deepA', '.f28-path-hide');
+
+    // The 14-deep path's ancestors carry no declared identity, so they are read
+    // off the page itself — this is the HARNESS naming a block, never the
+    // product finding one.
+    await goTo(RG.DEEPEST_PAGE);
+    await sleep(2500);
+    const chain = await page.evaluate(() => {
+      const out = [];
+      for (const el of document.querySelectorAll('#main-content-container [blockid]')) {
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        out.push({ id: el.getAttribute('blockid'), text: t.slice(0, 40) });
+      }
+      return out;
+    }).catch(() => []);
+    const findLevel = (n) => (chain.find(
+      (b) => b.text.startsWith(`깊이 ${n} · 조상`)) || {}).id || null;
+    const lvl4 = findLevel(4);
+    const lvl5 = findLevel(5);
+    observations.negative.discovered = { level4: lvl4, level5: lvl5, seen: chain.length };
+    record('N1.9', 'the two levels this scene needs were located on the page itself',
+      !!lvl4 && !!lvl5 && lvl4 !== lvl5,
+      `level 4 ${lvl4}, level 5 ${lvl5}, out of ${chain.length} block(s) read`);
+
+    await goTo(RG.ANCHOR);
+    await settle('back at the anchor page for the redraw scene');
+
+    if (lvl4 && lvl5) {
+      // Refuse level 4, which the FIRST press shows as row 1 of 8.
+      const put = await FAULT.install(page, 'entity', lvl4, 'missing');
+      await pressToggle('deepest', 'click');
+      const pressedDeep = await pressStep('deepest', 0, 'click');
+      await FAULT.remove(page);
+      refs = await readRefs();
+      let dp = ((groupOf(refs, 'deepest') || {}).group || {}).panel;
+      const refusedText = dp ? (dp.steps[0] || {}).text : '';
+      record('N1.10', 'the outermost level read so far refuses, on its own row',
+        put.ok === true && pressedDeep === true && !!dp && dp.goneRows === 1 &&
+          (dp.steps[0] || {}).gone.length > 0 && dp.gonePanel === '' &&
+          refusedText.includes('깊이 4'),
+        dp ? `row 1 of ${dp.steps.length} ("${refusedText.slice(0, 24)}") refused; ` +
+             `panel-level "${dp.gonePanel}"` : 'no panel');
+
+      // Reading FURTHER up prepends three levels, so every row shifts. A refusal
+      // keyed by position would be lost here; keyed by identity it follows.
+      await pressInPanel('deepest', '.f28-path-more');
+      refs = await readRefs();
+      dp = ((groupOf(refs, 'deepest') || {}).group || {}).panel;
+      const carrier = dp ? dp.steps.findIndex((st) => st.gone.length > 0) : -1;
+      observations.negative.rekey = dp
+        ? { steps: dp.steps.length, refusedIndex: carrier,
+            refusedText: carrier >= 0 ? dp.steps[carrier].text.slice(0, 30) : null,
+            gonePanel: dp.gonePanel }
+        : null;
+      record('N1.11', 'reading further up renumbers every row, and the explanation ' +
+        'stays on the block it belongs to',
+        !!dp && dp.steps.length > 8 && dp.goneRows === 1 && carrier > 0 &&
+          dp.steps[carrier].text.includes('깊이 4') && dp.gonePanel === '',
+        dp ? `${dp.steps.length} step(s); the refusal is on row ${carrier + 1} ` +
+             `("${carrier >= 0 ? dp.steps[carrier].text.slice(0, 24) : '-'}")`
+           : 'no panel');
+
+      // And now the row itself goes: a SECOND simulated fault stops the ancestor
+      // walk below level 4, so the panel no longer contains that block at all.
+      await pressInPanel('deepest', '.f28-path-hide');
+      const put2 = await FAULT.install(page, 'entity', lvl4, 'missing');
+      await pressToggle('deepest', 'click');
+      await pressStep('deepest', 0, 'click');
+      await FAULT.remove(page);
+      const put3 = await FAULT.install(page, 'parent', lvl5, 'throw');
+      await pressInPanel('deepest', '.f28-path-more');
+      // Read while the walk is still failing. Restoring first would let the
+      // next render put the row back, and the check would be measuring a
+      // different moment than the one it describes.
+      refs = await readRefs();
+      const walkFault = await FAULT.status(page);
+      await FAULT.remove(page);
+      dp = ((groupOf(refs, 'deepest') || {}).group || {}).panel;
+      const stillThere = dp ? dp.steps.some((st) => st.text.includes('깊이 4')) : true;
+      observations.negative.rowGone = dp
+        ? { simulated: true, steps: dp.steps.length, refusedRows: dp.goneRows,
+            gonePanel: dp.gonePanel, status: dp.status,
+            level4StillOnScreen: stillThere, walkHits: walkFault.hits }
+        : null;
+      record('N1.12', 'when a redraw takes the refused row away, the explanation ' +
+        'is said for the PANEL instead of disappearing with it',
+        put2.ok === true && put3.ok === true && !!dp && stillThere === false &&
+          dp.goneRows === 0 && dp.gonePanel.length > 0,
+        dp ? `level 4 on screen: ${stillThere}; ${dp.goneRows} row refusal(s), ` +
+             `panel-level "${dp.gonePanel.slice(0, 90)}"` : 'no panel');
+      record('N1.13', 'and the panel also says, separately, that it could not read ' +
+        'that far — the two sentences are different facts',
+        !!dp && /could not be read/i.test(dp.status) && dp.hasMore === false,
+        dp ? `status "${dp.status.slice(0, 90)}", continuation offered: ${dp.hasMore}`
+           : 'no panel');
+      await pressInPanel('deepest', '.f28-path-hide');
+    }
+
+    // ---- the seam is gone, and the feature still works ----
+    phase('negative-destination', 'restore-and-navigate-for-real');
+    const leftOver = await FAULT.status(page);
+    record('N1.14', 'no fault is left installed once the negative scenes are over',
+      leftOver.installed === false, JSON.stringify(leftOver));
+
+    await pressToggle('deepA', 'click');
+    refs = await readRefs();
+    const reopened = ((groupOf(refs, 'deepA') || {}).group || {}).panel;
+    record('N1.15', 'a fresh disclosure carries no refusal from before',
+      !!reopened && reopened.goneRows === 0 && reopened.gonePanel === '' &&
+        reopened.steps.length === D.deepA.hidden,
+      reopened ? `${reopened.steps.length} step(s), ${reopened.goneRows} refused, ` +
+                 `panel-level "${reopened.gonePanel}"` : 'no panel');
+
+    const okAgain = await pressStep('deepA', 0, 'click');
+    const finalHash = await hashNow();
+    record('N1.16', 'and the same step opens its block for real, once the lookup ' +
+      'answers normally again',
+      okAgain === true && typeof finalHash === 'string' &&
+        finalHash.toLowerCase().includes(U.deepTop),
+      `${finalHash} (wanted ${U.deepTop})`);
+    await goBack();
+    await settle('after the negative section');
+
+    const negativeAfter = GH.snapshot(GRAPH);
+    const negCmp = GH.compare(negativeBefore, negativeAfter);
+    observations.negative.contentChanges = negCmp.content;
+    record('N1.17', 'the whole negative section wrote nothing to the graph',
+      negCmp.content.length === 0,
+      negCmp.content.length
+        ? JSON.stringify(negCmp.content.map((c) => `${c.change} ${c.file}`))
+        : `0 content changes across ${negCmp.afterCount} files, measured either ` +
+          'side of this section rather than only across the run');
+
     // ---------- P13 : the right sidebar, a NAMED exclusion ----------
     say('\nP13 the same list in the right sidebar gets nothing at all');
     phase('regression', 'open-the-anchor-page-in-the-right-sidebar');
@@ -900,6 +1159,9 @@ async function main() {
       !!sidebar && sidebar.inertMore > 0,
       sidebar ? `${sidebar.inertMore} "⋯" marker(s) in the sidebar's breadcrumbs` : 'no reading');
   } finally {
+    // A simulated fault must never outlive the section that installed it, even
+    // when something above threw on the way out.
+    await FAULT.removeQuietly(page);
     // The structured evidence the error rule needs, taken while the window is
     // still there. A run that could not collect it pairs NOTHING, which is the
     // direction this must fail in.
@@ -984,7 +1246,8 @@ async function main() {
   // using the keyboard, collapsing one, and opening a level. Named as a set so
   // adding a phase without adding it here is a visible omission rather than a
   // silently narrower claim.
-  const FEATURE_PHASES = ['disclose', 'keyboard', 'focus', 'navigate'];
+  const FEATURE_PHASES = ['disclose', 'keyboard', 'focus', 'navigate',
+                          'negative-destination'];
   const duringFeature = errors.entries().filter((e) => FEATURE_PHASES.includes(e.phase));
   record('P14.6', 'no error at all arrived while the disclosure was being operated',
     duringFeature.length === 0,

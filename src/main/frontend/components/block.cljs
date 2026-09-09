@@ -6710,6 +6710,25 @@
   (str "f28-path-"
        (string/replace (str (:id config) "-" block-id) #"[^A-Za-z0-9_-]" "_")))
 
+(rum/defc f28-refusal-line
+  "Why a step could not be opened, in one sentence.
+
+  One component for BOTH places it can appear — against the row that refused,
+  and, when a redraw has taken that row away, for the panel — so the reader is
+  told the same thing either way and the two cannot drift apart.
+
+  `cond`, not `case`, for the reason the panel's status line gives: a `case`
+  clause whose result is a literal nil is compiled away inside a hiccup body."
+  [reason]
+  [:div.f28-path-gone
+   [:span.f28-path-mark "⚠"] " "
+   (cond
+     (= reason :missing) (t :f28/path-step-gone)
+     (= reason :unreadable) (t :f28/path-step-unreadable)
+     (= reason :mismatch) (t :f28/path-step-changed)
+     (= reason :placeholder) (t :f28/path-step-placeholder)
+     :else (t :f28/path-step-not-openable))])
+
 (rum/defc f28-path-step
   "One disclosed ancestor: PLAIN TEXT, and — new in this batch — a way to go there.
 
@@ -6761,14 +6780,7 @@
      ;; The refusal is shown HERE, against the step that refused, rather than as
      ;; one line for the whole panel: a path of four identical rows would
      ;; otherwise say "one of these is gone" and leave the reader to guess which.
-     (when refusal
-       [:div.f28-path-gone
-        [:span.f28-path-mark "⚠"] " "
-        (cond
-          (= refusal :missing) (t :f28/path-step-gone)
-          (= refusal :unreadable) (t :f28/path-step-unreadable)
-          (= refusal :mismatch) (t :f28/path-step-changed)
-          :else (t :f28/path-step-not-openable))])]))
+     (when refusal (f28-refusal-line refusal))]))
 
 (rum/defc f28-source-path-panel
   "The part of one reference's ancestor path that OG's breadcrumb did not show.
@@ -6802,7 +6814,12 @@
         loaded (f27ctx/load-ancestors (f27-parent-fn repo) uuid (f28/request-limit press))
         {:keys [steps page hidden depth status complete?]}
         (f28/disclosure loaded f28/og-visible-levels)
-        more-press (f28/next-press press loaded)]
+        more-press (f28/next-press press loaded)
+        ;; WHERE the refusal is said is decided from the steps this render
+        ;; actually produced, not from the ones that were on screen when the
+        ;; reader pressed. A redraw renumbers them, and a walk that fails higher
+        ;; up removes them; neither is a reason to stop explaining.
+        placement (f28/refusal-placement refusal steps)]
     [:div.f28-path-panel {:id panel-id
                           :role "group"
                           :aria-label (t :f28/path-panel-label)}
@@ -6815,20 +6832,25 @@
                              (t :f28/path-nothing-hidden))]
        [:ol.f28-path-steps
         (map-indexed (fn [i e]
-                       (let [k (f28/step-key i e)]
-                         (rum/with-key
-                           (f28-path-step e (when complete? (inc i))
-                                          ;; A step with no stable identity is
-                                          ;; not offered at all — deciding that
-                                          ;; while rendering is what keeps a
-                                          ;; control from existing only to say
-                                          ;; no.
-                                          (when (f28/navigable-step? e)
-                                            #(on-open-step k e))
-                                          (when (= k (:key refusal))
-                                            (:reason refusal)))
-                           k)))
+                       (rum/with-key
+                         (f28-path-step e (when complete? (inc i))
+                                        ;; A step with no stable identity is
+                                        ;; not offered at all — deciding that
+                                        ;; while rendering is what keeps a
+                                        ;; control from existing only to say
+                                        ;; no.
+                                        (when (f28/navigable-step? e)
+                                          #(on-open-step e))
+                                        (when (f28/refusal-on-step? placement e)
+                                          (:reason refusal)))
+                         (f28/step-key i e)))
                      steps)])
+     ;; The row the reader pressed is not on screen any more — it was renumbered
+     ;; away by a deeper read, or the walk stopped before reaching it. The
+     ;; explanation stays, for the panel, because the reader still pressed
+     ;; something and is still owed an answer.
+     (when (:on-panel placement)
+       [:div.f28-path-gone-panel (f28-refusal-line (:reason refusal))])
      ;; `cond`, not `case`: the outgoing batch found that a `case` clause whose
      ;; result is a literal `nil` is compiled away inside a hiccup body, taking
      ;; the default with it. A `cond`'s clauses are pairs by construction.
@@ -6909,7 +6931,7 @@
         ;; "this exact block is there now" refuses and says why — it never
         ;; creates a block or a page, never falls back to the source page, and
         ;; never looks for a block that merely reads the same.
-        open-step! (fn [k e]
+        open-step! (fn [e]
                      (let [captured (f28/step-identity e)
                            lookup (try
                                     {:found (when captured
@@ -6927,7 +6949,11 @@
                              ;; — which is the case in which OG's own
                              ;; `redirect-to-page!` creates a page (#3511).
                              (route-handler/redirect-to-page! target))
-                         (reset! *refusal {:key k :reason (f28/refused decision)}))))
+                         ;; Recorded by IDENTITY, never by position: the row
+                         ;; this belongs to moves when the path is read further,
+                         ;; and it can leave the panel entirely.
+                         (reset! *refusal {:uuid captured
+                                           :reason (f28/refused decision)}))))
         control (fn []
                   [:button.f28-path-toggle.f27-btn
                    (f27-btn #(do (reset! *refusal nil)
@@ -6944,7 +6970,11 @@
      (when press
        (f28-source-path-panel
         repo block-id panel-id press
-        {:on-more (fn [n] (reset! *refusal nil) (reset! *press n))
+        ;; Reading FURTHER up the path does not clear a refusal. It is not a
+        ;; fresh disclosure — the steps already on screen stay on screen, the
+        ;; refused one among them — so withdrawing the explanation here would
+        ;; take it away for no reason the reader gave.
+        {:on-more (fn [n] (reset! *press n))
          ;; Collapsing from INSIDE the path returns focus to the control that
          ;; opened it. Without this the reader's focus is on a button that has
          ;; just been removed from the document, and the next Tab starts from
