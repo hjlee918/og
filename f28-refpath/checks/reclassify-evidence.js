@@ -110,6 +110,28 @@ function main() {
     }
   }
 
+  // An UNRESOLVED retained run stays unresolved for ever — the evidence it
+  // needed was never taken. What can change is whether a LATER run of the same
+  // scenario answered the same question under the corrected rule. Saying so is
+  // the difference between an open question and a closed one.
+  const kindOf = (f) => (f.includes('baseline') ? 'baseline'
+                       : (f.includes('feature') ? 'feature' : 'other'));
+  for (const row of rows) {
+    if (row.status !== 'unresolved') continue;
+    const later = rows.filter((r) => r !== row && kindOf(r.file) === kindOf(row.file) &&
+                                     r.status === 'unchanged' &&
+                                     r.windowErrorEventsCollected === true &&
+                                     r.file > row.file);
+    if (later.length) {
+      row.supersededBy = later[later.length - 1].file;
+      row.note += ' It has since been superseded by ' + row.supersededBy +
+                  ', which answered the same question with the evidence the rule requires.';
+    } else {
+      row.supersededBy = null;
+      row.note += ' No later run of this scenario has yet answered it under the corrected rule.';
+    }
+  }
+
   const out = path.join(EVIDENCE, 'f28-refpath-reclassification.json');
   fs.writeFileSync(out, JSON.stringify({
     at: new Date().toISOString(),
@@ -128,9 +150,17 @@ function main() {
   console.log('[reclassify] no retained file was modified, renamed or removed');
 
   const unresolved = rows.filter((r) => r.status === 'unresolved');
-  if (unresolved.length) {
-    console.log(`[reclassify] ${unresolved.length} run(s) UNRESOLVED; ` +
-                'the narrow scenario must be run again under the corrected rule');
+  const open = unresolved.filter((r) => !r.supersededBy);
+  for (const r of unresolved) {
+    console.log(`[reclassify] ${r.file} is unresolved and ` +
+                (r.supersededBy ? `superseded by ${r.supersededBy}`
+                                : 'NOT yet superseded'));
+  }
+  if (open.length) {
+    console.log(`[reclassify] ${open.length} run(s) still need the narrow scenario ` +
+                'run again under the corrected rule');
+  } else if (unresolved.length) {
+    console.log('[reclassify] every unresolved run has been superseded by a later one');
   }
 }
 
