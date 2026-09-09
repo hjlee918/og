@@ -106,34 +106,44 @@ async function install(page, seam, uuid, mode) {
       ? orig.cljs$core$IFn$_invoke$arity$2(a, b)
       : orig.call(null, a, b));
 
-    const two = (a, b) => {
-      state.calls += 1;
-      if (!isTarget(a, b)) return passThrough2(a, b);
-      state.hits += 1;
+    /** The one bad answer this fault gives, whichever arity asked for it. */
+    const bad = () => {
       if (faultMode === 'missing') return null;
       if (faultMode === 'throw') throw new Error('F28 SIMULATED lookup fault');
       // An identity-only entity: it exists, its uuid matches, and nobody has
-      // written anything at it.
+      // written anything at it. The exact shape the supervisor named.
       let m = core.PersistentArrayMap.EMPTY;
       m = assoc3(m, kw('block', 'uuid'), core.uuid(target));
       m = assoc3(m, kw('db', 'id'), 123);
       return m;
     };
 
-    const patched = function (a, b) {
-      if (arguments.length === 2) return two(a, b);
+    const two = (a, b) => {
       state.calls += 1;
-      return orig.cljs$core$IFn$_invoke$arity$1
-        ? orig.cljs$core$IFn$_invoke$arity$1(a)
-        : orig.call(null, a);
+      if (!isTarget(a, b)) return passThrough2(a, b);
+      state.hits += 1;
+      return bad();
+    };
+
+    // Arity 1 takes the lookup ref alone and uses the current repo. It is
+    // faulted on the same rule, so a probe cannot answer differently from the
+    // call the product makes, and neither arity is a way past the other.
+    const one = (a) => {
+      state.calls += 1;
+      if (!isTarget(null, a)) {
+        return orig.cljs$core$IFn$_invoke$arity$1
+          ? orig.cljs$core$IFn$_invoke$arity$1(a)
+          : orig.call(null, a);
+      }
+      state.hits += 1;
+      return bad();
+    };
+
+    const patched = function (a, b) {
+      return arguments.length === 2 ? two(a, b) : one(a);
     };
     patched.cljs$core$IFn$_invoke$arity$2 = two;
-    patched.cljs$core$IFn$_invoke$arity$1 = function (a) {
-      state.calls += 1;
-      return orig.cljs$core$IFn$_invoke$arity$1
-        ? orig.cljs$core$IFn$_invoke$arity$1(a)
-        : orig.call(null, a);
-    };
+    patched.cljs$core$IFn$_invoke$arity$1 = one;
 
     ns[prop] = patched;
     g.__f28Fault = { prop, orig, patched, state };
@@ -152,6 +162,51 @@ async function status(page) {
              calls: f.state.calls, hits: f.state.hits,
              seam: f.state.seam, mode: f.state.mode, target: f.state.target };
   }).catch(() => ({ installed: false, unreadable: true }));
+}
+
+/**
+ * Ask the seam about ONE identity, through whatever is currently installed.
+ *
+ * This is how narrowness is shown rather than inferred: with a fault on one
+ * identity, a probe of THAT identity gets the bad answer and a probe of any
+ * other gets the real block, in the same instant, through the same function.
+ * Counting incidental traffic cannot show this — a quiet moment produces no
+ * traffic to count.
+ *
+ * Read-only: `entity` resolves, it does not transact.
+ */
+async function probe(page, uuid) {
+  return page.evaluate((target) => {
+    const core = window.cljs && window.cljs.core;
+    const ns = window.frontend && window.frontend.db;
+    if (!core || !ns) return { ok: false, reason: 'no runtime' };
+    const kw = (a, b) => (core.keyword.cljs$core$IFn$_invoke$arity$2
+      ? core.keyword.cljs$core$IFn$_invoke$arity$2(a, b)
+      : core.keyword.call(null, a, b));
+    const vec = (a, b) => (core.vector.cljs$core$IFn$_invoke$arity$2
+      ? core.vector.cljs$core$IFn$_invoke$arity$2(a, b)
+      : core.vector.call(null, a, b));
+    const get = (m, k) => (core.get.cljs$core$IFn$_invoke$arity$2
+      ? core.get.cljs$core$IFn$_invoke$arity$2(m, k)
+      : core.get.call(null, m, k));
+    const lr = vec(kw('block', 'uuid'), core.uuid(target));
+    try {
+      const e = ns.entity.cljs$core$IFn$_invoke$arity$1
+        ? ns.entity.cljs$core$IFn$_invoke$arity$1(lr)
+        : ns.entity.call(null, lr);
+      if (e === null || e === undefined) {
+        return { ok: true, target, found: false, threw: false, content: null };
+      }
+      const c = get(e, kw('block', 'content'));
+      return { ok: true, target, found: true, threw: false,
+               content: typeof c === 'string' ? 'string'
+                        : (c === null || c === undefined ? 'absent' : typeof c),
+               sample: typeof c === 'string' ? c.slice(0, 30) : null };
+    } catch (err) {
+      return { ok: true, target, found: false, threw: true,
+               message: String(err && err.message).slice(0, 60) };
+    }
+  }, uuid).catch((e) => ({ ok: false, reason: String(e.message) }));
 }
 
 /** Remove the fault and prove the original is back, by object identity. */
@@ -174,4 +229,4 @@ async function removeQuietly(page) {
   try { return await remove(page); } catch (e) { return { removed: false }; }
 }
 
-module.exports = { install, remove, removeQuietly, status, SEAMS, MODES };
+module.exports = { install, remove, removeQuietly, status, probe, SEAMS, MODES };

@@ -845,8 +845,23 @@ async function main() {
       ogClicked === true && ogAfter.hash === ogBefore.hash,
       `clicked: ${ogClicked}; ${ogBefore.hash} → ${ogAfter.hash}`);
 
+    // P12.11 re-scoped that group IN PLACE, which is OG's own behaviour and the
+    // point of the check — but it leaves the group showing an ancestor's
+    // subtree, and setting the SAME hash again does not reload anything. Go
+    // somewhere else first, so the next section starts from the list as it is
+    // ordinarily rendered.
+    await goTo(RG.DEEP_PAGE);
     await goTo(RG.ANCHOR);
     await settle('back at the anchor page');
+    refs = await readRefs();
+    record('P12.12', "the group OG re-scoped is back to the list's own shape",
+      refs.items.length === 4 &&
+        [...new Set(refs.items.flatMap((i) => i.groups.flatMap((gp) => gp.blocks)))]
+          .length === 11 &&
+        !!(groupOf(refs, 'deepA') || {}).group.toggle,
+      `${refs.items.length} page(s), ` +
+      `${[...new Set(refs.items.flatMap((i) => i.groups.flatMap((gp) => gp.blocks)))].length} ` +
+      'referencing block(s), the deep group has its control back');
 
     // ---------- N1 : the negative path, with a NARROW SIMULATED FAULT ----------
     //
@@ -904,6 +919,13 @@ async function main() {
         continue;
       }
       const before = await FAULT.status(page);
+      // Narrowness, shown in the same instant rather than inferred from
+      // whatever else the application happened to be doing: the faulted
+      // identity gets the bad answer, and another identity — one of the
+      // identical-label ancestors — gets its real block, through the same
+      // function, while the fault is installed.
+      const hitProbe = await FAULT.probe(page, U.deepTop);
+      const missProbe = await FAULT.probe(page, U.same1);
       const pressed = await pressStep('deepA', 0, 'click');
       const hash = await hashNow();
       const after = await FAULT.status(page);
@@ -916,6 +938,7 @@ async function main() {
         simulated: true, mode, pressed, hash, said,
         callsBeforePress: before.calls, hitsBeforePress: before.hits,
         callsAfterPress: after.calls, hitsAfterPress: after.hits,
+        faultedProbe: hitProbe, unfaultedProbe: missProbe,
         restored: off.restored,
       });
       record(`N1.3.${mode}`,
@@ -928,17 +951,31 @@ async function main() {
         `"${said.slice(0, 110)}" — hash ${hash === `#/page/${encodeURIComponent(RG.ANCHOR)}`
           ? 'unchanged' : hash}, ${gp ? gp.goneRows : '?'} row(s) refused, ` +
         `${refs.editors} editor(s), restored ${off.restored}`);
+      // The faulted identity gets exactly the bad answer this mode names; any
+      // other identity resolves to its real block, unchanged, at the same
+      // moment and through the same function.
+      const faulted =
+        mode === 'missing' ? (hitProbe.found === false && hitProbe.threw === false)
+        : mode === 'throw' ? hitProbe.threw === true
+        : (hitProbe.found === true && hitProbe.content === 'absent');
       record(`N1.4.${mode}`,
-        'the fault acted ONLY on the one identity it names',
-        after.hits > before.hits && after.calls > after.hits,
-        `${after.hits} hit(s) on ${U.deepTop} out of ${after.calls} lookup(s) ` +
-        'that passed through the wrapper');
+        'the fault acted ONLY on the one identity it names — another identity ' +
+        'resolved to its real block through the same function',
+        faulted === true && missProbe.found === true &&
+          missProbe.content === 'string' && missProbe.threw === false &&
+          after.hits > before.hits,
+        `faulted ${U.deepTop.slice(-12)} → ${JSON.stringify(hitProbe)}; ` +
+        `untouched ${U.same1.slice(-12)} → found:${missProbe.found} ` +
+        `content:${missProbe.content} "${missProbe.sample || ''}"; ` +
+        `${after.hits} hit(s) of ${after.calls} call(s) through the wrapper`);
     }
 
+    // Written so it cannot pass while nothing was said at all — which is how
+    // this check first reported success on a run where every press had missed.
+    const said3 = Object.values(sentences).filter((x) => x && x.length > 0);
     record('N1.5', 'each kind of bad answer says something DIFFERENT',
-      new Set(Object.values(sentences).filter(Boolean)).size ===
-        Object.values(sentences).filter(Boolean).length &&
-        Object.keys(sentences).length === 3,
+      said3.length === 3 && new Set(said3).size === 3,
+      `${said3.length} sentence(s), ${new Set(said3).size} distinct: ` +
       JSON.stringify(sentences, null, 0).slice(0, 400));
     // The correction this batch exists for: an entity carrying only an identity
     // is not a block, and must not be opened as one.
@@ -971,30 +1008,48 @@ async function main() {
     await pressInPanel('same', '.f28-path-hide');
     await pressInPanel('deepA', '.f28-path-hide');
 
-    // The 14-deep path's ancestors carry no declared identity, so they are read
-    // off the page itself — this is the HARNESS naming a block, never the
-    // product finding one.
-    await goTo(RG.DEEPEST_PAGE);
-    await sleep(2500);
-    const chain = await page.evaluate(() => {
-      const out = [];
-      for (const el of document.querySelectorAll('#main-content-container [blockid]')) {
-        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
-        out.push({ id: el.getAttribute('blockid'), text: t.slice(0, 40) });
+    // The 14-deep path's ancestors carry no declared identity, so the harness
+    // asks the application for them. This is the HARNESS naming a block, never
+    // the product finding one — and it is a READ, through OG's own API.
+    //
+    // Deliberately NOT by opening that page and reading the outline: the
+    // fixture writes an image link to a file that does not exist into one of
+    // those very ancestors, on purpose, so that a path step can be proved to be
+    // plain text. Rendering the page itself makes the browser try to load it
+    // and log `ERR_FILE_NOT_FOUND` — a real console error, caused by the
+    // harness looking something up. The first version of this scene did exactly
+    // that. The cause is removed rather than the error excused.
+    const chain = await page.evaluate((name) => {
+      const api = window.logseq && window.logseq.api;
+      if (!api || typeof api.get_page_blocks_tree !== 'function') {
+        return { ok: false, reason: 'logseq.api.get_page_blocks_tree is not reachable' };
       }
-      return out;
-    }).catch(() => []);
-    const findLevel = (n) => (chain.find(
+      const flat = [];
+      const walk = (bs) => {
+        for (const b of (bs || [])) {
+          flat.push({ id: String(b.uuid || ''),
+                      text: String(b.content || '').replace(/\s+/g, ' ').slice(0, 40) });
+          walk(b.children);
+        }
+      };
+      try { walk(api.get_page_blocks_tree(name)); }
+      catch (e) { return { ok: false, reason: String(e && e.message) }; }
+      return { ok: true, blocks: flat };
+    }, RG.DEEPEST_PAGE).catch((e) => ({ ok: false, reason: String(e.message) }));
+
+    const blocks = chain.ok ? chain.blocks : [];
+    const findLevel = (n) => (blocks.find(
       (b) => b.text.startsWith(`깊이 ${n} · 조상`)) || {}).id || null;
     const lvl4 = findLevel(4);
     const lvl5 = findLevel(5);
-    observations.negative.discovered = { level4: lvl4, level5: lvl5, seen: chain.length };
-    record('N1.9', 'the two levels this scene needs were located on the page itself',
-      !!lvl4 && !!lvl5 && lvl4 !== lvl5,
-      `level 4 ${lvl4}, level 5 ${lvl5}, out of ${chain.length} block(s) read`);
-
-    await goTo(RG.ANCHOR);
-    await settle('back at the anchor page for the redraw scene');
+    observations.negative.discovered = {
+      level4: lvl4, level5: lvl5, seen: blocks.length,
+      readBy: 'logseq.api.get_page_blocks_tree', ok: chain.ok, reason: chain.reason || null };
+    record('N1.9', 'the two levels this scene needs were read from the application, ' +
+      'without rendering the page that carries a deliberately missing asset',
+      chain.ok === true && !!lvl4 && !!lvl5 && lvl4 !== lvl5,
+      chain.ok ? `level 4 ${lvl4}, level 5 ${lvl5}, out of ${blocks.length} block(s) read`
+               : `could not read the page's blocks: ${chain.reason}`);
 
     if (lvl4 && lvl5) {
       // Refuse level 4, which the FIRST press shows as row 1 of 8.

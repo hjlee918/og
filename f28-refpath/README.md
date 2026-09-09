@@ -103,6 +103,7 @@ can never write into the accepted checkouts.
 | `checks/make-refpath-graph.js` | the synthetic graph: paths of 0, 2, 3, 4, 6, 7 and 14 ancestors, two branches sharing five levels, **six identical ancestors each with its own `id::`** (so THREE identical rows are disclosed and a destination chosen by label would be caught), two references under one parent, a second source page, a journal, a page link inside an elided ancestor, and a control page |
 | `checks/packaged-app.js` | launch, refuse an outside path, open one graph, assert the loaded path — shared by both scenarios so their boundary evidence cannot drift apart |
 | `checks/browser-noise.js` | ONE pre-existing browser condition, named and **correlated** rather than exempted by substring |
+| `checks/lookup-fault.js` | a narrow, restored, clearly-labelled **simulated** lookup fault — the only way the refusal path can be seen on screen |
 | `checks/refpath-baseline-checks.js` | the packaged OG-behaviour run |
 | `checks/refpath-feature-checks.js` | the packaged feature run |
 | `tests/feature-build.test.js` | identity, integrity, "this is none of the three earlier builds", and that the renderer really carries this feature |
@@ -165,12 +166,36 @@ runs so two evidence files can be compared row by row:
 | P9 | the keyboard, in a window whose global shortcut handler eats Enter |
 | P10 | the rest of the list afterwards — no editor, no navigation, the filter, Korean and emoji |
 | **P11** | **collapsing a path from inside it returns focus to that group's own control, and leaves the other group alone** |
-| **P12** | **opening a disclosed level: by mouse and by keyboard, landing on the declared identity, an existing block rather than a created page, history return, three identical rows opening three different blocks, and OG's own breadcrumb steps still re-scoping in place** |
+| **P12** | **opening a disclosed level: by mouse and by keyboard, landing on the declared identity, an existing block rather than a created page, history return, three identical rows opening three different blocks, OG's own breadcrumb steps still re-scoping in place, and that group put back as it was found** |
+| **N1** | **the negative path — a destination that cannot be opened. SIMULATED (see below): the visible refusal for each kind of bad answer, no navigation and no creation, the other group untouched, the explanation following its block across a redraw and moving to the panel when the row goes, the fault removed, and the same step opening for real afterwards** |
 | P13 | the right sidebar — a named exclusion, measured live |
 | P14 | the graph after the application closed, and every window error accounted for |
 
 `P13`/`P14` were `P11`/`P12` before the navigation batch inserted two sections
-ahead of them; `P13.9` is the former `P11.9`.
+ahead of them; `P13.9` is the former `P11.9`. `N1` runs between `P12` and `P13`
+and is numbered apart from them on purpose, so the identifiers either side of it
+stay comparable across evidence files.
+
+## The simulated fault, and why there is one
+
+`checks/lookup-fault.js` wraps `frontend.db/entity` or
+`frontend.db/get-block-parent` for ONE identity, for the length of one press,
+and restores it — verified by object identity, not by hope.
+
+It exists because a destination cannot be made unavailable in the GRAPH without
+removing the row before it can be pressed: deleting an ancestor takes it out of
+the ancestor walk, and usually takes the whole reference with it. **Everything
+it produces is simulated and is labelled so in the scenario output, in
+`f28-refpath-feature-observations.json` (`negative.simulated`) and in the
+readiness record.** It establishes that the product refuses correctly when a
+lookup answers badly. It establishes nothing about which graph conditions
+produce such an answer.
+
+Narrowness is demonstrated rather than argued: while the fault is installed, a
+probe of the faulted identity gets the bad answer and a probe of another
+identity resolves to its real block, through the same function, in the same
+instant. It writes nothing — the graph is hashed either side of the section as
+well as across the run.
 
 **Both packaged scenarios currently end one check short**, and always the same
 one: OG logs a `[frontend.handler]` console line beside Chromium's ResizeObserver
