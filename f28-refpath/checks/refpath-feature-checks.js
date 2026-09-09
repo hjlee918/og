@@ -980,12 +980,16 @@ async function main() {
     cls.renderFailures.length === 0,
     cls.renderFailures.length ? String(cls.renderFailures[0].text).slice(0, 250)
                               : `0 render failures among ${errors.entries().length} line(s)`);
-  const duringFeature = errors.entries().filter(
-    (e) => e.phase === 'disclose' || e.phase === 'keyboard');
+  // Every phase in which this run OPERATED the feature — disclosing a path,
+  // using the keyboard, collapsing one, and opening a level. Named as a set so
+  // adding a phase without adding it here is a visible omission rather than a
+  // silently narrower claim.
+  const FEATURE_PHASES = ['disclose', 'keyboard', 'focus', 'navigate'];
+  const duringFeature = errors.entries().filter((e) => FEATURE_PHASES.includes(e.phase));
   record('P14.6', 'no error at all arrived while the disclosure was being operated',
     duringFeature.length === 0,
     duringFeature.length ? `${duringFeature.length}: ${duringFeature[0].text.slice(0, 200)}`
-                         : '0 during the disclose and keyboard phases');
+                         : `0 during the ${FEATURE_PHASES.join(', ')} phases`);
 
   const failed = results.filter((r) => !r.ok);
   fs.writeFileSync(path.join(EVIDENCE, 'f28-refpath-feature-observations.json'),
