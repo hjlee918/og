@@ -1,12 +1,19 @@
 'use strict';
 //
 // The ONE pre-existing browser condition this feature's scenarios name, driven
-// deterministically — and driven ADVERSARIALLY, because the first version of
-// this rule passed its own tests while exempting an unrelated rendering failure
-// 500 ms after a notice. The supervisor reproduced that; these tests are what
-// make the same mistake impossible to reintroduce quietly.
+// deterministically — and driven ADVERSARIALLY, because TWO earlier versions of
+// this rule passed their own tests while exempting an unrelated failure:
 //
-// Every test below states which of H1–H7 it is attacking.
+//   * the first paired any `[frontend.handler]` line within one second of any
+//     notice, and swallowed a rendering failure 500 ms later;
+//   * the second added adjacency, one-to-one pairing and a 250 ms window, and
+//     checked the page's ErrorEvent log — but as a global COUNT, so a
+//     null-payload event recorded at 1 ms funded an unrelated `Error` at
+//     1010 ms. `remaining: []` again.
+//
+// The rule now exempts ONLY the exact browser notice. Every handler line stays
+// unexpected. Both reproductions are tests below, by name, and the tests that
+// encoded the withdrawn pairing contract are gone rather than relaxed.
 //
 const test = require('node:test');
 const assert = require('node:assert');
@@ -70,7 +77,7 @@ test('a line that merely CONTAINS or BEGINS like the notice is not matched', () 
   }
 });
 
-test('a PAGE ERROR is never exempted, whatever it says (H1)', () => {
+test('a PAGE ERROR is never exempted, whatever it says — a page error is never exempted', () => {
   reset();
   const pe = entry('pageerror', NOTICE_NEW, 1000);
   const r = NOISE.partition([pe], [pe], evidence(1));
@@ -78,7 +85,7 @@ test('a PAGE ERROR is never exempted, whatever it says (H1)', () => {
   assert.strictEqual(r.remaining.length, 1);
 });
 
-test('a page error immediately after a notice is never exempted either (H1)', () => {
+test('a page error immediately after a notice is never exempted either — a page error is never exempted', () => {
   reset();
   const n = entry('console', NOTICE_NEW, 1000);
   const pe = entry('pageerror', HANDLER, 1002);
@@ -87,189 +94,92 @@ test('a page error immediately after a notice is never exempted either (H1)', ()
   assert.deepStrictEqual(r.remaining.map((x) => x.kind), ['pageerror']);
 });
 
-// --- the pair, when it is genuinely a pair -----------------------------------
+// --- no handler line is ever exempted ----------------------------------------
 
-test('the handler line IS exempted when every condition holds', () => {
+test("THE SUPERVISOR'S SECOND REPRODUCTION: an Error payload beside a notice is NOT exempted", () => {
+  // Exactly the case from the correction review, verbatim: the exact notice at
+  // 1000 ms, an unrelated rendering failure adjacent at 1010 ms in the same
+  // phase and operation, and one null-payload ResizeObserver ErrorEvent
+  // recorded at 1 ms. The previous rule returned `remaining: []` — a historical
+  // event funding an unrelated error. A count is not same-event provenance.
   reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1002);
-  const r = NOISE.partition([n, h], [n, h], evidence(1));
-  assert.strictEqual(r.noise.length, 2);
-  assert.strictEqual(r.remaining.length, 0);
-  assert.strictEqual(r.refused.length, 0);
-  const paired = r.noise.find((x) => NOISE.isHandlerLine(x));
-  assert.strictEqual(paired.pairedWithSeq, n.seq);
-  assert.strictEqual(paired.pairedGapMs, 2);
-  assert.strictEqual(r.evidence.pairsClaimed, 1);
-});
+  const notice = entry('console', NOTICE_NEW, 1000);
+  const unrelated = entry(
+    'console', 'console: [frontend.handler] Error: unrelated rendering failure', 1010);
+  const ev = [{ seq: 0, message: 'ResizeObserver loop completed with undelivered notifications.',
+                nullPayload: true, errorName: null, filename: '', lineno: 0, at: 1 }];
+  const r = NOISE.partition([notice, unrelated], [notice, unrelated], ev);
 
-// --- H3 : strict adjacency ---------------------------------------------------
-
-test('THE SUPERVISOR CASE: an unrelated failure after a notice is NOT exempted (H3)', () => {
-  // Reproduced from the review: a rendering failure 500 ms after a notice.
-  // The old rule returned `remaining: []` for it. It must now fail the run.
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const fail = entry('console', RENDER_FAIL, 1500);
-  const r = NOISE.partition([n, fail], [n, fail], evidence(1));
-  assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW]);
-  assert.deepStrictEqual(r.remaining.map((x) => x.text), [RENDER_FAIL]);
+  assert.deepStrictEqual(r.remaining.map((x) => x.text), [unrelated.text],
+    'the unrelated failure must fail the run');
+  assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW],
+    'only the browser notice is exempted');
   assert.strictEqual(r.refused.length, 1);
-  assert.match(r.refused[0].refusedBecause, /within 250ms/);
+  assert.match(r.refused[0].refusedBecause, /never exempted/);
+  assert.strictEqual(r.evidence.pairsClaimed, 0);
 });
 
-test('an INTERVENING captured event breaks the pair (H3)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const other = entry('console', 'console: something else entirely', 1001);
-  const h = entry('console', HANDLER, 1002);
-  const r = NOISE.partition([n, other, h], [n, other, h], evidence(1));
-  assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW]);
-  assert.strictEqual(r.remaining.length, 2);
-  assert.match(r.refused[0].refusedBecause, /immediately before it is not the browser notice/);
-});
-
-test('a handler line BEFORE the notice is not exempted (H3)', () => {
-  reset();
-  const h = entry('console', HANDLER, 900);
-  const n = entry('console', NOTICE_NEW, 1000);
-  const r = NOISE.partition([h, n], [h, n], evidence(1));
-  assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW]);
-  assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.match(r.refused[0].refusedBecause, /nothing was captured immediately before it/);
-});
-
-test('a handler line with no capture sequence is never exempted (H3)', () => {
+test("OG's own companion line is NOT exempted either, however well it fits", () => {
+  // Adjacent, same phase, 2 ms apart, with a matching browser event recorded —
+  // every condition the withdrawn pairing rule asked for. It still fails,
+  // because provenance was never established, only inferred.
   reset();
   const n = entry('console', NOTICE_NEW, 1000);
   const h = entry('console', HANDLER, 1002);
-  delete h.seq;
   const r = NOISE.partition([n, h], [n, h], evidence(1));
+  assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW]);
   assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.match(r.refused[0].refusedBecause, /no capture sequence/);
+  assert.strictEqual(r.refused.length, 1);
 });
 
-// --- H4 : phase ---------------------------------------------------------------
-
-test('a phase mismatch between the notice and the handler line refuses it (H4)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1002, { phase: 'disclose', operation: 'press' });
-  const r = NOISE.partition([n, h], [n, h], evidence(1));
-  assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.match(r.refused[0].refusedBecause, /different phase/);
-});
-
-test('an operation mismatch within one phase refuses it too (H4)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1002, { operation: 'a-different-operation' });
-  const r = NOISE.partition([n, h], [n, h], evidence(1));
-  assert.strictEqual(r.remaining.length, 1);
-  assert.match(r.refused[0].refusedBecause, /different phase/);
-});
-
-// --- H5 : the window ----------------------------------------------------------
-
-test('a handler line outside the pair window is refused, even when adjacent (H5)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1000 + NOISE.PAIR_WINDOW_MS + 1);
-  const r = NOISE.partition([n, h], [n, h], evidence(1));
-  assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.match(r.refused[0].refusedBecause, /within 250ms/);
-});
-
-test('the pair window is tight enough to mean one handler invocation', () => {
-  assert.ok(NOISE.PAIR_WINDOW_MS <= 250,
-    `${NOISE.PAIR_WINDOW_MS}ms is wide enough for an unrelated failure to land inside`);
-});
-
-// --- H6 : one-to-one -----------------------------------------------------------
-
-test('REPEATED handler errors after ONE notice: only the adjacent one can pair (H6)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h1 = entry('console', HANDLER, 1002);
-  const h2 = entry('console', HANDLER, 1003);
-  const h3 = entry('console', HANDLER, 1004);
-  const r = NOISE.partition([n, h1, h2, h3], [n, h1, h2, h3], evidence(1));
-  assert.strictEqual(r.noise.length, 2, 'the notice and exactly one handler line');
-  assert.strictEqual(r.remaining.length, 2);
-  assert.strictEqual(r.refused.length, 2);
-  for (const x of r.refused) {
-    assert.match(x.refusedBecause, /immediately before it is not the browser notice/);
+test('no arrangement of notices and handler lines exempts a handler line', () => {
+  const shapes = [
+    [[NOTICE_NEW, 1000], [HANDLER, 1000]],            // same millisecond
+    [[NOTICE_NEW, 1000], [HANDLER, 1001]],            // adjacent
+    [[NOTICE_OLD, 1000], [HANDLER, 1001]],            // the older wording
+    [[HANDLER, 1000], [NOTICE_NEW, 1001]],            // reversed
+    [[NOTICE_NEW, 1000], [HANDLER, 1001], [HANDLER, 1002]],  // repeated
+    [[NOTICE_NEW, 1000], [NOTICE_NEW, 1001], [HANDLER, 1002]], // two notices
+  ];
+  for (const shape of shapes) {
+    reset();
+    const rows = shape.map(([t, at]) => entry('console', t, at));
+    const r = NOISE.partition(rows, rows, evidence(5));
+    const exemptedHandler = r.noise.filter((x) => NOISE.isHandlerLine(x));
+    assert.strictEqual(exemptedHandler.length, 0, JSON.stringify(shape));
+    assert.strictEqual(r.evidence.pairsClaimed, 0);
   }
 });
 
-test('two notices and two handler lines pair one-to-one, in order (H6)', () => {
-  reset();
-  const n1 = entry('console', NOTICE_NEW, 1000);
-  const h1 = entry('console', HANDLER, 1001);
-  const n2 = entry('console', NOTICE_NEW, 2000);
-  const h2 = entry('console', HANDLER, 2001);
-  const all = [n1, h1, n2, h2];
-  const r = NOISE.partition(all, all, evidence(2));
-  assert.strictEqual(r.noise.length, 4);
-  assert.strictEqual(r.remaining.length, 0);
-  assert.strictEqual(r.evidence.pairsClaimed, 2);
-});
-
-// --- H7 : structured evidence ---------------------------------------------------
-
-test('WITHOUT the page ErrorEvent log, no handler line is exempted (H7)', () => {
+test('the browser ErrorEvent log is CONTEXT and funds nothing', () => {
   reset();
   const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1002);
-  const r = NOISE.partition([n, h], [n, h], null);
-  assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW]);
+  const h = entry('console', HANDLER, 1001);
+  // Ten recorded browser events cannot buy a single exemption.
+  const r = NOISE.partition([n, h], [n, h], evidence(10));
+  assert.strictEqual(r.evidence.nullPayloadNotices, 10, 'still reported, for a reader');
+  assert.strictEqual(r.evidence.pairsClaimed, 0, 'and still used by no decision');
   assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.match(r.refused[0].refusedBecause, /ErrorEvent log was not collected/);
-  assert.strictEqual(r.evidence.collected, false);
-  assert.strictEqual(r.evidence.nullPayloadNotices, null);
 });
 
-test('an EMPTY page ErrorEvent log exempts no handler line (H7)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1002);
-  const r = NOISE.partition([n, h], [n, h], []);
-  assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.match(r.refused[0].refusedBecause, /recorded 0 null-payload/);
+test('the notice is exempted with the log absent, present or empty — it names itself', () => {
+  for (const ev of [null, undefined, [], evidence(1)]) {
+    reset();
+    const n = entry('console', NOTICE_NEW, 1000);
+    const r = NOISE.partition([n], [n], ev);
+    assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW]);
+    assert.strictEqual(r.remaining.length, 0);
+  }
 });
 
-test('a ResizeObserver event that CARRIED a thrown value is not the condition (H7)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1002);
-  const thrown = [{ seq: 0, message: 'ResizeObserver loop completed with undelivered notifications.',
-                    nullPayload: false, errorName: 'TypeError', filename: '', lineno: 0, at: 1000 }];
-  const r = NOISE.partition([n, h], [n, h], thrown);
-  assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.match(r.refused[0].refusedBecause, /recorded 0 null-payload/);
-});
-
-test('more pairs than recorded browser events cannot all be claimed (H7)', () => {
-  reset();
-  const n1 = entry('console', NOTICE_NEW, 1000);
-  const h1 = entry('console', HANDLER, 1001);
-  const n2 = entry('console', NOTICE_NEW, 2000);
-  const h2 = entry('console', HANDLER, 2001);
-  const all = [n1, h1, n2, h2];
-  const r = NOISE.partition(all, all, evidence(1));
-  assert.strictEqual(r.evidence.pairsClaimed, 1);
-  assert.strictEqual(r.remaining.length, 1);
-  assert.match(r.refused[0].refusedBecause, /which 1 pair\(s\) already account for/);
-});
-
-test('a null-payload event with a DIFFERENT message does not fund a pair (H7)', () => {
-  reset();
-  const n = entry('console', NOTICE_NEW, 1000);
-  const h = entry('console', HANDLER, 1002);
-  const other = [{ seq: 0, message: 'Script error.', nullPayload: true, at: 1000 }];
-  const r = NOISE.partition([n, h], [n, h], other);
-  assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER]);
-  assert.strictEqual(NOISE.nullPayloadNotices(other), 0);
+test('the withdrawn pairing surface is gone, not merely unused', () => {
+  // A pairing knob left exported invites the next author to reconnect it.
+  assert.strictEqual(NOISE.PAIR_WINDOW_MS, undefined,
+    'the time window must not survive as a tunable');
+  const src = require('fs').readFileSync(
+    path.join(REPO, 'f28-refpath', 'checks', 'browser-noise.js'), 'utf8');
+  assert.ok(!/pairedWithSeq|pairedNotice|pairedGapMs/.test(src),
+    'no pairing bookkeeping may remain in the rule');
 });
 
 // --- shape and safety ------------------------------------------------------------
@@ -337,16 +247,21 @@ test('the recorder stamps a capture sequence on every entry, in order', () => {
 });
 
 test('the sequence orders entries that share a millisecond', () => {
-  // The reason a sequence exists at all: two console lines from ONE handler
-  // invocation routinely carry the same `Date.now()`.
+  // Two console lines from ONE handler invocation routinely carry the same
+  // `Date.now()`. The sequence is what lets RAW EVIDENCE be read in the order
+  // it arrived. It is no longer input to any exemption decision — the rule
+  // exempts only the notice — and this test asserts the ordering, not a pair.
   const rec = REC.createRecorder(() => 1234);
   rec.phase('p', 'op');
   const a = rec.record('console', NOTICE_NEW);
   const b = rec.record('console', HANDLER);
-  assert.strictEqual(a.at, b.at);
-  assert.strictEqual(b.seq, a.seq + 1);
+  assert.strictEqual(a.at, b.at, 'the timestamps really do collide');
+  assert.strictEqual(b.seq, a.seq + 1, 'the sequence still separates them');
+
   const r = NOISE.partition([a, b], [a, b], evidence(1));
-  assert.strictEqual(r.noise.length, 2, 'a same-millisecond pair must still pair');
+  assert.deepStrictEqual(r.noise.map((x) => x.text), [NOTICE_NEW]);
+  assert.deepStrictEqual(r.remaining.map((x) => x.text), [HANDLER],
+    'sharing a millisecond with the notice buys the handler line nothing');
 });
 
 test('the page instrumentation records a payload rather than inferring one', () => {

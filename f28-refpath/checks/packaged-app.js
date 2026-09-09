@@ -136,57 +136,93 @@ function describeRejected(canonical, allowedRootCanonical) {
  * Is OG currently on exactly this run's approved graph?
  *
  * @param {object} state
- *   api      the object `logseq.api.get_current_graph()` returned, or null
- *   storage  the raw `git/current-repo` string from localStorage, or null
- *   approved the approved graph path, ALREADY canonically resolved by the caller
+ *   api        the object `logseq.api.get_current_graph()` returned, or null
+ *   liveRepo   `frontend.state.get_current_repo()` read directly out of the
+ *              running application, or null — a SECOND live source, not a
+ *              stored one
+ *   storage    the raw `git/current-repo` string from localStorage, or null
+ *   approved   the approved graph path, ALREADY canonically resolved by the caller
  *   allowedRoot the permitted root, already resolved, for redaction decisions
- * @returns {{ok:boolean, reason:string, detail:string, active:string|null}}
+ * @returns {{ok, reason, detail, active, source}}
  *
- * Fails closed on every uncertainty: no reported graph, an unusable value, the
- * two sources disagreeing, or any path that is not exactly the approved one.
+ * AUTHORITATIVE LIVE IDENTITY IS REQUIRED (supervisor correction review).
+ * A persisted `git/current-repo` is a record of what was opened once, not proof
+ * of what is open now, so it can no longer make this gate pass on its own. If
+ * neither live source yields a usable path — absent, throwing, or malformed —
+ * the gate REFUSES, even when the stored value matches the approved graph
+ * exactly.
+ *
+ * Storage keeps exactly one job: contradicting a live answer. A stored value
+ * that disagrees with the live one makes the state ambiguous and also refuses.
+ *
+ * Fails closed on every uncertainty.
  */
-function currentGraphVerdict({ api, storage, approved, allowedRoot }) {
+function currentGraphVerdict({ api, liveRepo, storage, approved, allowedRoot }) {
   const want = canonicalGraphPath(approved);
   const root = canonicalGraphPath(allowedRoot);
   if (!want) {
-    return { ok: false, reason: 'no-approved-path', active: null,
+    return { ok: false, reason: 'no-approved-path', active: null, source: null,
              detail: 'the run did not supply a resolved approved graph path' };
   }
 
+  // TWO LIVE SOURCES. Both read the running application; neither reads history.
   const fromApi = api && typeof api === 'object'
     ? canonicalGraphPath(api.path || api.url || null) : null;
+  const fromState = canonicalGraphPath(liveRepo);
+  // ONE STORED SOURCE, which may only ever contradict.
   const fromStorage = canonicalGraphPath(storage);
 
-  if (!fromApi && !fromStorage) {
-    return { ok: false, reason: 'no-current-graph', active: null,
-             detail: 'OG reported no current repository at all; refusing to guess one' };
+  if (!fromApi && !fromState) {
+    return {
+      ok: false, reason: 'no-live-graph', active: null, source: null,
+      detail: 'no live source reported a usable current repository — ' +
+              `logseq.api.get_current_graph() gave ${fromApi ? 'one' : 'none'}, ` +
+              `frontend.state.get_current_repo() gave ${fromState ? 'one' : 'none'}` +
+              (fromStorage
+                ? '. A stored git/current-repo IS present, and is deliberately not ' +
+                  'enough: it records what was opened once, not what is open now'
+                : '. No stored value either'),
+    };
   }
-  if (fromApi && fromStorage && fromApi !== fromStorage) {
-    return { ok: false, reason: 'ambiguous', active: null,
-             detail: 'OG\'s current repository and the stored one disagree: ' +
+
+  if (fromApi && fromState && fromApi !== fromState) {
+    return { ok: false, reason: 'ambiguous', active: null, source: null,
+             detail: "the application's two live sources disagree: " +
                      `${describeRejected(fromApi, root)} vs ` +
-                     `${describeRejected(fromStorage, root)}` };
+                     `${describeRejected(fromState, root)}` };
   }
-  // The API is OG's live state; storage is only a cross-check and is used alone
-  // solely when the API is unavailable.
-  const active = fromApi || fromStorage;
+
+  const active = fromApi || fromState;
+
+  if (fromStorage && fromStorage !== active) {
+    return { ok: false, reason: 'ambiguous', active: null, source: null,
+             detail: 'the live current repository and the stored one disagree: ' +
+                     `${describeRejected(active, root)} live vs ` +
+                     `${describeRejected(fromStorage, root)} stored` };
+  }
+
   if (active !== want) {
     return { ok: false, reason: 'mismatch', active,
+             source: fromApi && fromState ? 'both-live' : (fromApi ? 'api' : 'state'),
              detail: `the active graph is ${describeRejected(active, root)}, ` +
                      `not this run's approved graph ${want}` };
   }
-  // Name the source that actually answered. The first version of this line had
-  // ONE else-branch for two different situations and so credited the stored
-  // value for an answer the API had given — found by its own run, and exactly
-  // the kind of misdescription this batch exists to remove.
-  const source = fromApi && fromStorage
-    ? 'both logseq.api.get_current_graph() and the stored git/current-repo agree'
-    : (fromApi
-       ? 'from logseq.api.get_current_graph(); no usable stored value was present'
-       : 'from the stored git/current-repo; the API reported none');
-  return { ok: true, reason: 'exact-match', active,
-           detail: `OG's current repository is exactly ${want} (${source})`,
-           source: fromApi && fromStorage ? 'both' : (fromApi ? 'api' : 'storage') };
+
+  // Name the source that actually answered, and say whether storage corroborated
+  // it. An earlier version had one else-branch for two situations and credited
+  // the stored value for an answer the API had given.
+  const source = fromApi && fromState ? 'both-live' : (fromApi ? 'api' : 'state');
+  const named = {
+    'both-live': 'both logseq.api.get_current_graph() and frontend.state.get_current_repo()',
+    api: 'logseq.api.get_current_graph()',
+    state: 'frontend.state.get_current_repo(), a direct read of live application state',
+  }[source];
+  return {
+    ok: true, reason: 'exact-match', active, source,
+    detail: `OG's current repository is exactly ${want} (live, from ${named}` +
+            `${fromStorage ? '; the stored git/current-repo agrees'
+                           : '; no stored value was present, which does not matter'})`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -387,8 +423,12 @@ async function open({ built, graph, bad, errors, say, record, phase, prefix = 'L
 
     // ---------------- the exact-path gate ----------------
     mark('assert-loaded-path', 'read-ogs-own-current-repository');
+    // TWO LIVE reads and one stored cross-check. Storage can only ever
+    // contradict; it can no longer make this gate pass, because a persisted
+    // `git/current-repo` records what was opened once, not what is open now.
     const reported = await page.evaluate((key) => {
-      const out = { api: null, apiError: null, storage: null, storageKeysSeen: 0 };
+      const out = { api: null, apiError: null, liveRepo: null, liveError: null,
+                    storage: null, storageKeysSeen: 0 };
       try {
         const api = (window.logseq && window.logseq.api) || null;
         out.api = api && typeof api.get_current_graph === 'function'
@@ -399,15 +439,27 @@ async function open({ built, graph, bad, errors, say, record, phase, prefix = 'L
         }
       } catch (e) { out.apiError = String(e && e.message); }
       try {
+        // A DIRECT read of live application state: `frontend.state/get-current-repo`,
+        // the same function `logseq.api.get_current_graph` itself calls. The
+        // renderer is compiled (not advanced-optimised), so the namespace object
+        // is reachable. This is a second live source, never a stored one.
+        const st = window.frontend && window.frontend.state;
+        const f = st && st.get_current_repo;
+        const repo = typeof f === 'function' ? f() : null;
+        out.liveRepo = typeof repo === 'string' ? repo : null;
+      } catch (e) { out.liveError = String(e && e.message); }
+      try {
         out.storage = localStorage.getItem(key);
         out.storageKeysSeen = localStorage.length;
       } catch (e) { /* storage may be unavailable; the verdict fails closed */ }
       return out;
     }, CURRENT_REPO_KEY).catch((e) => ({ api: null, apiError: String(e.message),
+                                         liveRepo: null, liveError: String(e.message),
                                          storage: null, storageKeysSeen: 0 }));
 
     const verdict = currentGraphVerdict({
       api: reported.api,
+      liveRepo: reported.liveRepo,
       storage: reported.storage,
       approved: GRAPH,
       allowedRoot: B.allowedRootReal(),
@@ -417,13 +469,14 @@ async function open({ built, graph, bad, errors, say, record, phase, prefix = 'L
       "OG's OWN current repository is exactly this run's graph, asserted before any feature use",
       verdict.ok, `${verdict.reason}: ${verdict.detail}`);
     note(`${prefix}3.2`,
-      'the gate compares the ACTIVE graph, not stored history, and fails closed',
+      'the gate requires LIVE identity; stored history can only contradict it',
       verdict.ok,
       `answered by ${verdict.source || 'nothing'}; ` +
-      `API ${reported.api ? 'reported a graph' : `reported none${reported.apiError ? ` (${reported.apiError})` : ''}`}, ` +
-      `${CURRENT_REPO_KEY} ${reported.storage ? 'present' : 'absent'}; ` +
-      `${reported.storageKeysSeen} localStorage key(s) present, none of which can satisfy ` +
-      'this check by merely mentioning the path');
+      `logseq.api.get_current_graph() ${reported.api ? 'reported a graph' : `reported none${reported.apiError ? ` (${reported.apiError})` : ''}`}, ` +
+      `frontend.state.get_current_repo() ${reported.liveRepo ? 'reported a graph' : `reported none${reported.liveError ? ` (${reported.liveError})` : ''}`}, ` +
+      `${CURRENT_REPO_KEY} ${reported.storage ? 'present (cross-check only)' : 'absent'}; ` +
+      `${reported.storageKeysSeen} localStorage key(s) present, and no stored value ` +
+      'can make this check pass on its own');
 
     if (!verdict.ok) {
       throw new Error(`the active graph is not this run's approved graph ` +

@@ -63,10 +63,11 @@ test('anything that is not a usable absolute path canonicalises to null', () => 
 // ---------------------------------------------------------------------------
 
 const gate = (over) => APP.currentGraphVerdict(Object.assign(
-  { api: null, storage: null, approved: APPROVED, allowedRoot: ROOT }, over));
+  { api: null, liveRepo: null, storage: null, approved: APPROVED, allowedRoot: ROOT }, over));
 
 test("the gate passes only when OG's own current repository IS the approved graph", () => {
   const v = gate({ api: { url: `${APP.LOCAL_DB_PREFIX}${APPROVED}`, path: APPROVED },
+                   liveRepo: `${APP.LOCAL_DB_PREFIX}${APPROVED}`,
                    storage: `"${APP.LOCAL_DB_PREFIX}${APPROVED}"` });
   assert.strictEqual(v.ok, true);
   assert.strictEqual(v.reason, 'exact-match');
@@ -84,64 +85,121 @@ test('THE SUPERVISOR CASE: a remembered graph cannot satisfy the gate for an act
   assert.ok(storageBlob.includes(APPROVED), 'the old substring gate would have passed here');
 
   const v = gate({ api: { path: OTHER_TEST_GRAPH },
+                   liveRepo: `${APP.LOCAL_DB_PREFIX}${OTHER_TEST_GRAPH}`,
                    storage: `"${APP.LOCAL_DB_PREFIX}${OTHER_TEST_GRAPH}"` });
   assert.strictEqual(v.ok, false);
   assert.strictEqual(v.reason, 'mismatch');
   assert.match(v.detail, /not this run's approved graph/);
 });
 
-test('no reported current repository at all is a refusal, not a guess', () => {
-  const v = gate({ api: null, storage: null });
+test('no LIVE current repository at all is a refusal, not a guess', () => {
+  const v = gate({ api: null, liveRepo: null, storage: null });
   assert.strictEqual(v.ok, false);
-  assert.strictEqual(v.reason, 'no-current-graph');
+  assert.strictEqual(v.reason, 'no-live-graph');
   assert.strictEqual(v.active, null);
 });
 
-test('an unusable reported value is the same refusal', () => {
-  for (const bad of ['local', '', 'memory:///local']) {
-    const v = gate({ api: { path: bad }, storage: bad });
-    assert.strictEqual(v.ok, false, bad);
-    assert.strictEqual(v.reason, 'no-current-graph', bad);
+test('STORED HISTORY ALONE IS REFUSED, even when it matches exactly', () => {
+  // The supervisor correction: a persisted `git/current-repo` records what was
+  // opened once, not what is open now. It can no longer make this gate pass.
+  const v = gate({ api: null, liveRepo: null,
+                   storage: `"${APP.LOCAL_DB_PREFIX}${APPROVED}"` });
+  assert.strictEqual(v.ok, false, 'a stored value must never satisfy this gate');
+  assert.strictEqual(v.reason, 'no-live-graph');
+  assert.strictEqual(v.active, null);
+  assert.match(v.detail, /not what is open now/);
+});
+
+test('a LIVE source that THREW is a refusal, even when storage matches', () => {
+  // A throwing read reaches the verdict as an absent value; the run also
+  // records the error text separately. Either way, absent means refuse.
+  const v = gate({ api: null, liveRepo: null,
+                   storage: `"${APP.LOCAL_DB_PREFIX}${APPROVED}"` });
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.reason, 'no-live-graph');
+});
+
+test('MALFORMED live state is a refusal, even when storage matches', () => {
+  const matching = `"${APP.LOCAL_DB_PREFIX}${APPROVED}"`;
+  for (const live of [{}, { path: null }, { path: '' }, { path: 'local' },
+                      { path: 'memory:///local' }, { path: 42 }, 'not-an-object']) {
+    const v = gate({ api: live, liveRepo: null, storage: matching });
+    assert.strictEqual(v.ok, false, JSON.stringify(live));
+    assert.strictEqual(v.reason, 'no-live-graph', JSON.stringify(live));
+  }
+  for (const live of ['', 'local', 'relative/path', `${APP.LOCAL_DB_PREFIX}GraphName`]) {
+    const v = gate({ api: null, liveRepo: live, storage: matching });
+    assert.strictEqual(v.ok, false, JSON.stringify(live));
+    assert.strictEqual(v.reason, 'no-live-graph', JSON.stringify(live));
   }
 });
 
-test('the API and the stored value disagreeing is AMBIGUOUS, and refused', () => {
+test('the DIRECT live-state read is an acceptable authoritative source', () => {
+  // `frontend.state.get_current_repo()` is the same function the plugin API
+  // calls. It is live application state, not history, so it may answer alone.
+  const v = gate({ api: null, liveRepo: `${APP.LOCAL_DB_PREFIX}${APPROVED}`, storage: null });
+  assert.strictEqual(v.ok, true);
+  assert.strictEqual(v.source, 'state');
+  assert.strictEqual(v.active, APPROVED);
+  assert.match(v.detail, /direct read of live application state/);
+});
+
+test('the two LIVE sources disagreeing is AMBIGUOUS, and refused', () => {
   const v = gate({ api: { path: APPROVED },
-                   storage: `"${APP.LOCAL_DB_PREFIX}${OTHER_TEST_GRAPH}"` });
+                   liveRepo: `${APP.LOCAL_DB_PREFIX}${OTHER_TEST_GRAPH}` });
   assert.strictEqual(v.ok, false);
   assert.strictEqual(v.reason, 'ambiguous');
   assert.strictEqual(v.active, null, 'an ambiguous state names no active graph');
 });
 
-test('the stored value alone is accepted only when the API reported nothing', () => {
-  const v = gate({ api: null, storage: `"${APP.LOCAL_DB_PREFIX}${APPROVED}"` });
-  assert.strictEqual(v.ok, true);
-  assert.strictEqual(v.source, 'storage');
-  assert.match(v.detail, /the API reported none/);
+test('a stored value CONTRADICTING live state is AMBIGUOUS, and refused', () => {
+  // Storage keeps exactly one job: contradicting a live answer.
+  const v = gate({ api: { path: APPROVED }, liveRepo: null,
+                   storage: `"${APP.LOCAL_DB_PREFIX}${OTHER_TEST_GRAPH}"` });
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.reason, 'ambiguous');
+  assert.match(v.detail, /live current repository and the stored one disagree/);
+  assert.match(v.detail, / live vs /);
 });
 
-test('a passing gate names the source that actually answered', () => {
-  // The first version had one else-branch for two situations and credited the
-  // stored value for an answer the API had given. Its own packaged run printed
-  // that contradiction; each phrasing is pinned here.
+test('a passing gate names the LIVE source that actually answered', () => {
   const both = gate({ api: { path: APPROVED },
+                      liveRepo: `${APP.LOCAL_DB_PREFIX}${APPROVED}`,
                       storage: `"${APP.LOCAL_DB_PREFIX}${APPROVED}"` });
-  assert.strictEqual(both.source, 'both');
-  assert.match(both.detail, /both logseq\.api\.get_current_graph\(\) and the stored/);
+  assert.strictEqual(both.source, 'both-live');
+  assert.match(both.detail, /both logseq\.api\.get_current_graph\(\) and frontend\.state/);
+  assert.match(both.detail, /the stored git\/current-repo agrees/);
 
-  const apiOnly = gate({ api: { path: APPROVED }, storage: null });
+  const apiOnly = gate({ api: { path: APPROVED }, liveRepo: null, storage: null });
   assert.strictEqual(apiOnly.source, 'api');
-  assert.match(apiOnly.detail, /from logseq\.api\.get_current_graph\(\); no usable stored value/);
-  assert.ok(!/the API reported none/.test(apiOnly.detail),
-    'an answer from the API must never be described as coming from storage');
+  assert.match(apiOnly.detail, /live, from logseq\.api\.get_current_graph\(\)/);
+  assert.match(apiOnly.detail, /no stored value was present, which does not matter/);
 
-  const storageOnly = gate({ api: null, storage: `"${APP.LOCAL_DB_PREFIX}${APPROVED}"` });
-  assert.strictEqual(storageOnly.source, 'storage');
-  assert.match(storageOnly.detail, /from the stored git\/current-repo; the API reported none/);
+  assert.ok(both.detail.startsWith("OG's current repository is exactly"));
+  assert.ok(apiOnly.detail.includes('live,'),
+    'a passing gate must say the answer came from live state');
+});
+
+test('no verdict is ever sourced from storage', () => {
+  // A structural guarantee rather than a case list: whatever the inputs, a
+  // passing verdict never names storage as its source.
+  const matching = `"${APP.LOCAL_DB_PREFIX}${APPROVED}"`;
+  const inputs = [
+    { api: null, liveRepo: null, storage: matching },
+    { api: {}, liveRepo: null, storage: matching },
+    { api: { path: 'local' }, liveRepo: 'local', storage: matching },
+    { api: null, liveRepo: '', storage: matching },
+  ];
+  for (const over of inputs) {
+    const v = gate(over);
+    assert.strictEqual(v.ok, false, JSON.stringify(over));
+    assert.notStrictEqual(v.source, 'storage');
+  }
 });
 
 test('an active graph OUTSIDE the permitted root is refused, and NOT recorded', () => {
-  const v = gate({ api: { path: ELSEWHERE }, storage: `"${APP.LOCAL_DB_PREFIX}${ELSEWHERE}"` });
+  const v = gate({ api: { path: ELSEWHERE }, liveRepo: `${APP.LOCAL_DB_PREFIX}${ELSEWHERE}`,
+                   storage: `"${APP.LOCAL_DB_PREFIX}${ELSEWHERE}"` });
   assert.strictEqual(v.ok, false);
   assert.strictEqual(v.reason, 'mismatch');
   // The whole point of the redaction: a path this run must not touch must not
@@ -175,7 +233,7 @@ test('the gate never resolves the value it is rejecting', () => {
 });
 
 test('an approved path this run never supplied is refused rather than defaulted', () => {
-  const v = APP.currentGraphVerdict({ api: { path: APPROVED }, storage: null,
+  const v = APP.currentGraphVerdict({ api: { path: APPROVED }, liveRepo: null, storage: null,
                                       approved: null, allowedRoot: ROOT });
   assert.strictEqual(v.ok, false);
   assert.strictEqual(v.reason, 'no-approved-path');

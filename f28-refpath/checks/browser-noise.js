@@ -1,7 +1,7 @@
 'use strict';
 //
-// ONE pre-existing browser condition, named — and named far more narrowly than
-// the first version of this file managed.
+// ONE pre-existing browser condition, named — and named as narrowly as it can
+// be, which turns out to be narrower than either previous attempt.
 //
 // WHAT THE CONDITION IS.
 //
@@ -19,35 +19,40 @@
 // It arrives when a long page is scrolled, which is exactly what reading a
 // linked-references list to the end requires.
 //
-// WHY THIS FILE WAS REWRITTEN (supervisor review, 2026-09-08).
+// WHAT THIS FILE NOW DOES, AND WHY IT DOES SO LITTLE.
 //
-// The first version exempted ANY `[frontend.handler]` console error arriving
-// within one second after ANY ResizeObserver notice. The supervisor reproduced
-// `remaining: []` for an unrelated RENDERING FAILURE 500 ms after a notice.
-// That is the same class of mistake the F27 acceptance record names by name —
-// a filter broad enough to hide the failures it was supposed to leave visible.
+// **Only the exact browser notice is exempted. Every `[frontend.handler]` line
+// stays unexpected, always.**
 //
-// The rule is now the opposite shape. A handler line is exempted only when
-// EVERY one of these holds, and each of them can fail on its own:
+// Two earlier versions tried to exempt OG's companion line as well, and both
+// were wrong in the same way — they inferred provenance instead of establishing
+// it:
 //
-//   H1  it is a console line, never a page error;
-//   H2  it is a `[frontend.handler]` line;
-//   H3  the entry IMMEDIATELY BEFORE IT IN CAPTURE ORDER is an exact notice —
-//       strict adjacency by sequence number, not a time window, so any
-//       intervening captured error breaks the pair;
-//   H4  it shares that notice's phase and operation;
-//   H5  it arrived within `PAIR_WINDOW_MS` of it — one handler invocation, not
-//       one second;
-//   H6  that notice has not already been paired — the pairing is ONE-TO-ONE, so
-//       a second handler line after one notice stays unexpected;
-//   H7  the page's own ErrorEvent log corroborates it: at least as many
-//       NULL-PAYLOAD ResizeObserver events were recorded in the window as pairs
-//       being claimed. **Without that evidence nothing is paired at all.**
+//   * the first paired anything matching `[frontend.handler]` within one second
+//     of any notice. The supervisor reproduced it swallowing an unrelated
+//     rendering failure 500 ms later;
+//   * the second added strict adjacency, one-to-one pairing, a 250 ms window
+//     and a check against the page's ErrorEvent log — but that check was a
+//     GLOBAL COUNT with no link to the specific line. The supervisor reproduced
+//     it again: an exact notice at 1000 ms, `console: [frontend.handler] Error:
+//     unrelated rendering failure` adjacent at 1010 ms, and one null-payload
+//     ResizeObserver event recorded at 1 ms. `remaining: []`. A historical
+//     event funded an unrelated error.
 //
-// Anything a rule cannot prove stays in `remaining`, which is what fails a run.
-// Handler lines that were considered and refused are ALSO reported separately,
-// with the reason, so a reader can see what the rule declined to excuse rather
-// than having to infer it.
+// An event COUNT is not same-event provenance, and no arrangement of timestamps
+// makes it one. Establishing provenance would need the structured console
+// payload of the specific call, tied to the handler invocation that emitted it.
+// This harness does not capture that, so it does not claim it.
+//
+// The cost of being right here is a real one and is not hidden: on any run
+// where the notice arises, OG's companion line is reported UNEXPECTED and the
+// run fails. That is the intended direction. A pre-existing condition this
+// project did not create is worth reporting as unresolved; it is not worth a
+// filter that can hide a rendering failure to keep a tally green.
+//
+// The page's ErrorEvent log is still collected and still written to evidence.
+// It is CONTEXT for a reader — it says whether the browser really did signal —
+// and it is no longer a licence for anything.
 //
 // WHERE IT LIVES, AND WHY NOT IN THE CLASSIFIER.
 //
@@ -72,20 +77,21 @@ const RESIZE_MESSAGE = new RegExp(
   '^(?:' + NOTICE_BODIES.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') +
   ')\\.?\\s*$');
 
-// OG's own global handler logging the (null) exception beside the notice.
+// OG's own global handler. Recognised ONLY so that a refusal can name what it
+// is refusing; it is never a reason to exempt anything.
 const HANDLER_LINE = /^console: \[frontend\.handler\]/;
 
-// One handler invocation emits both lines back to back. 250 ms is already
-// generous for two synchronous `console.error` calls; the old 1000 ms was wide
-// enough for an unrelated failure to land inside it, and did.
-const PAIR_WINDOW_MS = 250;
+const HANDLER_NEVER_EXEMPT =
+  "a [frontend.handler] line is never exempted: this harness cannot establish " +
+  'that OG emitted it for the browser notice rather than for a real failure, ' +
+  'and an ErrorEvent count is not same-event provenance';
 
 /** Is this captured entry the exact browser notice? */
 function isNotice(e) {
   return !!e && e.kind === 'console' && RESIZE_NOTICE.test(String(e.text || ''));
 }
 
-/** Is this captured entry OG's handler line? */
+/** Is this captured entry OG's handler line? Used only to explain a refusal. */
 function isHandlerLine(e) {
   return !!e && e.kind === 'console' && HANDLER_LINE.test(String(e.text || ''));
 }
@@ -93,10 +99,9 @@ function isHandlerLine(e) {
 /**
  * How many NULL-PAYLOAD ResizeObserver ErrorEvents the page itself recorded.
  *
- * This is the structured evidence H7 needs, and it is what makes the pairing a
- * statement about a specific browser event rather than about two adjacent log
- * lines. `null` (rather than 0) means the log was never collected, which is a
- * different thing and is treated as "prove nothing, pair nothing".
+ * Reported as CONTEXT so a reader can see whether the browser really signalled.
+ * It funds no exemption: two attempts to make it do so were both wrong, because
+ * a count says nothing about which console line an event produced.
  */
 function nullPayloadNotices(evidence) {
   if (!Array.isArray(evidence)) return null;
@@ -105,94 +110,35 @@ function nullPayloadNotices(evidence) {
 }
 
 /**
- * Split a classifier's `unexpected` list into the exempted browser noise and
+ * Split a classifier's `unexpected` list into the exempted browser notice and
  * everything else.
  *
- * @param {Array} unexpected  rows from `error-classifier.summarise().unexpected`,
- *                            each of which must carry the `seq` this feature's
- *                            recorder adds; without it no handler line can be
- *                            paired, because adjacency cannot be established
- * @param {Array} all         every recorded entry, in capture order
+ * @param {Array} unexpected  rows from `error-classifier.summarise().unexpected`
+ * @param {Array} all         every recorded entry, in capture order (context only)
  * @param {Array} evidence    the page's own ErrorEvent log, or null/undefined
  * @returns {{noise:Array, remaining:Array, refused:Array, evidence:object}}
- *   noise     exempted rows
- *   remaining everything not exempted — this is what fails a run, and it
- *             INCLUDES every handler line the rule declined to excuse
- *   refused   the handler lines that were considered and refused, each with the
- *             first condition that failed, so the refusal is legible
+ *   noise     rows exempted — only ever the exact browser notice
+ *   remaining everything not exempted; this is what fails a run
+ *   refused   the handler lines that were considered and refused, with the
+ *             reason, so a failure is legible rather than merely present
  */
 function partition(unexpected, all, evidence) {
   const rows = Array.isArray(unexpected) ? unexpected : [];
   const entries = Array.isArray(all) ? all : [];
-  const bySeq = new Map();
-  for (const e of entries) {
-    if (e && typeof e.seq === 'number') bySeq.set(e.seq, e);
-  }
-
-  const available = nullPayloadNotices(evidence);
-  const pairedNotice = new Set();
-  let claimed = 0;
 
   const noise = [];
   const remaining = [];
   const refused = [];
 
-  // Exact notices first, in capture order, so the one-to-one budget below is
-  // spent deterministically rather than in whatever order the caller passed.
-  const ordered = rows.slice().sort((a, b) => {
-    const sa = typeof a.seq === 'number' ? a.seq : Number.MAX_SAFE_INTEGER;
-    const sb = typeof b.seq === 'number' ? b.seq : Number.MAX_SAFE_INTEGER;
-    return sa - sb;
-  });
-
-  for (const row of ordered) {
-    // The notice itself: exempted on its exact wording alone. It is a browser
-    // signal, it names itself, and nothing else says those words.
+  for (const row of rows) {
     if (isNotice(row)) { noise.push(row); continue; }
-
-    if (!isHandlerLine(row)) { remaining.push(row); continue; }
-
-    // H1 already holds (isHandlerLine requires kind console). Everything below
-    // is a separate, individually falsifiable reason to refuse.
-    let why = null;
-    const prev = typeof row.seq === 'number' ? bySeq.get(row.seq - 1) : undefined;
-
-    if (typeof row.seq !== 'number') {
-      why = 'no capture sequence, so adjacency to a notice cannot be established';
-    } else if (!prev) {
-      why = 'nothing was captured immediately before it';
-    } else if (!isNotice(prev)) {
-      why = 'the entry immediately before it is not the browser notice ' +
-            `(it is ${JSON.stringify(String(prev.text || '').slice(0, 60))})`;
-    } else if (prev.phase !== row.phase || (prev.operation || null) !== (row.operation || null)) {
-      why = `it is in a different phase from the notice (${prev.phase}/${prev.operation} ` +
-            `vs ${row.phase}/${row.operation})`;
-    } else if (!(typeof row.at === 'number' && typeof prev.at === 'number' &&
-                 row.at >= prev.at && row.at - prev.at <= PAIR_WINDOW_MS)) {
-      why = `it did not arrive within ${PAIR_WINDOW_MS}ms of the notice`;
-    } else if (pairedNotice.has(prev.seq)) {
-      why = 'the notice before it has already been paired with another handler line';
-    } else if (available === null) {
-      why = "the page's own ErrorEvent log was not collected, so no browser event " +
-            'can be shown to have produced it';
-    } else if (claimed >= available) {
-      why = `the page recorded ${available} null-payload ResizeObserver event(s), ` +
-            `which ${claimed} pair(s) already account for`;
-    }
-
-    if (why) {
-      const r = Object.assign({}, row, { refusedBecause: why });
+    if (isHandlerLine(row)) {
+      const r = Object.assign({}, row, { refusedBecause: HANDLER_NEVER_EXEMPT });
       refused.push(r);
       remaining.push(r);
       continue;
     }
-
-    pairedNotice.add(prev.seq);
-    claimed += 1;
-    noise.push(Object.assign({}, row, {
-      pairedWithSeq: prev.seq,
-      pairedGapMs: row.at - prev.at,
-    }));
+    remaining.push(row);
   }
 
   return {
@@ -202,19 +148,24 @@ function partition(unexpected, all, evidence) {
     evidence: {
       collected: Array.isArray(evidence),
       windowErrorEvents: Array.isArray(evidence) ? evidence.length : null,
-      nullPayloadNotices: available,
-      pairsClaimed: claimed,
+      // Context for a reader. Deliberately NOT used by any decision above.
+      nullPayloadNotices: nullPayloadNotices(evidence),
+      capturedEntries: entries.length,
+      pairsClaimed: 0,
+      note: 'Only the exact browser notice is exempted. No handler line is ' +
+            'paired with it, because same-event provenance is not captured.',
     },
   };
 }
 
 /**
- * The page-side instrumentation this rule's evidence comes from.
+ * The page-side instrumentation this file's CONTEXT comes from.
  *
  * Installed through Playwright's `addInitScript`, so it is registered before
  * any application code runs and therefore sees the same events OG's own
  * `window.onerror` sees. It records only what an ErrorEvent carries; it swallows
- * nothing, cancels nothing and replaces no handler.
+ * nothing, cancels nothing and replaces no handler. Its output is written to
+ * evidence and read by people; no rule above consults it.
  */
 const INIT_SCRIPT = `(() => {
   if (window.__f28ErrorEvents) return;
@@ -224,8 +175,8 @@ const INIT_SCRIPT = `(() => {
       window.__f28ErrorEvents.push({
         seq: window.__f28ErrorEvents.length,
         message: String((ev && ev.message) || '').slice(0, 300),
-        // The whole point: a browser SIGNAL carries no thrown value, an
-        // exception does. Recorded as observed, never inferred from the text.
+        // A browser SIGNAL carries no thrown value, an exception does.
+        // Recorded as observed, never inferred from the text.
         nullPayload: !(ev && ev.error),
         errorName: (ev && ev.error && ev.error.name) ? String(ev.error.name).slice(0, 60) : null,
         filename: String((ev && ev.filename) || '').slice(0, 200),
@@ -256,6 +207,6 @@ module.exports = {
   RESIZE_NOTICE,
   RESIZE_MESSAGE,
   HANDLER_LINE,
+  HANDLER_NEVER_EXEMPT,
   NOTICE_BODIES,
-  PAIR_WINDOW_MS,
 };

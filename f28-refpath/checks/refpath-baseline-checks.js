@@ -464,21 +464,22 @@ async function main() {
     unexpected: split.remaining.map((e) => ({ seq: e.seq, phase: e.phase, text: e.text })),
     ruleAccounting: split.evidence,
   };
-  record('O9.4', 'every window error was entitled, once one pre-existing browser notice is named',
+  record('O9.4', 'every window error was entitled; ONLY the exact browser notice is ever exempted',
     split.remaining.length === 0,
     `${errors.entries().length} captured across ${JSON.stringify(cls.byPhase)}; ` +
     `${cls.expected.length} expected, ${split.noise.length} exempted, ` +
     `${split.refused.length} handler line(s) refused by the rule, ` +
     `${split.remaining.length} unexplained` +
     (split.remaining.length ? `: ${EC.describe(split.remaining, 1)[0]}` : ''));
-  record('O9.6', 'the exemption rule was armed with the evidence it requires',
+  record('O9.6', "the browser's own ErrorEvent log was collected, as CONTEXT for a reader",
     split.evidence.collected === true,
     split.evidence.collected
-      ? `${split.evidence.windowErrorEvents} window ErrorEvent(s) collected, ` +
-        `${split.evidence.nullPayloadNotices} of them null-payload ResizeObserver notice(s); ` +
-        `${split.evidence.pairsClaimed} pair(s) claimed`
-      : "the page's ErrorEvent log could not be collected, so NO handler line could be " +
-        'exempted (this is the direction the rule fails in, not a pass)');
+      ? `${split.evidence.windowErrorEvents} window ErrorEvent(s), ` +
+        `${split.evidence.nullPayloadNotices} of them null-payload ResizeObserver notice(s). ` +
+        'It funds no exemption: only the exact notice is exempted, and OG\'s companion ' +
+        '[frontend.handler] line is always unexpected'
+      : "the page's ErrorEvent log could not be collected; nothing depends on it, but a " +
+        'reader loses the corroboration that the browser really did signal');
 
   const leftovers = ownedTree.filter(OP.alive);
   record('O9.5', 'every process this run owned has exited', leftovers.length === 0,

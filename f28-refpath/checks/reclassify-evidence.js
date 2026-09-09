@@ -19,13 +19,17 @@
 //     the array order, which is the order `createRecorder` pushed them in, and
 //     every conclusion below is labelled as resting on that.
 //
-//   * The retained runs collected no window ErrorEvent log, because the
-//     instrumentation did not exist either. H7 therefore cannot be satisfied by
-//     ANY retained run, so no `[frontend.handler]` line in retained evidence can
-//     be exempted. Where an old run exempted one, that row becomes UNRESOLVED —
-//     not "now a failure", because the old rule's verdict was made on evidence
-//     this rule cannot check, and not "still fine", because it cannot be
-//     checked. Unresolved means the narrow scenario has to be run again.
+//   * The corrected rule exempts ONLY the exact browser notice. Every
+//     `[frontend.handler]` line is unexpected, in retained evidence and in new
+//     runs alike, because same-event provenance is not captured. Where an older
+//     run exempted one, that row is now UNEXPLAINED and the run's original
+//     "0 unexplained" verdict does not hold.
+//
+//     Such a row cannot be resolved by running the scenario again — a run that
+//     meets the same pre-existing condition reports the same row. It stands as
+//     unresolved PRE-EXISTING APPLICATION BEHAVIOUR, reported rather than
+//     exempted. An earlier version of this tool told the reader to rerun; that
+//     was misleading and is corrected here.
 //
 const fs = require('fs');
 const path = require('path');
@@ -77,11 +81,12 @@ function reclassifyFile(file) {
     correctedRule: { exempted: nowExempt, refused: nowRefused,
                      accounting: r.evidence },
     lostExemption,
+    lostExemptionKinds: lostExemption.map(
+      (t) => (NOISE.HANDLER_LINE.test(t) ? 'handler-line' : 'other')),
     note: lostExemption.length
-      ? 'The corrected rule cannot exempt ' + lostExemption.length + ' row(s) this run ' +
-        'exempted, because the run collected no window ErrorEvent log (H7). This is ' +
-        'UNRESOLVED, not refuted: the evidence needed to decide it was never taken. ' +
-        'The narrow scenario must be run again under the corrected rule.'
+      ? 'The corrected rule does not exempt ' + lostExemption.length + ' row(s) this run ' +
+        'exempted. Those rows are now UNEXPLAINED, so this run\'s original ' +
+        '"0 unexplained" verdict does not hold under the corrected rule.'
       : 'The corrected rule exempts exactly what this run exempted, so its verdict stands.',
   };
 }
@@ -110,25 +115,41 @@ function main() {
     }
   }
 
-  // An UNRESOLVED retained run stays unresolved for ever — the evidence it
-  // needed was never taken. What can change is whether a LATER run of the same
-  // scenario answered the same question under the corrected rule. Saying so is
-  // the difference between an open question and a closed one.
+  // Say plainly what CAN and CANNOT change.
+  //
+  // The corrected rule exempts only the exact browser notice; OG's companion
+  // `[frontend.handler]` line is never exempted, because this harness cannot
+  // establish that OG emitted it for the notice rather than for a real failure.
+  // So a run that MET that pre-existing condition cannot be resolved by running
+  // it again: the row would be unexplained again. Calling for a rerun would be
+  // misleading, and an earlier version of this tool did exactly that.
+  //
+  // What a later run can show is only that the scenario completed WITHOUT
+  // meeting the condition. That is a weaker statement and is labelled as one:
+  // it does not retroactively explain the earlier row.
   const kindOf = (f) => (f.includes('baseline') ? 'baseline'
                        : (f.includes('feature') ? 'feature' : 'other'));
   for (const row of rows) {
     if (row.status !== 'unresolved') continue;
-    const later = rows.filter((r) => r !== row && kindOf(r.file) === kindOf(row.file) &&
-                                     r.status === 'unchanged' &&
-                                     r.windowErrorEventsCollected === true &&
-                                     r.file > row.file);
-    if (later.length) {
-      row.supersededBy = later[later.length - 1].file;
-      row.note += ' It has since been superseded by ' + row.supersededBy +
-                  ', which answered the same question with the evidence the rule requires.';
+    const onlyHandlerLines = row.lostExemptionKinds.every((k) => k === 'handler-line');
+    row.rerunCanResolve = !onlyHandlerLines;
+    const cleanLater = rows.filter((r) => r !== row && kindOf(r.file) === kindOf(row.file) &&
+                                          r.status === 'unchanged' && r.file > row.file);
+    row.laterCleanRun = cleanLater.length ? cleanLater[cleanLater.length - 1].file : null;
+    if (onlyHandlerLines) {
+      row.note += " Every lost exemption is OG's own [frontend.handler] line beside the " +
+                  'browser notice, which the corrected rule never exempts. NO RERUN CAN ' +
+                  'RESOLVE THIS: a run that meets the same pre-existing condition would ' +
+                  'report the same unexplained row. It stands as an unresolved ' +
+                  'pre-existing condition of the application, not of this feature.';
     } else {
-      row.supersededBy = null;
-      row.note += ' No later run of this scenario has yet answered it under the corrected rule.';
+      row.note += ' The narrow scenario should be run again under the corrected rule.';
+    }
+    if (row.laterCleanRun) {
+      row.note += ' A later run of the same scenario, ' + row.laterCleanRun +
+                  ', completed without meeting the condition at all — which does not ' +
+                  'explain this row, only shows the scenario can pass when the browser ' +
+                  'does not signal.';
     }
   }
 
@@ -150,17 +171,21 @@ function main() {
   console.log('[reclassify] no retained file was modified, renamed or removed');
 
   const unresolved = rows.filter((r) => r.status === 'unresolved');
-  const open = unresolved.filter((r) => !r.supersededBy);
+  const rerunnable = unresolved.filter((r) => r.rerunCanResolve);
   for (const r of unresolved) {
-    console.log(`[reclassify] ${r.file} is unresolved and ` +
-                (r.supersededBy ? `superseded by ${r.supersededBy}`
-                                : 'NOT yet superseded'));
+    console.log(`[reclassify] ${r.file}: unresolved; ` +
+                (r.rerunCanResolve
+                  ? 'a rerun could resolve it'
+                  : "no rerun can resolve it — it is OG's own handler line beside the " +
+                    'browser notice') +
+                (r.laterCleanRun ? `; a later clean run exists (${r.laterCleanRun})` : ''));
   }
-  if (open.length) {
-    console.log(`[reclassify] ${open.length} run(s) still need the narrow scenario ` +
-                'run again under the corrected rule');
+  if (rerunnable.length) {
+    console.log(`[reclassify] ${rerunnable.length} run(s) should be run again`);
   } else if (unresolved.length) {
-    console.log('[reclassify] every unresolved run has been superseded by a later one');
+    console.log('[reclassify] no rerun would change any of these; they stand as ' +
+                'unresolved pre-existing application behaviour, reported rather than ' +
+                'exempted');
   }
 }
 
