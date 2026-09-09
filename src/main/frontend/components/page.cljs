@@ -511,7 +511,10 @@
        (when-not block-or-whiteboard?
          [:div {:key "page-references"}
           (rum/with-key
-            (reference/references route-page-name)
+            ;; F28: the sidebar's copy of this list keeps exactly the behaviour
+            ;; it has. Passed as this component's OWN option rather than through
+            ;; the block config, which would change how the sidebar renders.
+            (reference/references route-page-name {:sidebar? sidebar?})
             (str route-page-name "-refs"))])
 
        (when-not block-or-whiteboard?

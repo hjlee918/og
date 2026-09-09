@@ -1924,3 +1924,124 @@ html.is-mac {
 @media (max-width: 640px) {
   .f27-il-panel { margin-left: 0.5rem; }
 }
+
+/* ---------------------------------------------------------------------------
+   F28 first slice — the source path of a linked reference.
+
+   OG's breadcrumb draws a bare `⋯` where it stopped reading ancestors. That
+   marker becomes a real button here, and the levels behind it open in a panel
+   BELOW the breadcrumb row rather than inside it: a path is several lines, and
+   a row that has to hold them fights the crumb it belongs to.
+
+   Everything is scoped to `.f28-*`, so removing this feature removes its
+   appearance with it and nothing in OG's own breadcrumb styling changes.
+   --------------------------------------------------------------------------- */
+
+.f28-path {
+  min-width: 0;
+}
+
+.f28-path-toggle.f27-btn {
+  color: var(--ls-secondary-text-color);
+  opacity: 0.75;
+  padding: 0 0.15rem;
+}
+
+.f28-path-toggle.f27-btn:hover {
+  opacity: 1;
+  color: var(--ls-link-text-color);
+}
+
+.f28-path-toggle[aria-expanded="true"] {
+  opacity: 1;
+  color: var(--ls-link-text-color);
+}
+
+.f28-path-toggle-mark {
+  letter-spacing: 0.05em;
+}
+
+.f28-path-panel {
+  margin: 0.25rem 0 0.5rem 1.5rem;
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  background-color: var(--ls-secondary-background-color);
+  border-radius: 0 4px 4px 0;
+  font-size: 0.9em;
+}
+
+.f28-path-page {
+  font-weight: 500;
+  opacity: 0.85;
+  margin-bottom: 0.25rem;
+}
+
+.f28-path-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Each level is indented one step further than the one above it, so the shape
+   of the outline is visible even when several levels share their text — which
+   is the case a flat list reads as meaningless repetition. */
+
+.f28-path-step {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.1rem 0;
+  min-width: 0;
+}
+
+.f28-path-step + .f28-path-step { margin-left: 0.75rem; }
+
+.f28-path-level {
+  flex: 0 0 auto;
+  opacity: 0.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.f28-path-badge {
+  flex: 0 0 auto;
+  font-size: 0.75em;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  background-color: var(--ls-quaternary-background-color);
+  opacity: 0.9;
+}
+
+.f28-path-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.f28-path-empty { font-style: italic; opacity: 0.6; }
+
+.f28-path-note {
+  margin-top: 0.3rem;
+  opacity: 0.75;
+  font-size: 0.95em;
+}
+
+.f28-path-incomplete { font-style: italic; }
+
+.f28-path-mark { font-weight: 600; }
+
+.f28-path-snapshot {
+  margin-top: 0.25rem;
+  opacity: 0.6;
+  font-size: 0.85em;
+}
+
+.f28-path-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+}
+
+@media (max-width: 640px) {
+  .f28-path-panel { margin-left: 0.5rem; }
+  .f28-path-step + .f28-path-step { margin-left: 0.4rem; }
+}

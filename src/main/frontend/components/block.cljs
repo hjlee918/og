@@ -72,6 +72,7 @@
             [frontend.util.f27-outgoing :as f27o]
             [frontend.util.f27-inline :as f27il]
             [frontend.util.f27-inline-watch :as f27w]
+            [frontend.util.f28-refpath :as f28]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -5774,12 +5775,26 @@
                                       (if (seq title)
                                         (->elem :span.inline-wrap (map-inline config title))
                                         (->elem :div (markup-elements-cp config body))))]))))
+              ;; F28: the ONLY change to OG's breadcrumb. `:more` is the marker
+              ;; for ancestors this breadcrumb did not load, and a caller that
+              ;; can disclose them supplies `:f28/more-control` to render in its
+              ;; place. Without that key the output is byte-for-byte what it
+              ;; was. The `:else` branch still serves a parent whose title is
+              ;; nil, which is a DIFFERENT thing OG also draws as `⋯` and which
+              ;; this feature deliberately does not claim.
+              more-control (:f28/more-control config)
               breadcrumb (->> (into [] parents-props)
                               (concat [page-name-props] (when more? [:more]))
                               (filterv identity)
-                              (map (fn [x] (if (and (vector? x) (second x))
+                              (map (fn [x] (cond
+                                             (and (vector? x) (second x))
                                              (let [[block label] x]
                                                (rum/with-key (breadcrumb-fragment config block label opts) (:block/uuid block)))
+
+                                             (and (= :more x) (fn? more-control))
+                                             (more-control)
+
+                                             :else
                                              [:span.opacity-70 "⋯"])))
                               (interpose (breadcrumb-separator)))]
           (when (seq breadcrumb)
@@ -6630,6 +6645,189 @@
          {:class (when doc-mode? "document-mode")}
          (lazy-blocks config blocks' flat-blocks)]))))
 
+;; ---------------------------------------------------------------------------
+;; F28 first slice — the SOURCE PATH of a linked reference.
+;;
+;; OG groups a page's linked references by source page and then by the
+;; referencing block's parent, and draws one breadcrumb per group with
+;; `:level-limit 3`. `breadcrumb` reads `level-limit + 1` ancestors, shows the
+;; nearest three and emits a bare `⋯` for the rest — measured in the packaged
+;; application: no role, no tabindex, no title, no label, nothing happens when it
+;; is pressed, nothing in the whole section can take focus, and the elided
+;; ancestors are ABSENT from the page rather than hidden on it.
+;;
+;; This adds ONE control in that marker's place, which discloses those ancestors
+;; in bounded batches, read-only, in place. Specification:
+;; `project-notes/F28_SOURCE_PATH_SPEC.md`.
+;;
+;; TWO THINGS ABOUT THE SHAPE, both deliberate:
+;;
+;; 1. The control is handed to `breadcrumb` as `:f28/more-control` and is
+;;    invoked ONLY at the `:more` marker. So a reference whose whole path OG
+;;    already shows costs nothing at all — no walk, no query, no probe — and
+;;    `breadcrumb`'s output is unchanged wherever the key is absent.
+;;
+;; 2. Nothing has to be signalled back out of `breadcrumb`. The panel renders
+;;    only when the press count is set, and the press count can only be set by
+;;    the button, which exists only where the marker was drawn. A path with
+;;    nothing elided therefore renders neither the control nor the panel,
+;;    without the wrapper asking a second time how deep the path is.
+;; ---------------------------------------------------------------------------
+
+(defn- f28-surface
+  "OG's `config` mapped to the one question `frontend.util.f28-refpath` asks.
+
+  This is the ONLY place OG's config shape is known for this feature, so every
+  rule in the specification is decided by a pure function over plain booleans
+  and is tested without a renderer.
+
+  `:source-path-list?` is an explicit opt-in, set by
+  `frontend.components.reference/references*`, rather than an inference from a
+  pile of flags: `breadcrumb-with-container` also serves the custom-query branch
+  and `block-linked-references`, and a surface must SAY that it is this one.
+
+  `:elided?` is deliberately absent here — only `breadcrumb` knows it. The
+  caller asks `surface-allows?`, which is every rule but that one."
+  [config]
+  {:source-path-list? (boolean (:f28/source-path? config))
+   :f27-panel? (some? (:f27/ref-render config))
+   :mobile? (boolean (util/mobile?))
+   :preview? (boolean (:preview? config))
+   :slide? (boolean (:slide? config))
+   :sidebar? (boolean (:sidebar? config))
+   :block-refs-list? (boolean (:f28/block-refs-list? config))
+   :embed? (boolean (or (:embed? config) (:page-embed? config)))
+   :query? (boolean (:custom-query? config))
+   :html-export? (boolean (:html-export? config))
+   :whiteboard? (boolean (or (:whiteboard? config) (:whiteboard-view? config)))})
+
+(defn- f28-panel-id
+  "A DOM id for one group's panel, stable across renders and unique on the page.
+
+  The group is identified by the list it belongs to and the block its breadcrumb
+  is drawn for; two lists on one page therefore cannot collide."
+  [config block-id]
+  (str "f28-path-"
+       (string/replace (str (:id config) "-" block-id) #"[^A-Za-z0-9_-]" "_")))
+
+(rum/defc f28-path-step
+  "One disclosed ancestor, as PLAIN TEXT.
+
+  Deliberately NOT rendered through OG's inline renderer. A source path answers
+  where a reference sits, and rendering ancestor content on a new surface is
+  exactly the defect the F27 boundary corrections found in F27's own breadcrumb:
+  an asset, a macro or a fragment of HTML written in a PARENT block reached the
+  screen through it. A step is therefore a bounded, grapheme-safe label with
+  reference markup reduced to what a person reads first, and a heading level or
+  task marker shown as structure instead of echoed as `##` or `TODO`.
+
+  `n` is the level's position counted from the source page, or nil when the walk
+  has not reached the page and no position can honestly be claimed."
+  [e n]
+  (let [content (f27ctx/block-label e)
+        {:keys [heading marker text]} (f28/step-prefix content)
+        label (f27c/preview-label (or text content) f28/max-step-chars)]
+    [:li.f28-path-step
+     (when n [:span.f28-path-level {:aria-hidden "true"} (str n ".")])
+     (when heading [:span.f28-path-badge (str "H" heading)])
+     (when marker [:span.f28-path-badge marker])
+     (if (string/blank? label)
+       [:span.f28-path-text.f28-path-empty (t :f28/path-step-empty)]
+       [:span.f28-path-text label])]))
+
+(rum/defc f28-source-path-panel
+  "The part of one reference's ancestor path that OG's breadcrumb did not show.
+
+  Walks upward with `frontend.util.f27-context/load-ancestors`, which already
+  owns the three properties this needs: bounded batches with explicit
+  continuation, a visited-identity guard that stops a cycle before it can
+  recurse, and a failed lookup that stays distinguishable from reaching the top.
+  `frontend.util.f28-refpath/disclosure` subtracts the levels the breadcrumb is
+  already showing, so no step is repeated and none is claimed that was not read.
+
+  A cycle, an unreadable ancestor and the hard cap are three different answers
+  and each withdraws the continuation control for its own reason. None of them
+  is described as a complete path."
+  [repo uuid panel-id press *press]
+  (let [loaded (f27ctx/load-ancestors (f27-parent-fn repo) uuid (f28/request-limit press))
+        {:keys [steps page hidden depth status complete?]}
+        (f28/disclosure loaded f28/og-visible-levels)
+        more-press (f28/next-press press loaded)]
+    [:div.f28-path-panel {:id panel-id
+                          :role "group"
+                          :aria-label (t :f28/path-panel-label)}
+     (when page
+       [:div.f28-path-page
+        (t :f28/path-from-page (or (:block/original-name page) (:block/name page)))])
+     (if (zero? hidden)
+       [:div.f28-path-note (if (= status :partial)
+                             (t :f28/path-none-yet)
+                             (t :f28/path-nothing-hidden))]
+       [:ol.f28-path-steps
+        (map-indexed (fn [i e]
+                       (rum/with-key (f28-path-step e (when complete? (inc i)))
+                         (f28/step-key i e)))
+                     steps)])
+     ;; `cond`, not `case`: the outgoing batch found that a `case` clause whose
+     ;; result is a literal `nil` is compiled away inside a hiccup body, taking
+     ;; the default with it. A `cond`'s clauses are pairs by construction.
+     [:div.f28-path-note.f28-path-status
+      (cond
+        (= status :complete) (t :f28/path-complete hidden f28/og-visible-levels)
+        (= status :partial) (t :f28/path-partial hidden)
+        (= status :cycle) [:span [:span.f28-path-mark "↻"] " " (t :f28/path-cycle)]
+        (= status :unreadable) [:span [:span.f28-path-mark "⚠"] " " (t :f28/path-unreadable)]
+        (= status :capped) [:span [:span.f28-path-mark "⚠"] " "
+                            (t :f28/path-capped f27ctx/hard-cap)]
+        :else "")]
+     ;; Stated on the panel rather than left to be inferred: this was read when
+     ;; the control was pressed, and closing and opening it again is what reads
+     ;; it afresh. Same honesty rule the F27 refresh increment established.
+     [:div.f28-path-snapshot (t :f28/path-snapshot)]
+     [:div.f28-path-actions
+      (when more-press
+        [:button.f28-path-more.f27-btn
+         (f27-btn #(reset! *press more-press) {:aria-label (t :f28/path-more)})
+         (t :f28/path-more)])
+      [:button.f28-path-hide.f27-btn
+       (f27-btn #(reset! *press nil) {:aria-label (t :f28/path-hide)
+                                      :aria-controls panel-id})
+       (t :f28/path-hide)]]
+     (when (and (pos? depth) (not complete?))
+       [:div.f28-path-note.f28-path-incomplete (t :f28/path-not-complete)])]))
+
+(rum/defcs f28-source-path < (rum/local nil ::press)
+  "OG's breadcrumb for one linked-reference group, plus the source-path
+  disclosure attached to the point where OG cut the path.
+
+  The control replaces `⋯` inside the row. The panel is a SIBLING of the
+  breadcrumb rather than a child of it, so a multi-line path does not have to
+  fight an inline row for layout, and Tab reaches it immediately after the
+  control that opened it.
+
+  Not `rum/static`: OG's breadcrumb is a plain function called from here, so
+  this component must re-render whenever `breadcrumb-with-container` does, or
+  the crumb would stop following the database — a regression in OG's own
+  behaviour rather than a limit of this feature."
+  [state config repo block-id opts]
+  (let [*press (::press state)
+        press @*press
+        panel-id (f28-panel-id config block-id)
+        control (fn []
+                  [:button.f28-path-toggle.f27-btn
+                   (f27-btn #(swap! *press (fn [p] (when-not p 1)))
+                            {:id (str panel-id "-toggle")
+                             :aria-expanded (if press "true" "false")
+                             :aria-controls panel-id
+                             :aria-label (if press (t :f28/path-hide) (t :f28/path-show))
+                             :title (if press (t :f28/path-hide) (t :f28/path-show))
+                             :on-mouse-down (fn [e] (util/stop-propagation e))})
+                   [:span.f28-path-toggle-mark {:aria-hidden "true"} "⋯"]])]
+    [:div.f28-path
+     (breadcrumb (assoc config :f28/more-control control) repo block-id opts)
+     (when press
+       (f28-source-path-panel repo block-id panel-id press *press))]))
+
 (rum/defcs breadcrumb-with-container < rum/reactive db-mixins/query
   {:init (fn [state]
            (let [first-block (ffirst (:rum/args state))]
@@ -6652,9 +6850,16 @@
                  blocks)]
     [:div
      (when (:breadcrumb-show? config)
-       (breadcrumb config (state/get-current-repo) (or navigating-block (:block/uuid (first blocks)))
-                   {:show-page? false
-                    :navigating-block *navigating-block}))
+       (let [crumb-id (or navigating-block (:block/uuid (first blocks)))
+             crumb-opts {:show-page? false
+                         :navigating-block *navigating-block}]
+         ;; F28: the same breadcrumb, wrapped so the point where OG cut the
+         ;; path can be opened. `surface-allows?` is every rule but the elision
+         ;; one; `breadcrumb` decides that one itself, at the `:more` marker.
+         ;; Everywhere else this renders exactly what it rendered before.
+         (if (f28/surface-allows? (f28-surface config))
+           (f28-source-path config repo crumb-id crumb-opts)
+           (breadcrumb config repo crumb-id crumb-opts))))
      (blocks-container blocks (assoc config
                                      :breadcrumb-show? false
                                      :navigating-block *navigating-block

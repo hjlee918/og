@@ -107,14 +107,20 @@
                                     :ref? true
                                     :breadcrumb-show? true
                                     :group-by-page? true
-                                    :editor-box editor/box}
+                                    :editor-box editor/box
+                                    ;; F28: named explicitly rather than left to
+                                    ;; the absent opt-in. This list renders under
+                                    ;; any block on any surface — the sidebar, an
+                                    ;; embed, a whiteboard portal — and is not
+                                    ;; this slice's.
+                                    :f28/block-refs-list? true}
                                    {})]
     [:div.references-blocks
      (content/content block-id
                       {:hiccup ref-hiccup})]))
 
 (rum/defc references-inner
-  [page-name filters filtered-ref-blocks]
+  [page-name filters filtered-ref-blocks source-path?]
   [:div.references-blocks
    (let [ref-hiccup (block/->hiccup filtered-ref-blocks
                                     {:id page-name
@@ -122,12 +128,21 @@
                                      :breadcrumb-show? true
                                      :group-by-page? true
                                      :editor-box editor/box
-                                     :filters filters}
+                                     :filters filters
+                                     ;; F28: the explicit opt-in for the source-path
+                                     ;; disclosure. `breadcrumb-with-container` also
+                                     ;; serves custom queries and a block's own
+                                     ;; reference list, so the surface has to SAY it
+                                     ;; is this one rather than be inferred. False in
+                                     ;; the right sidebar's copy of this list, whose
+                                     ;; behaviour is protected as it is.
+                                     :f28/source-path? (boolean source-path?)}
                                     {})]
      (content/content page-name {:hiccup ref-hiccup}))])
 
 (rum/defc references-cp
-  [page-name filters filters-atom filter-state total filter-n filtered-ref-blocks *ref-pages]
+  [page-name filters filters-atom filter-state total filter-n filtered-ref-blocks *ref-pages
+   source-path?]
   (let [threshold (state/get-linked-references-collapsed-threshold)
         default-collapsed? (>= total threshold)
         *collapsed? (atom nil)]
@@ -157,7 +172,7 @@
                           :size  22})]]
 
      (fn []
-       (references-inner page-name filters filtered-ref-blocks))
+       (references-inner page-name filters filtered-ref-blocks source-path?))
 
      {:default-collapsed? default-collapsed?
       :title-trigger? true
@@ -193,9 +208,10 @@
            (let [page-name (first (:rum/args state))
                  filters (when page-name (atom nil))]
              (assoc state ::filters filters)))}
-  [state page-name]
+  [state page-name opts]
   (when page-name
-    (let [page-name (util/page-name-sanity-lc page-name)
+    (let [source-path? (not (:sidebar? opts))
+          page-name (util/page-name-sanity-lc page-name)
           page-props-v (state/sub-page-properties-changed page-name)
           *ref-pages (::ref-pages state)
           repo (state/get-current-repo)
@@ -242,16 +258,23 @@
         [:div.references.page-linked.flex-1.flex-row
          (sub-page-properties-changed page-name page-props-v filters-atom)
          [:div.content.pt-6
-          (references-cp page-name filters filters-atom filter-state total filter-n filtered-ref-blocks' *ref-pages)]]))))
+          (references-cp page-name filters filters-atom filter-state total filter-n
+                         filtered-ref-blocks' *ref-pages source-path?)]]))))
 
 (rum/defc references
-  [page-name]
-  (ui/catch-error
-   (ui/component-error (t :linked-references/unexpected-error))
-   (ui/lazy-visible
-    (fn []
-      (references* page-name))
-    {:debug-id (str page-name " references")})))
+  "`opts` carries only `:sidebar?`, which F28 reads to keep the source-path
+  disclosure out of the right sidebar's copy of this list. It is a NEW key on a
+  new argument rather than OG's `:sidebar?` threaded into the block config,
+  because that key already changes how blocks render (`lazy-blocks`' load-more
+  label among others) and this feature may not change what the sidebar shows."
+  ([page-name] (references page-name nil))
+  ([page-name opts]
+   (ui/catch-error
+    (ui/component-error (t :linked-references/unexpected-error))
+    (ui/lazy-visible
+     (fn []
+       (references* page-name opts))
+     {:debug-id (str page-name " references")}))))
 
 (rum/defcs unlinked-references-aux
   < rum/reactive db-mixins/query
