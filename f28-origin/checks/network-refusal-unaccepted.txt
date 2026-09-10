@@ -1,0 +1,83 @@
+ARCHIVED PARTIAL IMPLEMENTATION — UNSAFE, NOT EXECUTABLE OR ACCEPTED.
+Preserved verbatim below for review; replaced by pre-launch refusal.
+
+'use strict';
+//
+// SCOPED NETWORK REFUSAL FOR THE EXPERIMENTAL APPLICATION ONLY.
+//
+// This experiment is expected to make third-party plugin code RUN for the first
+// time. Readwise, ollama-logseq and the ChatGPT plugin all gate their real work
+// on a credential this profile does not have, and their settings are created
+// empty — but "it should not call out" is an argument, and an argument is not a
+// control. So every request the experimental application's own session makes is
+// inspected, and anything that is not one of the application's OWN local
+// schemes is CANCELLED and recorded.
+//
+// WHAT THIS IS NOT. It does not touch the host's networking, any other process,
+// any proxy, or any system setting. It is installed in the main process of the
+// one Electron application this harness launched, through Playwright's handle
+// on it, and it dies with that process. The host's internet stays up, which is
+// what the instruction requires.
+//
+// WHY onBeforeRequest. It is the earliest per-request hook in the session, it
+// sees requests from EVERY frame in that session including the plugin sandbox
+// iframes, and cancelling there means the request is never issued rather than
+// issued and ignored.
+//
+const LOCAL_SCHEMES = ['lsp:', 'assets:', 'file:', 'data:', 'blob:', 'about:',
+                       'devtools:', 'chrome:', 'chrome-extension:'];
+
+/** Runs in the MAIN process. Keep it self-contained: it is serialised. */
+function INSTALL({ session }, schemes) {
+  const ses = session.defaultSession;
+  const state = { refused: [], allowed: 0, allowedSample: [], installedAt: Date.now() };
+  global.__expNet = state;
+  ses.webRequest.onBeforeRequest((details, callback) => {
+    const url = String(details.url || '');
+    const local = schemes.some((s) => url.startsWith(s));
+    if (local) {
+      state.allowed += 1;
+      if (state.allowedSample.length < 40) state.allowedSample.push(url.slice(0, 160));
+      callback({ cancel: false });
+      return;
+    }
+    // Recorded with enough context to say WHO tried, and refused.
+    if (state.refused.length < 200) {
+      state.refused.push({
+        url: url.slice(0, 300),
+        resourceType: details.resourceType || null,
+        at: Date.now() - state.installedAt,
+      });
+    }
+    callback({ cancel: true });
+  });
+  return true;
+}
+
+function READ() { return global.__expNet || null; }
+
+/**
+ * Install on an already-launched Playwright ElectronApplication.
+ * Call this BEFORE the first window is driven, so nothing escapes unrecorded.
+ */
+async function install(app, { schemes = LOCAL_SCHEMES } = {}) {
+  return app.evaluate(INSTALL, schemes);
+}
+
+async function read(app) {
+  return app.evaluate(READ).catch(() => null);
+}
+
+/**
+ * A launch wrapper for `packaged-app.js`'s injectable `deps.launch`, so the
+ * refusal is in place between `launch` resolving and any page being loaded.
+ */
+function launchWith(playwrightLaunch, opts = {}) {
+  return async (launchOpts) => {
+    const app = await playwrightLaunch(launchOpts);
+    await install(app, opts);
+    return app;
+  };
+}
+
+module.exports = { LOCAL_SCHEMES, install, read, launchWith };

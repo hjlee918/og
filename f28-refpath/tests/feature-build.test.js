@@ -30,14 +30,27 @@ const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 const manifestPath = path.join(STATIC, ID.MANIFEST_FILE);
 const built = fs.existsSync(manifestPath);
 
+// `static/` is ONE scratch directory shared by every build this checkout makes,
+// so it holds whichever was built last. When it holds a DIFFERENT build, these
+// assertions are asking the wrong question rather than finding an answer, and
+// they say so by name instead of failing — the same treatment, and the same
+// reason, as the two pilot tests `scripts/run-feature-tests.js` skips.
+// The build that IS in static/ is asserted by its own suite.
+const OTHER_BUILDS = {
+  'origin-experiment-build-manifest.json': 'the ORIGIN EXPERIMENT (f28-origin/tests/experiment-build.test.js)',
+};
+const occupant = Object.keys(OTHER_BUILDS)
+  .find((f) => !built && fs.existsSync(path.join(STATIC, f)));
+
 function manifest() {
   return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 }
 
-test('a feature build is present in static/', () => {
-  assert.ok(built,
-    `no feature build present at ${manifestPath}; run f28-refpath/scripts/build-feature.js first`);
-});
+test('a feature build is present in static/',
+  { skip: occupant ? `static/ currently holds ${OTHER_BUILDS[occupant]}` : false }, () => {
+    assert.ok(built,
+      `no feature build present at ${manifestPath}; run f28-refpath/scripts/build-feature.js first`);
+  });
 
 test('the compiled main bundle is the one the manifest describes', { skip: !built }, () => {
   const m = manifest();

@@ -79,10 +79,20 @@ const IC = require('./inside-containers.js');
 const PA = require('./plugin-artifacts.js');
 const FP = require('./fresh-profile.js');
 const RJ = require('./reference-journey.js');
-const ID = require('../src/feature-identity.js');
+// THE ORIGIN EXPERIMENT reuses this measurement deliberately: the same journey,
+// the same readers and the same rules, against a DIFFERENT build. Running a new
+// instrument against the candidate would make the two runs incomparable, which
+// is the one thing this comparison exists to avoid. Everything below defaults
+// to the accepted F28 RefPath build; nothing changes for it.
+const EXPERIMENT = process.env.F28_ORIGIN_EXPERIMENT === '1';
+const XA = EXPERIMENT ? require('../../f28-origin/checks/experiment-assertions.js') : null;
+const NET = EXPERIMENT ? require('../../f28-origin/checks/network-refusal.js') : null;
+const ID = require(EXPERIMENT ? '../../f28-origin/src/experiment-identity.js'
+                              : '../src/feature-identity.js');
 
 const EVIDENCE = path.join(FEATURE_DIR, 'evidence');
-const FEATURE_APP = 'Logseq-OG-F28-RefPath';
+const FEATURE_APP = EXPERIMENT ? 'Logseq-OG-F28-OriginExp' : 'Logseq-OG-F28-RefPath';
+const EVIDENCE_PREFIX = EXPERIMENT ? 'f28-origin-experiment' : 'f28-plugin-coexistence';
 const sleep = OP.sleep;
 
 /** Every phase in which a reference feature was the thing on screen. */
@@ -160,6 +170,74 @@ async function seedProfile(built, root) {
 // same short reference journey every time.
 // ---------------------------------------------------------------------------
 
+/**
+ * The ORIGIN EXPERIMENT's own claims, asked of the running application.
+ * Never called for the accepted build.
+ */
+async function experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH }) {
+  const origins = await XA.readOrigins(page);
+  obs.origins = origins;
+  record('X.1', 'the renderer is actually served from the privileged application origin — the ' +
+    'URL the window ended up at, not the define the build compiled in',
+    origins.origin === 'lsp://logseq.com' && /\/electron\.html$/.test(origins.href || ''),
+    `href ${J(origins.href)}, origin ${J(origins.origin)}`);
+
+  const load = XA.summariseLoad(ps, wantIds);
+  obs.experimentLoad = load;
+  record('X.2', 'every plugin entry resolves through the privileged PLUGIN origin, so no sandbox ' +
+    'is a file:// document any more',
+    load.entriesOnPluginOrigin && !load.anyFileEntry,
+    () => load.rows.map((r) => `${r.key}: ${J(r.entry)}`).join('\n          ') || 'no plugin placed');
+
+  record('X.3', 'the application origin and the plugin origin are DIFFERENT, so the separation ' +
+    'between the app and its plugins is preserved rather than collapsed',
+    origins.origin === 'lsp://logseq.com' &&
+    load.rows.every((r) => (r.entry || '').startsWith('lsp://logseq.io/')),
+    `application ${J(origins.origin)} vs plugin origin "lsp://logseq.io" — same scheme, ` +
+    'different host, therefore cross-origin');
+
+  // THE POINT OF THE WHOLE EXPERIMENT.
+  record('X.4', 'the plugins COMPLETE their handshake and report loaded — not registered, not ' +
+    'enabled, loaded',
+    load.loadedCount === wantIds.length && !load.anyHandshakeTimeout,
+    () => load.rows.map((r) => `${r.key}: status ${J(r.status)}, loaded ${J(r.loaded)}` +
+      `${r.loadError ? `, loadError ${J(r.loadError)}` : ''}`).join('\n          ') +
+      `\n          → ${load.loadedCount} of ${wantIds.length} loaded; ` +
+      `handshake timeout seen: ${load.anyHandshakeTimeout}`);
+
+  const probes = await XA.probeHandler(page);
+  obs.handlerProbes = probes;
+  const served = probes.filter((p) => p.expect === 'serve');
+  const refused = probes.filter((p) => p.expect === 'refuse');
+  record('X.5', 'the hardened lsp:// handler serves the application\'s own resources',
+    served.length > 0 && served.every((p) => p.ok === true && p.bytes > 0),
+    () => served.map((p) => `${p.name}: status ${J(p.status)}, ${p.bytes} bytes`).join('; '));
+  record('X.6', 'and refuses an unknown host, a traversal, a PERCENT-ENCODED traversal and an ' +
+    'encoded absolute path — on both hosts',
+    refused.length === 6 && refused.every((p) => p.ok !== true),
+    () => refused.map((p) => `${p.name}: ${p.threw ? `threw ${J(p.threw)}` : `status ${J(p.status)}`}` +
+      `${p.body ? ` LEAKED ${J(p.body)}` : ''}`).join('\n          '));
+
+  const assetProbe = path.join(GRAPH, 'assets', 'f28-origin-probe.png');
+  const asset = fs.existsSync(assetProbe) ? await XA.probeAsset(page, assetProbe) : null;
+  obs.assetProbe = asset;
+  record('X.7', 'a local graph asset still loads over assets:// from the new origin, so the F27 ' +
+    'asset contract survives the move',
+    !!(asset && asset.loaded && asset.w === 1),
+    asset ? `${J(asset.url)} → loaded ${J(asset.loaded)} ${J(asset.w)}x${J(asset.h)}` : 'no probe placed');
+
+  const net = await NET.read(session.app);
+  obs.network = net ? { allowed: net.allowed, refusedCount: net.refused.length,
+                        refused: net.refused.slice(0, 40) } : null;
+  record('X.8', 'no request left the application: every non-local scheme was refused by the ' +
+    "harness's scoped control, and each attempt is recorded",
+    !!net && net.refused.length === 0,
+    () => net
+      ? `${net.allowed} local request(s) allowed; ${net.refused.length} refused` +
+        (net.refused.length ? `\n          ${net.refused.map((r) => `${r.resourceType} ${r.url}`).join('\n          ')}` : '')
+      : 'the network control did not report');
+}
+
 async function runSession(cfg, built, stamp) {
   const prefix = `${cfg.key.toUpperCase()}.`;
   const record = makeRecorder(prefix);
@@ -179,6 +257,9 @@ async function runSession(cfg, built, stamp) {
   const g = CG.build({ kind: `coexist-${cfg.key}` });
   const GRAPH = B.assertInsideAllowedRoot('plugin-coexistence graph', g.graph);
   obs.graph = GRAPH;
+  // Placed BEFORE the snapshot, so the `assets://` probe is part of the fixture
+  // rather than a graph change this run would then have to explain away.
+  if (EXPERIMENT) XA.placeAssetProbe(GRAPH);
   record('1.1', 'a fresh synthetic graph inside the permitted root; no earlier run reused',
     true, `${GRAPH} (${g.pages} pages + ${g.journal})`);
   const before = GH.snapshot(GRAPH);
@@ -224,10 +305,16 @@ async function runSession(cfg, built, stamp) {
     !B.isInsideAllowedRoot(BAD) && !fs.existsSync(BAD), BAD);
 
   // ---- launch, refuse an outside path, open the graph ------------------
+  // The experiment's launch adapter refuses before launching. No post-launch
+  // session hook is claimed as containment; main() also refuses before seeding.
+  const deps = EXPERIMENT ? {
+    launch: NET.launchWith((opts) => require(path.join(REPO, 'node_modules', 'playwright'))
+      ._electron.launch(opts)),
+  } : undefined;
   const session = await APP.open({
     // `record` already stamps this session's prefix, so the launcher is given
     // only the letter its own sequence uses.
-    built, graph: GRAPH, bad: BAD, errors, say, record, phase, prefix: 'L',
+    built, graph: GRAPH, bad: BAD, errors, say, record, phase, prefix: 'L', deps,
   });
   const { page } = session;
   ownedTree = session.ownedTree;
@@ -287,6 +374,8 @@ async function runSession(cfg, built, stamp) {
       (ps.plugins || []).every((p) => p.status !== null || p.loaded !== null),
       () => (loadRows.length ? loadRows.join('\n          ') : 'no package registered') +
         `\n          → ${loadedCount} of ${wantIds.length} completed runtime initialisation`);
+    if (EXPERIMENT) await experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH });
+
     record('3.3', 'the surfaces a LOADED plugin would have created are counted, so "no ' +
       'interference" is measured rather than inferred',
       true,
@@ -687,6 +776,8 @@ async function runSession(cfg, built, stamp) {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  // Before package resolution, profile swaps, seeding, graph access or launch.
+  if (EXPERIMENT) NET.assertReady();
   fs.mkdirSync(EVIDENCE, { recursive: true });
   const only = process.argv.slice(2).filter((a) => !a.startsWith('-'));
   const plan = only.length ? SESSIONS.filter((s) => only.includes(s.key)) : SESSIONS;
@@ -836,7 +927,7 @@ async function main() {
     (restoreReport.notes.length ? `\n          notes: ${restoreReport.notes.join(' | ')}` : ''));
 
   const pass = results.filter((r) => r.ok).length;
-  const out = path.join(EVIDENCE, `f28-plugin-coexistence-${Date.now()}.json`);
+  const out = path.join(EVIDENCE, `${EVIDENCE_PREFIX}-${Date.now()}.json`);
   fs.writeFileSync(out, JSON.stringify({ results, batch, sessions }, null, 2));
   say(`\n  ${pass}/${results.length} checks passed`);
   say(`  evidence: ${out}\n`);

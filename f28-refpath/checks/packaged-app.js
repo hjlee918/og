@@ -53,7 +53,13 @@ const sleep = OP.sleep;
 
 // The builds this project produces, newest first. Each is a directory name
 // under `development/<dir>/out` and an identity module in the checkout.
+// `out` names the OUTPUT directory, because the origin experiment is packaged
+// into its own `out-originexp/` precisely so the accepted package in `out/` is
+// preserved and cannot be overwritten. It defaults to `out` for every build
+// that predates that distinction.
 const BUILDS = [
+  { app: 'Logseq-OG-F28-OriginExp', dir: 'f28-origin', out: 'out-originexp',
+    identity: 'f28-origin/src/experiment-identity.js' },
   { app: 'Logseq-OG-F28-RefPath', dir: 'f28-refpath', identity: 'f28-refpath/src/feature-identity.js' },
   { app: 'Logseq-OG-F27-Inline', dir: 'f27-inline-context', identity: 'f27-inline/src/feature-identity.js' },
 ];
@@ -235,9 +241,10 @@ function currentGraphVerdict({ api, liveRepo, storage, approved, allowedRoot }) 
  * `prefer` names a build's app name; without it the newest present build wins.
  */
 function resolve(prefer) {
-  const wanted = prefer ? BUILDS.filter((b) => b.app === prefer) : BUILDS;
+  const wanted = prefer ? BUILDS.filter((b) => b.app === prefer)
+    : BUILDS.filter((b) => b.app !== 'Logseq-OG-F28-OriginExp');
   for (const b of wanted) {
-    const appDir = path.join(FEATURE_DIR, 'out', `${b.app}-darwin-x64`, `${b.app}.app`);
+    const appDir = path.join(FEATURE_DIR, b.out || 'out', `${b.app}-darwin-x64`, `${b.app}.app`);
     const exe = path.join(appDir, 'Contents', 'MacOS', b.app);
     const resApp = path.join(appDir, 'Contents', 'Resources', 'app');
     if (!fs.existsSync(exe)) continue;

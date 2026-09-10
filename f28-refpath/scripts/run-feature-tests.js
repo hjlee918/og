@@ -65,7 +65,8 @@ const INHERITED_FILES = ['graph-fixture.test.js', 'mutable-fixture.test.js',
 // The ORIGIN EXPERIMENT's own suite. Separate from the F28 files above because
 // it belongs to a CANDIDATE build, not to the accepted one: its identity tests
 // exist precisely to prove the two cannot be confused.
-const ORIGIN_FILES = ['lsplugin-transform.test.js', 'experiment-source.test.js']
+const ORIGIN_FILES = ['lsplugin-transform.test.js', 'experiment-source.test.js',
+                      'experiment-build.test.js', 'network-refusal.test.js', 'storage-origin.test.js']
   .map((f) => path.join('f28-origin', 'tests', f));
 
 // Exactly the two pilot tests above, by name.
