@@ -759,7 +759,13 @@ test('the feature is scoped in CSS, so removing it removes its appearance', () =
     path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.css'), 'utf8');
   const at = css.indexOf('F28 child context');
   assert.ok(at > 0, 'the child-context CSS block was renamed or removed');
-  const block = css.slice(at);
+  // Bounded at the NEXT section banner rather than at the end of the file. It
+  // was the last block when this was written; the reference-role slice added
+  // one after it, and an unbounded slice would have made this test read that
+  // feature's selectors as this one's. The assertion itself is unchanged: every
+  // selector in the child-context section is still required to be `f28-ctx`.
+  const next = css.indexOf('/* ---', at);
+  const block = next > at ? css.slice(at, next) : css.slice(at);
   const selectors = [...block.matchAll(/^\.([a-z0-9-]+)/gm)].map((m) => m[1]);
   assert.ok(selectors.length > 5, 'too few rules to be this feature\'s appearance');
   for (const s of selectors) {

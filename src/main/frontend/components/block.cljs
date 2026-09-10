@@ -6081,14 +6081,28 @@
        {:role (f28role/row-role {:ref-ids (map :db/id refs) :page-ids page-ids})
         :nested? nested?}))))
 
-(rum/defc f28-ref-role
+(rum/defc f28-ref-role < rum/reactive
   "One row's role, as a compact inert word with its explanation behind it.
 
   `data-f28-role` carries the decision itself, so a check reads the ROLE rather
   than the translated word — which is also the difference between testing this
-  feature and testing the dictionary."
+  feature and testing the dictionary.
+
+  `rum/reactive` is here for ONE reason and it was measured rather than
+  assumed. `t` reads the interface language through `state/sub`, and
+  `frontend.util/react` degrades to a plain deref outside a reactive component:
+  the right word is rendered, but nothing subscribes, so a reader who changes
+  the language keeps the old word until the row is redrawn for some other
+  reason — and `block-container`'s `:should-update` compares block keys only, so
+  that may not happen at all. The first packaged run of this feature found
+  exactly that: the language changed and 47 labels stayed English. Subscribing
+  HERE re-renders the label alone rather than the row it sits in.
+
+  The caller renders this only when there IS a role, so no component is mounted
+  on the surfaces this feature does not label — which is every block outside one
+  page's linked-references list."
   [described]
-  (when-let [{:keys [role text-key why-key]} described]
+  (let [{:keys [role text-key why-key]} described]
     [:span.f28-role
      {:class (str "f28-role-" (name role))
       :data-f28-role (name role)
@@ -6488,7 +6502,10 @@
       ;; F28: one inert word saying why this row is here. Last in the row, so it
       ;; is read after the block it describes and never before it; a `<span>`,
       ;; so it adds no keyboard stop to a list that has few enough already.
-      (f28-ref-role ref-role)]
+      ;; `when` rather than a component that renders nil: every block in the
+      ;; application reaches this line, and only the rows of one linked-
+      ;; references list have a role at all.
+      (when ref-role (f28-ref-role ref-role))]
 
      (block-children config block children collapsed?)
 

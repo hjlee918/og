@@ -192,9 +192,26 @@ test('the label is rendered once, inside the row it describes', () => {
     'the label must be rendered in exactly one place');
   const mainStart = inner.indexOf('[:div.block-main-container');
   const childrenStart = inner.indexOf('(block-children config block children collapsed?)');
-  const labelAt = inner.indexOf('(f28-ref-role ref-role)');
+  const labelAt = inner.indexOf('(when ref-role (f28-ref-role ref-role))');
   assert.ok(mainStart > 0 && labelAt > mainStart && labelAt < childrenStart,
     'the label must sit inside the row\'s own main container, before its children');
+  // Every block in the application reaches this line. Only the rows of one
+  // linked-references list have a role, and nothing may be mounted for the rest.
+  assert.match(inner, /\(when ref-role \(f28-ref-role ref-role\)\)/,
+    'the label component must not be mounted where there is no role');
+});
+
+test('the label follows the interface language', () => {
+  // `t` reads the language through `state/sub`, and `frontend.util/react`
+  // degrades to a plain deref outside a reactive component — the right word is
+  // rendered, but nothing subscribes. The first packaged run measured exactly
+  // that: the language changed and every label stayed English.
+  const { region } = roleRegion();
+  assert.match(region, /\(rum\/defc f28-ref-role < rum\/reactive/,
+    'the label must subscribe to the language it renders');
+  const cp = form(region, '(rum/defc f28-ref-role');
+  assert.match(cp, /\(t why-key\)/, 'the sentence must be translated');
+  assert.match(cp, /\(t text-key\)/, 'and so must the word');
 });
 
 // --- inherited surface rules ------------------------------------------------

@@ -543,14 +543,15 @@ async function main() {
     // ---------- P9 : Korean ----------
     say('\nP9  the same two roles, in Korean');
     phase('roles', 'switch-the-interface-to-korean');
-    const switched = await page.evaluate(() => {
+    const setLanguage = (lang) => page.evaluate((l) => {
       const st = window.frontend && window.frontend.state;
       const fn = st && st.set_preferred_language_BANG_;
       if (typeof fn !== 'function') return { ok: false, reason: 'no language seam' };
-      fn('ko');
+      fn(l);
       return { ok: true };
-    }).catch((e) => ({ ok: false, reason: String(e.message) }));
-    await sleep(3000);
+    }, lang).catch((e) => ({ ok: false, reason: String(e.message) }));
+    const switched = await setLanguage('ko');
+    await sleep(3500);
     const ko = await read();
     observations.korean = ko.present ? {
       labels: ko.labels,
@@ -582,35 +583,50 @@ async function main() {
       !/�/.test(ko.sectionText),
       `hangul ${/[가-힣]/.test(ko.sectionText || '')}, ` +
       `emoji ${/🍃|🌱|🧩|🅰️|🅱️|📚|🪜|📦/.test(ko.sectionText || '')}`);
-    await page.evaluate(() => {
-      const st = window.frontend && window.frontend.state;
-      if (st && typeof st.set_preferred_language_BANG_ === 'function') {
-        st.set_preferred_language_BANG_('en');
-      }
-    }).catch(() => null);
-    await sleep(2500);
-    await compare('P9.6', 'and switching back to English restores exactly what was there',
+    // The label subscribes to the language, so it must follow it WITHOUT the row
+    // being redrawn for some other reason. Measured rather than assumed: the
+    // first run of this scenario found 47 labels still reading "mention" after
+    // the switch, because the label was not reactive and `frontend.util/react`
+    // degrades to a plain deref outside a reactive component.
+    record('P9.6', 'the labels followed the language with no navigation and no redraw',
+      ko.present && ko.rows.length === refs.rows.length &&
+      ko.rows.every((r) => /[가-힣]/.test(r.roleText || '')),
+      ko.present ? `${ko.rows.length} row(s) still drawn, ` +
+        `${ko.rows.filter((r) => /[가-힣]/.test(r.roleText || '')).length} of them relabelled ` +
+        `in place` : '—');
+    await setLanguage('en');
+    await sleep(3000);
+    await compare('P9.7', 'and switching back to English restores exactly what was there',
                   'the language switch');
 
     // ---------- P10 : the right sidebar ----------
     say('\nP10 the right sidebar, a named exclusion, measured live');
+    // The ANCHOR page, by name, from a page that links to it — the same route
+    // the child-context run uses. The first version of this step shift-clicked
+    // the first page link it found inside the section, which opened a page with
+    // no linked references of its own and measured nothing.
     phase('roles', 'open-the-anchor-in-the-right-sidebar');
-    const opened = await page.evaluate(() => {
-      const links = [...document.querySelectorAll('.references.page-linked a.page-ref')];
-      const target = links[0];
-      if (!target) return { found: false };
-      target.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
-      return { found: true, text: (target.innerText || '').trim() };
-    }).catch(() => ({ found: false }));
-    await sleep(3500);
-    for (let i = 0; i < 6; i++) {
+    await goTo(RG.DEEP_PAGE);
+    await sleep(2500);
+    await parkPointer();
+    let opened = { found: false };
+    try {
+      await page.locator(`#main-content-container a.page-ref:text-is("${RG.ANCHOR}")`)
+        .first().click({ modifiers: ['Shift'], timeout: 20000 });
+      opened = { found: true };
+    } catch (e) {
+      opened = { found: false, error: String(e.message).split('\n')[0] };
+    }
+    await sleep(6000);
+    for (let i = 0; i < 8; i++) {
       await page.evaluate(() => {
-        for (const sel of ['#right-sidebar .sidebar-item-list', '#right-sidebar']) {
+        for (const sel of ['#right-sidebar .sidebar-item-list', '#right-sidebar',
+                           '.sidebar-item-list']) {
           const sb = document.querySelector(sel);
           if (sb) sb.scrollTop = sb.scrollHeight;
         }
       }).catch(() => null);
-      await sleep(1200);
+      await sleep(1300);
     }
     const sidebar = await page.evaluate(() => ({
       present: !!document.querySelector('#right-sidebar'),
@@ -619,14 +635,18 @@ async function main() {
       rows: document.querySelectorAll(
         '.sidebar-item .references.page-linked .ls-block[blockid]').length,
       labels: document.querySelectorAll('.sidebar-item .f28-role').length,
+      mainLabels: document.querySelectorAll(
+        '#main-content-container .references.page-linked .f28-role').length,
     })).catch(() => null);
     observations.sidebar = sidebar;
     record('P10.1', "a linked-references list really is rendered in the right sidebar",
       !!sidebar && sidebar.items > 0 && sidebar.rows > 0,
       JSON.stringify(sidebar) + ` (shift-click found a link: ${opened.found})`);
     record('P10.2', 'and it carries NO role label at all',
-      !!sidebar && sidebar.labels === 0,
-      sidebar ? `${sidebar.rows} sidebar row(s), ${sidebar.labels} label(s)` : 'no reading');
+      !!sidebar && sidebar.rows > 0 && sidebar.labels === 0,
+      sidebar ? `${sidebar.rows} sidebar row(s), ${sidebar.labels} label(s); ` +
+                `${sidebar.mainLabels} label(s) in the main area's own list at the ` +
+                `same moment` : 'no reading');
 
     // ---------- P11 : the graph, from the application's side ----------
     say('\nP11 the graph, before the application is closed');
