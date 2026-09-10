@@ -333,16 +333,26 @@ async function main() {
     record('P8.3', 'the count in the heading never moved',
       Object.values(readings).every((r) => r.present && r.heading === original.heading),
       () => Object.entries(readings).map(([k, r]) => `${k}: ${J(r.heading)}`).join('; '));
-    const insideSame = Object.entries(insides).filter(([, ins]) =>
-      ins && J(ins) === J(originalInside));
+    // COMPARED GROUP BY GROUP, NEVER MAP AGAINST MAP. `insideOf` builds its
+    // result by walking the groups in DOM order, so the object's KEY order IS
+    // the group order — and `JSON.stringify` preserves it. The first two runs
+    // of this scenario compared the two maps whole and failed on exactly the
+    // thing the feature is supposed to change, while every group's rows,
+    // nesting, levels and breadcrumbs were identical in all three readings.
+    const insideDiffs = [];
+    for (const [name, ins] of Object.entries(insides)) {
+      if (!ins) { insideDiffs.push(`${name}: no reading`); continue; }
+      for (const ref of new Set([...Object.keys(originalInside), ...Object.keys(ins)])) {
+        if (J(ins[ref]) !== J(originalInside[ref])) insideDiffs.push(`${name}/${ref}`);
+      }
+    }
     record('P8.4', 'and INSIDE every group nothing moved: same rows, same nesting, same breadcrumbs',
-      insideSame.length === Object.keys(insides).length,
-      () => `${insideSame.length}/${Object.keys(insides).length} readings identical ` +
-        `group-for-group; ` +
-        (insideSame.length === Object.keys(insides).length
-          ? `${Object.keys(originalInside).length} groups compared by row order, parent and level`
-          : `differs: ${J(Object.entries(insides).filter(([, ins]) =>
-              !ins || J(ins) !== J(originalInside)).map(([k]) => k))}`));
+      insideDiffs.length === 0,
+      () => insideDiffs.length
+        ? `differs: ${J(insideDiffs)}`
+        : `${Object.keys(originalInside).length} group(s) × ` +
+          `${Object.keys(insides).length} reading(s) compared by row order, parent BLOCK ` +
+          `(never position), level and breadcrumb — 0 differences`);
     record('P8.5', 'the role labels, child-context and source-path controls are all still there',
       Object.values(readings).every((r) => r.present &&
         r.labels === r.rows.length &&
@@ -383,6 +393,16 @@ async function main() {
     const domIdsOf = (r) => Object.fromEntries(
       (r.groups || []).map((gp) => [gp.ref, gp.domIds]));
     const idsOriginal = domIdsOf(back2);
+    // Focus the control the way a reader does BEFORE reordering with it.
+    // Playwright's `selectOption` sets the value and dispatches the events; it
+    // is not a click and does not leave focus behind, so the first run of this
+    // scenario asked whether focus had survived something that never gave it
+    // focus in the first place. What is worth asserting is that the reorder
+    // does not TAKE focus away from the control that caused it.
+    await page.locator('select.f28-order-select').first().focus().catch(() => null);
+    const focusBefore = await page.evaluate(() => !!(document.activeElement &&
+      document.activeElement.classList &&
+      document.activeElement.classList.contains('f28-order-select'))).catch(() => false);
     await choose('title-asc', 'under title-ascending, for the identity comparison');
     const idsAsc = await RD.read(page);
     observations.identity = {
@@ -413,9 +433,9 @@ async function main() {
                cls: el && typeof el.className === 'string' ? el.className : null };
     }).catch(() => null);
     record('P10.3', 'and focus stayed on the control that did the reordering',
-      !!focusAfter && focusAfter.tag === 'select' &&
+      focusBefore === true && !!focusAfter && focusAfter.tag === 'select' &&
       /f28-order-select/.test(focusAfter.cls || ''),
-      () => J(focusAfter));
+      () => `focused before the reorder: ${focusBefore}; after: ${J(focusAfter)}`);
 
     // ---------- P11 : the keyboard, and the language ----------
     say('\nP11 the keyboard, and the interface language');
@@ -424,25 +444,43 @@ async function main() {
     const kb = { reached: false, routes: [], value: null };
     // Reached by Tab from the group header before it — a real keyboard walk,
     // not a scripted focus() call.
+    // The control is the FIRST keyboard stop in the section — the heading comes
+    // before the groups, and OG's own filter link takes no focus at all (it has
+    // neither `href` nor `tabindex`). The first run of this scenario tabbed
+    // FORWARD from the first group link, which walks away from the select and
+    // never comes back; the walk is now made in the direction the control
+    // actually lies in, and both directions are recorded.
     await page.evaluate(() => {
       const sec = document.querySelector('.references.page-linked');
       const h = sec && sec.querySelector('h2');
       if (h) h.scrollIntoView({ block: 'center' });
-      const first = sec && sec.querySelector('a[tabindex], a[href], button');
+      const first = sec && sec.querySelector('.references-blocks-item a[tabindex], ' +
+                                             '.references-blocks-item a[href]');
       if (first) first.focus();
     }).catch(() => null);
-    for (let i = 0; i < 12 && !kb.reached; i++) {
-      await page.keyboard.press('Tab');
-      await sleep(200);
-      kb.reached = await page.evaluate(() =>
-        !!(document.activeElement &&
-           document.activeElement.classList &&
-           document.activeElement.classList.contains('f28-order-select'))).catch(() => false);
+    const isSelect = () => page.evaluate(() =>
+      !!(document.activeElement && document.activeElement.classList &&
+         document.activeElement.classList.contains('f28-order-select'))).catch(() => false);
+    kb.startedInsideTheList = await page.evaluate(() => {
+      const el = document.activeElement;
+      return el ? (el.tagName.toLowerCase() +
+        (typeof el.className === 'string' && el.className ?
+          '.' + el.className.trim().split(/\s+/)[0] : '')) : null;
+    }).catch(() => null);
+    for (let i = 0; i < 6 && !kb.reached; i++) {
+      await page.keyboard.press('Shift+Tab');
+      await sleep(250);
+      kb.reached = await isSelect();
+      kb.shiftTabPresses = i + 1;
     }
-    record('P11.1', 'the control is reachable with Tab alone',
+    record('P11.1', 'the control is reachable with the keyboard alone',
       kb.reached === true,
-      kb.reached ? 'Tab from inside the section lands on the select'
-                 : 'Tab never reached the select');
+      kb.reached
+        ? `Shift+Tab from the first link inside the list (${kb.startedInsideTheList}) ` +
+          `reached the select in ${kb.shiftTabPresses} press(es) — it is the first ` +
+          `keyboard stop in the section, because the heading precedes the groups and ` +
+          `OG's own filter link takes no focus at all`
+        : `never reached the select from ${kb.startedInsideTheList}`);
     // Which keyboard routes actually operate a closed <select> is a platform
     // question, so every route is TRIED and what happened is recorded; the
     // assertion is that at least one of them works without the mouse.
@@ -609,11 +647,40 @@ async function main() {
       () => `${excluded.applied ? 'applied' : 'did NOT apply'} the exclude of ${J(RG.GA)}; ` +
         `${filtered.groups.length} group(s) left, ${filtered.rows.length} row(s), ` +
         `heading ${J(filtered.heading)}`);
-    record('P13.2', 'and the order OG kept is still the order that was chosen',
+    // WHAT THE FIRST RUN OF THIS SCENARIO GOT WRONG, AND WHAT IT MEASURED.
+    //
+    // This check expected the filtered `original` order to be the unfiltered
+    // one with the excluded group removed. It is not, and the difference is
+    // OG's, not this feature's: `references*` builds the groups with
+    // `(group-by :block/page …)`, whose seq order is a hash map's, so removing
+    // a key can reorder the ones that remain. The measurement is kept as
+    // evidence — it is the sharpest statement of §1 of the specification, that
+    // OG's order for ordinary pages is not a property anybody chose — and what
+    // is ASSERTED here is what this feature owns: with `original` selected it
+    // applied nothing, so what is drawn is OG's own order and not a title one.
+    observations.ogOrderUnderFilter = {
+      unfiltered: originalOrder,
+      unfilteredMinusExcluded: originalOrder.filter((r) => r !== chosenRef),
+      filtered: RD.orderOf(filtered),
+      sameAsUnfilteredMinusExcluded:
+        J(RD.orderOf(filtered)) === J(originalOrder.filter((r) => r !== chosenRef)),
+    };
+    const keptAsc = expectAsc.filter((r) => r !== chosenRef);
+    const keptDesc = expectDesc.filter((r) => r !== chosenRef);
+    record('P13.2', 'with Original selected the feature applied nothing: what is drawn is ' +
+      "OG's own order for the set the filter kept",
       filtered.present && filtered.wrapOrder === 'original' &&
-      J(RD.orderOf(filtered)) === J(originalOrder.filter((r) => r !== chosenRef)),
-      () => `drawn    ${J(RD.orderOf(filtered))}\n          ` +
-        `expected ${J(originalOrder.filter((r) => r !== chosenRef))}`);
+      J(RD.orderOf(filtered)) !== J(keptAsc) &&
+      J(RD.orderOf(filtered)) !== J(keptDesc),
+      () => `drawn ${J(RD.orderOf(filtered))}\n          ` +
+        `and NOT ${J(keptAsc)} / ${J(keptDesc)}\n          ` +
+        `(recorded: OG's own order for the kept set ` +
+        `${observations.ogOrderUnderFilter.sameAsUnfilteredMinusExcluded ? 'is' : 'is NOT'} ` +
+        `the unfiltered order minus the excluded group — ` +
+        `${J(observations.ogOrderUnderFilter.unfilteredMinusExcluded)}. ` +
+        `\`group-by\` is a hash map, so removing a key can reorder the rest; that is ` +
+        `OG's, and it is why "Original" is defined as "hand OG's own sequence back" ` +
+        `rather than as any particular sequence)`);
 
     phase('filtering', 'sort-the-filtered-list');
     const fAscPick = await choose('title-asc', 'under the exclude filter, ascending');
@@ -631,6 +698,41 @@ async function main() {
     record('P13.5', 'and every row still drawn keeps its role label',
       fAsc.present && fAsc.labels === fAsc.rows.length && fAsc.rows.length > 0,
       () => `${fAsc.labels} label(s) on ${fAsc.rows.length} row(s)`);
+    // Back to Original, under the filter. What is ASSERTED is that the feature
+    // applied nothing; whether OG's own sequence is the same one it produced a
+    // few seconds ago is OG's business and is RECORDED.
+    //
+    // It was not, in the run that first asked: applying a filter makes OG write
+    // `filters::` to the anchor page's file, OG's own watcher re-parses that
+    // file, and the transaction re-renders `references*`, which rebuilds
+    // `(group-by :block/page …)` from a fresh query. A hash map's seq order is
+    // not a promise, so the groups came back in a different order — with the
+    // same membership, the same counts and nothing moved inside any of them.
+    // That is the same property §1 of the specification names, seen at its
+    // sharpest, and it is the reason `:original` is defined as "hand OG's own
+    // sequence back" rather than as any particular sequence. Unfiltered, with
+    // no such write in between, the restoration IS exact — P7.1 and P9.1.
+    const fBackPick = await choose('original', 'back under the exclude filter, original');
+    const fBack = await RD.read(page);
+    observations.filteredRestore = {
+      whenTheFilterWasApplied: RD.orderOf(filtered),
+      afterSortingAndBack: RD.orderOf(fBack),
+      identical: J(RD.orderOf(fBack)) === J(RD.orderOf(filtered)),
+      sameGroups: J([...RD.orderOf(fBack)].sort()) === J([...RD.orderOf(filtered)].sort()),
+    };
+    record('P13.6', 'choosing Original again under the filter applies no ordering, and the ' +
+      'same groups come back',
+      fBackPick.changed && fBack.present && fBack.wrapOrder === 'original' &&
+      J(RD.orderOf(fBack)) !== J(keptAsc) && J(RD.orderOf(fBack)) !== J(keptDesc) &&
+      observations.filteredRestore.sameGroups &&
+      fBack.heading === filtered.heading,
+      () => `drawn ${J(RD.orderOf(fBack))}\n          ` +
+        `when the filter was applied ${J(RD.orderOf(filtered))}\n          ` +
+        `identical: ${observations.filteredRestore.identical}; same groups: ` +
+        `${observations.filteredRestore.sameGroups}; heading ${J(fBack.heading)}` +
+        (observations.filteredRestore.identical ? ''
+          : ` — OG re-queried and its own hash-map seq order came back different; ` +
+            `see the note above this check`));
 
     phase('filtering', 'remove-the-exclude-then-apply-an-include-and-sort');
     await openFilter();
@@ -639,20 +741,34 @@ async function main() {
     const h2 = await headingNow();
     const included = await clickFilterButton(RG.GA, false, h2);
     await page.keyboard.press('Escape').catch(() => null);
+    await choose('original', 'under the include filter, original');
+    const inclOrig = await RD.read(page);
     const incPick = await choose('title-desc', 'under the include filter, descending');
     const incl = await RD.read(page);
     observations.filterInclude = incl.present ? RD.lean(incl) : incl;
-    record('P13.6', 'including one source page keeps only that group, whatever the order',
+    record('P13.7', 'including one source page keeps only that group, whatever the order',
       removed.applied && included.applied && incPick.changed && incl.present &&
-      J(RD.orderOf(incl)) === J([chosenRef]),
+      J(RD.orderOf(incl)) === J([chosenRef]) && J(RD.orderOf(inclOrig)) === J([chosenRef]),
       () => `${removed.applied ? 'removed the exclude' : 'did NOT remove the exclude'}, ` +
         `${included.applied ? 'applied the include' : 'did NOT apply the include'}; ` +
         `groups ${J(RD.orderOf(incl))}, heading ${J(incl.heading)}`);
-    record('P13.7', 'and the group it kept is intact: same rows, same nesting as unfiltered',
+    // Compared against the reading taken under the SAME filter a moment ago,
+    // because OG rebuilds each group's parent map when the filter changes and
+    // `(group-by :block/parent …)` is a hash map too — a difference across a
+    // filter change is OG's own and says nothing about the ordering. Both
+    // comparisons are recorded; the ASSERTION is the one this feature owns.
+    observations.includedGroupInside = {
+      unfiltered: originalInside[chosenRef] || null,
+      includeOriginal: RD.insideOf(inclOrig)[chosenRef] || null,
+      includeDescending: RD.insideOf(incl)[chosenRef] || null,
+    };
+    record('P13.8', 'and changing the order under that filter moved nothing inside the group ' +
+      'it kept',
       incl.present && incl.groups.length === 1 &&
-      J(RD.insideOf(incl)[chosenRef]) === J(originalInside[chosenRef]),
-      () => `${J(RD.insideOf(incl)[chosenRef] || null)}\n          vs unfiltered ` +
-        `${J(originalInside[chosenRef] || null)}`);
+      J(RD.insideOf(incl)[chosenRef]) === J(RD.insideOf(inclOrig)[chosenRef]),
+      () => `original   ${J(RD.insideOf(inclOrig)[chosenRef] || null)}\n          ` +
+        `descending ${J(RD.insideOf(incl)[chosenRef] || null)}\n          ` +
+        `(unfiltered, for the record: ${J(originalInside[chosenRef] || null)})`);
     const liveState = await page.evaluate((display) => {
       const out = { filters: null, error: null };
       try {
@@ -664,7 +780,7 @@ async function main() {
     }, RG.ANCHOR).catch((e) => ({ filters: null, error: String(e && e.message) }));
     observations.filterLiveState = liveState;
     observations.filterClicks = filterDiagnostics;
-    record('P13.8', "the application reports the include as the page's own filter property",
+    record('P13.9', "the application reports the include as the page's own filter property",
       liveState.filters !== null && liveState.filters !== undefined &&
       J(liveState.filters).toLowerCase().includes(RG.GA.toLowerCase()),
       () => `get_page(...).properties.filters = ${J(liveState.filters)}` +

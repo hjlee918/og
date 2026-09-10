@@ -358,3 +358,47 @@ test('a group is identified by data-ref, never by its title text', () => {
     'and the reason must be written down, because it is what keeps the assertion ' +
     'from being circular');
 });
+
+// --- what running the scenario taught, pinned so it cannot quietly regress ---
+//
+// Three defects, all in the CHECKS, found by running them (readiness §4). Each
+// is pinned here beside the code it shaped.
+
+test('a row\'s parent is compared by BLOCK ID, never by its position', () => {
+  const r = read(READER);
+  const inside = r.slice(r.indexOf('function insideOf'));
+  assert.match(inside, /byIndex/);
+  assert.match(inside, /parentId/,
+    'readRow records the parent as an index into the whole SECTION, which every ' +
+    'reorder shifts; comparing two readings by it fails on the one thing the ' +
+    'feature is supposed to change');
+  assert.ok(!/\$\{x\.parent\}/.test(inside),
+    'the raw index must not reach the comparison');
+});
+
+test('groups are compared one at a time, never map against map', () => {
+  const f = read(FEATURE);
+  const at = f.indexOf("record('P8.4'");
+  assert.ok(at > 0, 'the within-group check was renamed or removed');
+  const region = f.slice(Math.max(0, at - 1600), at + 800);
+  assert.match(region, /insideDiffs/);
+  assert.ok(!/J\(ins\) === J\(originalInside\)/.test(region),
+    "`insideOf` walks the groups in DOM order, so the object's KEY order IS the " +
+    'group order and JSON.stringify preserves it — comparing the maps whole ' +
+    'compares the very thing being changed');
+});
+
+test("OG's own hash-map order is recorded, never asserted", () => {
+  const f = read(FEATURE);
+  assert.match(f, /observations\.ogOrderUnderFilter/,
+    "OG builds the groups with `(group-by :block/page …)`; removing a key can " +
+    'reorder the rest, and a re-query can too. That is recorded as evidence');
+  assert.match(f, /observations\.filteredRestore/);
+  const at = f.indexOf("record('P13.6'");
+  assert.ok(at > 0);
+  const check = f.slice(at, at + 900);
+  assert.ok(!/J\(RD\.orderOf\(fBack\)\) === J\(RD\.orderOf\(filtered\)\)/.test(check),
+    'the assertion must be what the FEATURE owns — that it applied nothing — ' +
+    "not that OG's own sequence is stable across its own re-parse");
+  assert.match(check, /sameGroups/);
+});

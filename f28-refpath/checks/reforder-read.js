@@ -240,13 +240,24 @@ function orderOf(r) {
 /**
  * The rows of one group, keyed by the group's identity — what "nothing inside
  * a group moved" is compared across two readings.
+ *
+ * A ROW'S PARENT IS NAMED BY ITS BLOCK ID, NEVER BY ITS POSITION. `readRow`
+ * records the parent as an index into the whole SECTION, which is the right
+ * thing for describing one reading and exactly the wrong thing for comparing
+ * two: moving a group moves every row after it, so every parent index changes
+ * even though nothing moved inside any group. The first packaged run of this
+ * scenario failed its own "nothing inside a group moved" check for that reason
+ * alone — the row ids, their levels and their order were identical in all
+ * three readings, and only the section-wide indices had shifted.
  */
 function insideOf(r) {
+  const byIndex = new Map((r.rows || []).map((x) => [x.i, x.id]));
+  const parentId = (p) => (p === null || p === undefined ? 'top' : (byIndex.get(p) || '?'));
   const out = {};
   for (const g of r.groups || []) {
     out[g.ref] = {
       rowIds: g.rowIds,
-      tree: g.rowTree.map((x) => `${x.id}<${x.parent}@${x.level}`),
+      tree: g.rowTree.map((x) => `${x.id}<${parentId(x.parent)}@${x.level}`),
       crumbs: g.crumbs.map((c) => `${c.steps.join('›')}::${c.ids.join(',')}`),
     };
   }

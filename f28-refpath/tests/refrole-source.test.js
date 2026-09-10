@@ -372,7 +372,13 @@ test('the feature is scoped in CSS, so removing it removes its appearance', () =
   const css = read(path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.css'));
   const at = css.indexOf('F28 reference roles');
   assert.ok(at > 0, 'the reference-role CSS block was renamed or removed');
-  const block = css.slice(at);
+  // BOUNDED AT THE NEXT SECTION. This slice ran to the end of the file, so the
+  // first later feature to append a stylesheet section of its own failed this
+  // test with ITS class names — which the group-ordering slice duly did. The
+  // rule is not weakened: what is checked is still that every selector in the
+  // reference-role section is the reference-role feature's.
+  const nextSection = css.indexOf('/* ---', at);
+  const block = nextSection > at ? css.slice(at, nextSection) : css.slice(at);
   const selectors = [...block.matchAll(/^\.([a-z0-9-]+)/gm)].map((m) => m[1]);
   assert.ok(selectors.length >= 3, 'too few rules to be this feature\'s appearance');
   for (const s of selectors) {
