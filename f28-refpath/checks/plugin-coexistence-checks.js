@@ -197,8 +197,7 @@ async function experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH
     'different host, therefore cross-origin');
 
   // THE POINT OF THE WHOLE EXPERIMENT.
-  record('X.4', 'the plugins COMPLETE their handshake and report loaded — not registered, not ' +
-    'enabled, loaded',
+  record('X.4', 'the plugins complete the host handshake and report loaded; this does not hide callback errors',
     load.loadedCount === wantIds.length && !load.anyHandshakeTimeout,
     () => load.rows.map((r) => `${r.key}: status ${J(r.status)}, loaded ${J(r.loaded)}` +
       `${r.loadError ? `, loadError ${J(r.loadError)}` : ''}`).join('\n          ') +
@@ -385,7 +384,7 @@ async function runSession(cfg, built, stamp) {
       (ps.plugins || []).length === wantIds.length &&
       (ps.plugins || []).every((p) => p.status !== null || p.loaded !== null),
       () => (loadRows.length ? loadRows.join('\n          ') : 'no package registered') +
-        `\n          → ${loadedCount} of ${wantIds.length} completed runtime initialisation`);
+        `\n          → ${loadedCount} of ${wantIds.length} completed host handshake (plugin callback errors are reported separately)`);
     if (EXPERIMENT) {
       await experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH });
       obs.originStorage = await require('../../f28-origin/checks/storage-origin').inventoryFromPage(page);

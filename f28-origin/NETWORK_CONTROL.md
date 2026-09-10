@@ -11,7 +11,9 @@ state. Any incomplete installation exits 78. No post-launch installer exists.
 Chromium onBeforeRequest refuses remote schemes, including loopback HTTP and
 WebSocket URLs; its registration is locked against replacement. Existing lsp
 canonical root checks and G5 assets checks remain authoritative for local files.
-Raw file requests are refused. Permissions, webviews and window-open are refused.
+Raw file requests are refused. Explicit session PAC resolution, proxy configuration
+and proxy reload calls are replaced with a local DIRECT/no-op policy before
+application code can invoke them; the original native proxy APIs are never called. Permissions, webviews and window-open are refused.
 Main http/https request/get, Node socket/datagram, global fetch, Electron net,
 child-process launches and utility-process forks are refused before application
 module evaluation. Thus node-fetch cannot reach its HTTP transport. IPC HTTP,

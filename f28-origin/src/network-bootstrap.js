@@ -33,7 +33,7 @@ function install(electron) {
   const blocked = new Set(['httpRequest', 'httpFetchJSON', 'runCli', 'runGit',
     'runGitWithinCurrentGraph', 'installMarketPlugin', 'updateMarketPlugin', 'relaunchApp', 'quitAndInstall',
     'set-env', 'fetch-remote-files', 'update-local-files', 'download-version-files',
-    'delete-remote-files', 'update-remote-files', 'server/do', 'server/set-config']);
+    'delete-remote-files', 'update-remote-files', 'server/do', 'server/set-config', 'getSystemProxy', 'setProxy', 'testProxyUrl']);
   ipcMain.handle('origin-experiment-refuse', () => { throw deny('preload-external'); });
   const originalHandle = ipcMain.handle.bind(ipcMain);
   lock(ipcMain, 'handle', (channel, fn) => originalHandle(channel, (event, ...args) => {
@@ -52,6 +52,11 @@ function install(electron) {
   }
   function installSession(s) {
     if (sessions.has(s)) return;
+    // Explicit PAC resolution can perform native networking without a page request.
+    // Return only the offline policy; never invoke the original PAC APIs.
+    lock(s, 'resolveProxy', async () => { deny('proxy-resolution'); return 'DIRECT'; });
+    lock(s, 'setProxy', async () => { deny('proxy-configuration'); });
+    lock(s, 'forceReloadProxyConfig', async () => { deny('proxy-reload'); });
     const wr = s.webRequest;
     wr.onBeforeRequest({urls: ['<all_urls>']}, (d, cb) => {
       const allowed = local(d.url);

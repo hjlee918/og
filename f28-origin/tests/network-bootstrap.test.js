@@ -36,17 +36,30 @@ e.app.on('ready', async () => {
   await probe('child-process', () => require('child_process').spawn('synthetic-no-command'));
   for (const partition of ['', 'synthetic-other']) {
    const s = e.session.fromPartition(partition);
+   const proxyBefore=global.__expNet.totalRefused;
+   const proxy=await s.resolveProxy('https://example.invalid/synthetic');
+   await s.setProxy({mode:'pac_script',pacScript:'https://example.invalid/synthetic.pac'});
+   await s.forceReloadProxyConfig();
+   r.probes.push({name:'proxy-native-'+partition,refused:proxy==='DIRECT' && global.__expNet.totalRefused===proxyBefore+3});
    s.protocol.registerFileProtocol('lsp', (req, cb) => cb({path:${JSON.stringify(dir)} + '/local.html'}));
    const w = new e.BrowserWindow({show:false,webPreferences:{session:s,sandbox:false,nodeIntegration:false,contextIsolation:true,preload:${JSON.stringify(path.join(REPO,'static/js/preload.js'))}}});
    await w.loadURL('lsp://logseq.com/local.html');
    r.probes.push({name:'local-'+partition,usable:(await w.webContents.executeJavaScript('document.body.textContent'))==='LOCAL_OK'});
-   r.probes.push({name:'renderer-'+partition,refused:await w.webContents.executeJavaScript("fetch('https://example.invalid/synthetic').then(()=>false,()=>true)")});
+   for (const url of ['https://example.invalid/synthetic','http://127.0.0.1:54321/synthetic']) {
+    const before=global.__expNet.totalRefused;
+    const refused=await w.webContents.executeJavaScript("fetch("+JSON.stringify(url)+").then(()=>false,()=>true)");
+    r.probes.push({name:'renderer-'+partition,refused:refused && global.__expNet.totalRefused>before});
+   }
+   const wsBefore=global.__expNet.totalRefused;
+   const wsRefused=await w.webContents.executeJavaScript("new Promise(r=>{const s=new WebSocket('ws://127.0.0.1:54321/synthetic');s.onerror=()=>r(true);s.onopen=()=>{s.close();r(false)};setTimeout(()=>r(false),1500)})");
+   r.probes.push({name:'websocket-'+partition,refused:wsRefused && global.__expNet.totalRefused>wsBefore});
    for (const op of ['httpRequest','httpFetchJSON','runCli','fetch-remote-files']) {
     r.probes.push({name:op,refused:await w.webContents.executeJavaScript("window.apis.doAction(["+JSON.stringify(op)+"]).then(()=>false,()=>true)")});
    }
    r.probes.push({name:'preload-external',refused:await w.webContents.executeJavaScript("window.apis.openExternal('https://example.invalid').then(()=>false,()=>true)")});
    w.destroy();
   }
+  for(let i=0;i<105;i++) { try { e.shell.openExternal('https://example.invalid/synthetic'); } catch (_) {} }
   r.evidence=global.__expNet;
   fs.writeFileSync(${JSON.stringify(path.join(dir,'result.json'))},JSON.stringify(r));
   e.app.exit(0);
@@ -61,7 +74,8 @@ test('real Electron: bootstrap before navigation, main/renderer refusal, two ses
  assert.equal(r.result.activeBeforeWindow,true);
  for(const p of r.result.probes) assert.equal(p.refused ?? p.usable,true,p.name);
  assert.equal(r.result.evidence.sessions,2);
- assert.ok(r.result.evidence.totalRefused>=7);
+ assert.ok(r.result.evidence.totalRefused>100);
+ assert.equal(r.result.evidence.refused.length,100);
  assert.ok(!JSON.stringify(r.result.evidence).includes('example.invalid'));
 });
 test('real Electron: incomplete install exits before any window or activation', () => {
