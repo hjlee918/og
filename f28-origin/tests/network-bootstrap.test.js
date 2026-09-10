@@ -9,6 +9,9 @@ const REPO = path.resolve(__dirname, '../..');
 const bin = require(path.join(REPO, 'node_modules/electron'));
 const bootstrap = path.join(REPO, 'f28-origin/src/network-bootstrap.js');
 function run(fail) {
+  // Refuse before spawning if static/ is an ordinary or stale experimental build.
+  assert.match(fs.readFileSync(path.join(REPO,'static/js/preload.js'),'utf8'), /origin-experiment-refuse/);
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'f28-origin-net-'));
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({main:'main.js'}));
   fs.writeFileSync(path.join(dir, 'local.html'), '<html><body>LOCAL_OK</body></html>');
