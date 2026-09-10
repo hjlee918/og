@@ -7,6 +7,7 @@
   has anything withheld at all, and turning one walk result into rows the panel
   may honestly show."
   (:require [cljs.test :refer [deftest testing is]]
+            [clojure.string :as string]
             [frontend.util.f27-children :as f27ch]
             [frontend.util.f28-refctx :as ctx]
             [frontend.util.f28-refpath :as f28]))
@@ -209,15 +210,33 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest a-panels-id-is-derived-from-its-own-row-so-two-rows-cannot-collide
-  (let [a (ctx/panel-id "page name" "uuid-a")
-        b (ctx/panel-id "page name" "uuid-b")]
+  (let [a (ctx/panel-id "page name" "uuid-a" "occ1")
+        b (ctx/panel-id "page name" "uuid-b" "occ1")]
     (is (not= a b))
-    (is (= a (ctx/panel-id "page name" "uuid-a")) "stable across renders"))
+    (is (= a (ctx/panel-id "page name" "uuid-a" "occ1")) "stable across renders"))
   (testing "and it is usable as a DOM id whatever the list is called"
-    (is (re-matches #"[A-Za-z0-9_-]+" (ctx/panel-id "한글 페이지 / with spaces" "u")))
-    (is (re-matches #"[A-Za-z0-9_-]+" (ctx/panel-id nil nil)))))
+    (is (re-matches #"[A-Za-z0-9_-]+" (ctx/panel-id "한글 페이지 / with spaces" "u" "o")))
+    (is (re-matches #"[A-Za-z0-9_-]+" (ctx/panel-id nil nil nil)))))
+
+(deftest the-same-block-twice-in-one-list-gets-two-different-panels
+  ;; The defect this arity exists for. `sub-collapsed` is keyed by block uuid
+  ;; alone, so a block drawn twice in one list — once as its own result, once
+  ;; as context under its parent — is collapsed in BOTH appearances at once and
+  ;; offers this control in both. Same list, same block, and with only those
+  ;; two parts the ids were identical.
+  (let [one (ctx/panel-id "linked-refs" "the-same-uuid" "f28ctx1001")
+        two (ctx/panel-id "linked-refs" "the-same-uuid" "f28ctx1002")]
+    (is (not= one two)
+        "two appearances of ONE block in ONE list must not share a DOM id")
+    (is (not= (ctx/toggle-id one) (ctx/toggle-id two))
+        "and neither may their controls, or a collapse focuses the wrong one")
+    (testing "each control still belongs to its own panel and to no other"
+      (is (= one (subs (ctx/toggle-id one) 0 (count one))))
+      (is (not (string/includes? (ctx/toggle-id one) "f28ctx1002")))))
+  (testing "an occurrence identity is carried through, not discarded"
+    (is (not= (ctx/panel-id "l" "u" "a") (ctx/panel-id "l" "u" "b")))))
 
 (deftest a-panel-and-its-control-name-each-other
-  (let [pid (ctx/panel-id "p" "u")]
+  (let [pid (ctx/panel-id "p" "u" "o")]
     (is (= (str pid "-toggle") (ctx/toggle-id pid)))
     (is (not= pid (ctx/toggle-id pid)))))

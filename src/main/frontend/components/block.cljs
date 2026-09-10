@@ -6229,7 +6229,28 @@
                          :aria-expanded "true"})
        (t :f28/context-hide)]]]))
 
-(rum/defcs f28-child-context < (rum/local nil ::desc)
+(rum/defcs f28-child-context <
+  ;; `rum/local` FIRST, then the map — the same order `f27-inline-ref` records
+  ;; the reason for: Rum collects before-render hooks mixin-major, so a map
+  ;; placed first can run against state `rum/local`'s own hook has not built.
+  (rum/local nil ::desc)
+  {:init (fn [state _props]
+           ;; ONE identity per MOUNTED OCCURRENCE. The same block can be drawn
+           ;; TWICE in one linked-references list — once as its own result and
+           ;; once as context under its parent — and `state/sub-collapsed` is
+           ;; keyed by block uuid alone, so when such a block is collapsed both
+           ;; appearances are collapsed and both offer this control. Deriving
+           ;; the DOM id from the list and the block alone gave them the SAME
+           ;; id: `gdom/getElement` could hand a collapse the other
+           ;; appearance's control, and `aria-controls` named a panel
+           ;; ambiguously.
+           ;;
+           ;; Created in `:init`, so it is made once when this instance mounts
+           ;; and is the same string for every later render. Generating it in
+           ;; the render body would produce a new id each time and break both
+           ;; `aria-controls` and focus return, which is the defect rather than
+           ;; the fix.
+           (assoc state ::uid (str (gensym "f28ctx"))))}
   "The control that discloses what a collapsed linked-reference row is holding
   back, and the panel it opens.
 
@@ -6237,6 +6258,10 @@
   nothing has been walked; a map means open. One atom per row instance, so two
   rows of one group are independent without either knowing the other exists, and
   nothing is remembered across navigation.
+
+  `::uid` is this occurrence's identity, and every DOM id below is built from
+  it, so two appearances of ONE block in one list stay two separate controls
+  over two separate panels.
 
   A CLOSED control renders no panel, so `build-plan` is never called for it. Its
   existence was decided by the caller from `collapsed?` and `has-child?`, both
@@ -6246,14 +6271,16 @@
         desc @*desc
         repo (state/get-current-repo)
         uuid' (:block/uuid block)
-        panel-id (f28ctx/panel-id (:id config) uuid')
+        panel-id (f28ctx/panel-id (:id config) uuid' (::uid state))
         toggle-id (f28ctx/toggle-id panel-id)
         label (f28ctx/plain-row (f27-display-content (:block/format block)
                                                      (:block/content block)))
         named (if (:empty? label) (t :f28/context-empty) (:text label))
         ;; Collapsing from INSIDE the panel destroys the element that had focus,
-        ;; so focus is returned to THIS row's own control — the id is derived
-        ;; from this row's panel id, so two open panels cannot move each other's.
+        ;; so focus is returned to THIS OCCURRENCE's own control — the id is
+        ;; derived from this occurrence's panel id, which carries `::uid`, so
+        ;; two open panels cannot move each other's focus even when they are two
+        ;; appearances of the SAME block in the same list.
         ;; Asserted twice: once synchronously, and once after the re-render, in
         ;; case React replaced the control's node with the panel beside it.
         focus-toggle! (fn []

@@ -167,13 +167,31 @@
 ;; ---------------------------------------------------------------------------
 
 (defn panel-id
-  "A DOM id for one row's panel, stable across renders and unique on the page.
+  "A DOM id for one panel, stable across renders and unique on the page.
 
-  The row is identified by the list it belongs to and its own block, so two
-  lists on one page cannot collide and neither can two rows of one group."
-  [list-id block-id]
+  Three parts, and the third is the one that matters.
+
+  `list-id` and `block-id` say WHICH list and WHICH block, which is useful when
+  reading the DOM. They are not enough to identify a rendered row, because
+  **one block can be drawn twice in one list**. The baseline measured exactly
+  that: a child that itself names the page appears once as its own result with
+  its own breadcrumb, and once as context under its parent. `sub-collapsed` is
+  keyed by block uuid alone, so when such a block is collapsed BOTH of its
+  appearances are collapsed and both offer this control — and with only the
+  first two parts they would carry the SAME DOM id. `gdom/getElement` would then
+  hand a collapse the other appearance's control, and `aria-controls` would name
+  a panel ambiguously.
+
+  `occurrence` is the caller's per-MOUNTED-INSTANCE identity, created once in
+  the component's `:init` and never regenerated while it stays mounted — the
+  same thing `f27-inline-ref` does for two references in one sentence. It is
+  supplied rather than made here so this namespace stays pure: a `gensym` in
+  this function would return a different id on every render and break the very
+  thing it is meant to fix."
+  [list-id block-id occurrence]
   (str "f28-ctx-"
-       (string/replace (str list-id "-" block-id) #"[^A-Za-z0-9_-]" "_")))
+       (string/replace (str list-id "-" block-id "-" occurrence)
+                       #"[^A-Za-z0-9_-]" "_")))
 
 (defn toggle-id
   "The DOM id of the control that opens one panel, derived from the panel's own

@@ -643,19 +643,65 @@ test('collapsing from inside the panel returns focus to THIS row\'s own control'
   const wrapper = form(region, '(rum/defcs f28-child-context <');
   assert.match(wrapper, /toggle-id \(f28ctx\/toggle-id panel-id\)/,
     'the control id must be derived from this row\'s panel id');
-  assert.match(wrapper, /panel-id \(f28ctx\/panel-id \(:id config\) uuid'\)/,
-    'and the panel id from the list and this row\'s own block');
+  assert.match(wrapper, /panel-id \(f28ctx\/panel-id \(:id config\) uuid' \(::uid state\)\)/,
+    'and the panel id from the list, this row\'s block AND this occurrence');
   // Twice: synchronously, and after the re-render in case React replaced the node.
   assert.strictEqual((wrapper.match(/\.focus/g) || []).length, 2,
     'focus must be asserted synchronously and again after the re-render');
   assert.match(wrapper, /js\/setTimeout/);
 });
 
+test('a DOM id identifies a mounted OCCURRENCE, not a block in a list', () => {
+  // The correction this test exists for. `state/sub-collapsed` is keyed by
+  // block uuid alone, and the baseline established that a child which itself
+  // names the page is drawn TWICE in one list — once as its own result and
+  // once as context under its parent. When such a block is collapsed both
+  // appearances are collapsed and both offer this control, so a DOM id built
+  // from the list and the block alone was the SAME string for both:
+  // `gdom/getElement` could hand a collapse the other appearance's control and
+  // `aria-controls` named a panel ambiguously.
+  const { region } = f28CtxSource();
+  const wrapper = form(region, '(rum/defcs f28-child-context <');
+
+  // The identity is created ONCE, when the instance mounts.
+  assert.match(wrapper, /:init \(fn \[state _props\]/,
+    'the occurrence identity must be built in :init');
+  assert.match(wrapper, /\(assoc state ::uid \(str \(gensym "f28ctx"\)\)\)/,
+    'one stable per-mounted-occurrence id, as f27-inline-ref already does');
+
+  // And it must NOT be regenerated per render, which would break aria-controls
+  // and focus return rather than fix them.
+  const body = wrapper.slice(wrapper.indexOf('[state config block]'));
+  for (const forbidden of ['gensym', 'random-uuid', 'rand-int', '(str (random']) {
+    assert.ok(!body.includes(forbidden),
+      `the render body generates ${forbidden}; the id must be stable across renders`);
+  }
+  assert.strictEqual((wrapper.match(/\(gensym/g) || []).length, 1,
+    'exactly one place may mint this id, and it is :init');
+
+  // Every DOM id the component emits descends from that one identity.
+  assert.match(wrapper, /panel-id \(f28ctx\/panel-id \(:id config\) uuid' \(::uid state\)\)/);
+  assert.match(wrapper, /toggle-id \(f28ctx\/toggle-id panel-id\)/);
+
+  // The pure helper must actually consume it rather than accept and drop it.
+  const util = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'util', 'f28_refctx.cljs'), 'utf8');
+  const fn = form(util, '(defn panel-id');
+  assert.match(fn, /\[list-id block-id occurrence\]/,
+    'panel-id must take the occurrence');
+  assert.match(fn, /\(str list-id "-" block-id "-" occurrence\)/,
+    'and put it into the id it returns');
+  // The CALL forms, not the words: this function's docstring explains why a
+  // `gensym` here would be wrong, and prose must not decide a source-shape test.
+  assert.ok(!/\(gensym/.test(fn) && !/\(random-uuid/.test(fn),
+    'the pure helper must not mint identities of its own');
+});
+
 test('each row owns its own state, so two open panels cannot reach each other', () => {
   const { region } = f28CtxSource();
   assert.match(region, /\(rum\/local nil ::desc\)/,
     'the expansion state must be a per-instance local, not a shared atom');
-  assert.strictEqual((region.match(/rum\/local/g) || []).length, 1,
+  assert.strictEqual((region.match(/\(rum\/local /g) || []).length, 1,
     'one atom per row: the open flag and the expansion state are the same value');
   assert.ok(!region.includes('defonce') && !region.includes('def *'),
     'nothing about one row may live outside that row');

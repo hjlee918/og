@@ -237,17 +237,21 @@ async function main() {
 
     const lean = (r) => JSON.parse(JSON.stringify({ ...r, sectionText: undefined,
                                                    sectionHtml: undefined }));
-    const rowOf = (r, key) => r.rows.find((x) => x.id === U[key]);
+    // A block is not a row. `mixedRef` names the page AND is a child of a block
+    // that names it, so OG draws it TWICE in this one list; `rowsOf` returns
+    // every APPEARANCE, in document order, and `rowOf` is the first of them.
+    const rowsOf = (r, key) => r.rows.filter((x) => x.id === U[key]);
+    const rowOf = (r, key) => rowsOf(r, key)[0];
     const childrenOf = (r, row) => r.rows.filter((x) => x.parent === row.i);
     const subtreeOf = (r, row) => {
       const kids = childrenOf(r, row);
       return kids.flatMap((k) => [k, ...subtreeOf(r, k)]);
     };
 
-    /** Press one row's control, by mouse or by keyboard. */
-    const pressControl = async (key, how) => {
+    /** Press one appearance's control, by mouse or by keyboard. */
+    const pressControl = async (key, how, nth = 0) => {
       const r = await read();
-      const row = rowOf(r, key);
+      const row = rowsOf(r, key)[nth];
       if (!row || !row.controlId) return null;
       if (how === 'enter' || how === 'space') {
         await page.evaluate((i) => document.getElementById(i).focus(), row.controlId);
@@ -257,6 +261,19 @@ async function main() {
       }
       await sleep(2200);
       return row.controlId;
+    };
+
+    /** Press a control inside ONE appearance's open panel, by DOM id. */
+    const pressInPanelById = async (panelId, cls, nth = 0) => {
+      const ok = await page.evaluate(([pid, sel, n]) => {
+        const panel = document.getElementById(pid);
+        const btns = panel ? [...panel.querySelectorAll(sel)] : [];
+        if (!btns[n]) return false;
+        btns[n].click();
+        return true;
+      }, [panelId, cls, nth]).catch(() => false);
+      await sleep(2500);
+      return ok;
     };
 
     /** Press a control inside one row's open panel. */
@@ -303,14 +320,15 @@ async function main() {
     record('P4.4', 'the breadcrumbs are exactly what OG drew: complete, and none elided',
       refs.items.every((i) => i.groups.every((gp) => gp.more === 0)),
       `${refs.items.reduce((n, i) => n + i.groups.length, 0)} group(s), 0 "⋯" markers`);
+    // Against `ogShows` for EVERY case, not only the ones with nothing behind:
+    // that is what OG draws, and this feature must not add or remove one row.
     record('P4.5', 'the children OG already drew are still drawn, whole',
-      Object.entries(K).filter(([, w]) => w.behind === 0).every(([key, want]) => {
-        const row = rowOf(refs, key);
-        return row && subtreeOf(refs, row).length === want.descend;
-      }),
-      Object.entries(K).filter(([, w]) => w.behind === 0).map(([k, w]) => {
-        const row = rowOf(refs, k);
-        return `${k}: ${row ? subtreeOf(refs, row).length : '?'}/${w.descend}`;
+      Object.entries(K).every(([key, want]) =>
+        rowsOf(refs, key).length > 0 &&
+        rowsOf(refs, key).every((row) => subtreeOf(refs, row).length === want.ogShows)),
+      Object.entries(K).map(([k, w]) => {
+        const rs = rowsOf(refs, k);
+        return `${k}: ${rs.map((row) => subtreeOf(refs, row).length).join('+') || '?'}/${w.ogShows}`;
       }).join('; '));
     record('P4.6', "OG's filter and unlinked references are both still there",
       refs.filterControl === true && refs.unlinked === true,
@@ -318,20 +336,24 @@ async function main() {
     record('P4.7', 'nothing is being edited, and OG\'s own collapse is as it was',
       refs.editors === 0 &&
       refs.rows.filter((r) => r.collapsedAttr && r.collapsedAttr !== 'false').length ===
-        Object.keys(W).length,
+        RG.COLLAPSED_APPEARANCES,
       `${refs.editors} editor(s); ` +
       `${refs.rows.filter((r) => r.collapsedAttr && r.collapsedAttr !== 'false').length} ` +
-      `collapsed row(s), the same ${Object.keys(W).length} the baseline saw`);
+      `collapsed appearance(s) of ${Object.keys(W).length + 1} block(s), ` +
+      `expected ${RG.COLLAPSED_APPEARANCES}`);
 
     // ---------- P5 : the control, exactly where OG stopped ----------
     say('\nP5  the control, exactly where OG stopped and nowhere else');
     const withControl = refs.rows.filter((r) => r.control).map((r) => r.id);
-    const wallIds = Object.keys(W).map((k) => U[k]);
+    // Every collapsed APPEARANCE, which is more than the number of collapsed
+    // blocks: `TWICE` is one block wearing two of them.
+    const eligibleIds = Object.keys(W).map((k) => U[k]).concat([U[RG.TWICE.key]]);
     record('P5.1', 'one control on each row this list collapsed, and on no other row',
-      refs.controls === wallIds.length &&
-      wallIds.every((id) => withControl.includes(id)) &&
-      withControl.every((id) => wallIds.includes(id)),
-      `${refs.controls} control(s) for ${wallIds.length} collapsed row(s): ` +
+      refs.controls === RG.COLLAPSED_APPEARANCES &&
+      eligibleIds.every((id) => withControl.includes(id)) &&
+      withControl.every((id) => eligibleIds.includes(id)),
+      `${refs.controls} control(s) for ${RG.COLLAPSED_APPEARANCES} collapsed appearance(s) ` +
+      `of ${eligibleIds.length} block(s): ` +
       JSON.stringify(refs.rows.filter((r) => r.control).map((r) => r.text.slice(0, 26))));
     record('P5.2', 'a row OG is drawing in full gains nothing at all',
       Object.entries(K).filter(([, w]) => w.behind === 0)
@@ -522,6 +544,134 @@ async function main() {
       sibAOpen ? `panel id "${sibAOpen.panelId}" carries this row's own uuid; ` +
                  `its control is "${sibAOpen.controlId}"` : 'missing');
 
+    // ---------- P15 : the SAME block, drawn twice, in one list ----------
+    //
+    // The correction this section exists for. `mixedRef` names the anchor page
+    // AND is a child of `mixed`, which also names it, so OG draws it twice in
+    // this one list. It carries `collapsed:: true`, so BOTH appearances are
+    // collapsed and both offer this control at once. Before the fix their DOM
+    // ids were derived from the list and the block alone and were therefore
+    // identical: a collapse could focus the other appearance's control and
+    // `aria-controls` named a panel ambiguously.
+    say('\nP15 the SAME block drawn twice in one list: two occurrences, not one');
+    phase('disclose', 'open-two-appearances-of-one-block');
+
+    // Close anything still open, so nothing here is a leftover.
+    for (const k of ['jC1a', 'deepD2', 'batchG1', 'sibAG1']) {
+      const r = await read();
+      const row = rowOf(r, k);
+      if (row && row.open) await pressControl(k, 'click');
+    }
+
+    const r15 = await read();
+    const occ = rowsOf(r15, RG.TWICE.key);
+    observations.twice = occ;
+    record('P15.1', 'OG really draws this one block twice in this one list',
+      occ.length === RG.TWICE.occurrences,
+      `${occ.length} appearance(s) of ${RG.TWICE.key}, expected ${RG.TWICE.occurrences}` +
+      (occ.length ? `; parents ${JSON.stringify(occ.map((o) => o.parent))}` : ''));
+
+    record('P15.2', 'both appearances are collapsed and both carry a control',
+      occ.length === 2 &&
+      occ.every((o) => o.collapsedAttr && o.collapsedAttr !== 'false') &&
+      occ.every((o) => o.hasChildAttr === 'true') &&
+      occ.every((o) => o.control),
+      occ.map((o) => `#${o.i} collapsed=${o.collapsedAttr} haschild=${o.hasChildAttr} ` +
+                     `control=${o.control}`).join('; '));
+
+    // The defect itself, stated as the thing it broke.
+    record('P15.3', 'their control and panel ids are DIFFERENT, so neither can act on the other',
+      occ.length === 2 &&
+      !!occ[0].controlId && !!occ[1].controlId &&
+      occ[0].controlId !== occ[1].controlId,
+      occ.length === 2 ? `"${occ[0].controlId}" vs "${occ[1].controlId}"` : 'not two');
+
+    // And nothing in the whole section shares an id with anything else.
+    const dupes = await page.evaluate(() => {
+      const sec = document.querySelector('.references.page-linked');
+      if (!sec) return null;
+      const ids = [...sec.querySelectorAll('[id]')].map((e) => e.id).filter(Boolean);
+      const seen = new Map();
+      for (const i of ids) seen.set(i, (seen.get(i) || 0) + 1);
+      return { total: ids.length, duplicated: [...seen].filter(([, n]) => n > 1).map(([i]) => i) };
+    }).catch(() => null);
+    observations.duplicateIds = dupes;
+    record('P15.4', 'no DOM id is duplicated anywhere in the section',
+      !!dupes && dupes.duplicated.length === 0,
+      dupes ? `${dupes.total} id(s), ${dupes.duplicated.length} duplicated` +
+              (dupes.duplicated.length ? `: ${JSON.stringify(dupes.duplicated.slice(0, 4))}` : '')
+            : 'no reading');
+
+    // Open the FIRST appearance only.
+    const firstControl = await pressControl(RG.TWICE.key, 'click', 0);
+    const r15a = await read();
+    const occA = rowsOf(r15a, RG.TWICE.key);
+    record('P15.5', 'opening one appearance leaves the other closed',
+      occA.length === 2 && occA[0].open && !occA[1].open && r15a.panels === 1,
+      occA.map((o, n) => `#${n} open=${o.open}`).join(', ') +
+      `; ${r15a.panels} panel(s) in the section`);
+
+    record('P15.6', 'the opened appearance announces its OWN panel, unambiguously',
+      occA.length === 2 && !!occA[0].panelId &&
+      occA[0].controlId === `${occA[0].panelId}-toggle` &&
+      occA[0].expanded === 'true' && occA[1].expanded === 'false',
+      occA.length === 2
+        ? `panel "${occA[0].panelId}", control "${occA[0].controlId}", ` +
+          `aria-expanded ${occA[0].expanded} / ${occA[1].expanded}`
+        : 'not two');
+
+    // Now open the SECOND as well.
+    await pressControl(RG.TWICE.key, 'click', 1);
+    const r15b = await read();
+    const occB = rowsOf(r15b, RG.TWICE.key);
+    record('P15.7', 'both can be open at once, each showing this block\'s own children',
+      occB.length === 2 && occB.every((o) => o.open) && r15b.panels === 2 &&
+      occB.every((o) => (o.lines || []).length === RG.TWICE.hidden) &&
+      occB[0].panelId !== occB[1].panelId,
+      occB.map((o, n) => `#${n} ${(o.lines || []).length}/${RG.TWICE.hidden} line(s) ` +
+                         `in "${o.panelId}"`).join('; '));
+
+    record('P15.8', 'and each shows the same block\'s children because it IS the same block',
+      occB.length === 2 && occB[0].lines && occB[1].lines &&
+      JSON.stringify(occB[0].lines.map((l) => l.text)) ===
+        JSON.stringify(occB[1].lines.map((l) => l.text)) &&
+      occB[0].lines[0].text.startsWith(head(T.mixedRefC1)),
+      occB.length === 2 && occB[0].lines
+        ? JSON.stringify(occB[0].lines.map((l) => l.text.slice(0, 24)))
+        : 'no lines');
+
+    // Collapse the FIRST from inside its own panel: focus must come back to
+    // the FIRST control, and the second panel must be untouched.
+    await blurAll();
+    const okHide = await pressInPanelById(occB[0].panelId, '.f28-ctx-hide');
+    const focusAfterFirst = await activeId();
+    const r15c = await read();
+    const occC = rowsOf(r15c, RG.TWICE.key);
+    record('P15.9', 'collapsing one appearance returns focus to THAT appearance\'s control',
+      okHide && focusAfterFirst === occB[0].controlId &&
+      focusAfterFirst !== occB[1].controlId,
+      `focus is on "${focusAfterFirst}"; this appearance's control is ` +
+      `"${occB[0].controlId}", the other's is "${occB[1].controlId}"`);
+
+    record('P15.10', 'and the other appearance is completely unaffected',
+      occC.length === 2 && !occC[0].open && occC[1].open &&
+      r15c.panels === 1 &&
+      (occC[1].lines || []).length === RG.TWICE.hidden &&
+      occC[1].panelId === occB[1].panelId,
+      occC.map((o, n) => `#${n} open=${o.open} lines=${(o.lines || []).length}`).join(', ') +
+      `; ${r15c.panels} panel(s) left`);
+
+    // And the reverse: collapse the second, which is now the only open one.
+    await blurAll();
+    await pressInPanelById(occC[1].panelId, '.f28-ctx-hide');
+    const focusAfterSecond = await activeId();
+    const r15d = await read();
+    record('P15.11', 'the same holds in the other direction, and nothing is left open',
+      focusAfterSecond === occC[1].controlId && r15d.panels === 0 &&
+      rowsOf(r15d, RG.TWICE.key).every((o) => !o.open),
+      `focus is on "${focusAfterSecond}", expected "${occC[1].controlId}"; ` +
+      `${r15d.panels} panel(s) open`);
+
     // ---------- P11 : the list is unchanged by all of this ----------
     say('\nP11 the rest of the list, after everything above');
     phase('regression', 'the-list-after-the-feature-was-used');
@@ -538,27 +688,29 @@ async function main() {
       `${r11.editors} editor(s); hash ${await page.evaluate(() => location.hash)}`);
     record('P11.3', "OG's own collapse is exactly as it was found",
       r11.rows.filter((x) => x.collapsedAttr && x.collapsedAttr !== 'false').length ===
-        Object.keys(W).length,
+        RG.COLLAPSED_APPEARANCES,
       `${r11.rows.filter((x) => x.collapsedAttr && x.collapsedAttr !== 'false').length} ` +
-      `collapsed row(s), unchanged`);
+      `collapsed appearance(s), unchanged`);
 
-    // Closing every panel must return the section to what OG rendered.
-    for (const k of Object.keys(W)) {
-      const r = await read();
-      const row = rowOf(r, k);
-      if (row && row.open) await pressControl(k, 'click');
+    // Closing every panel must return the section to what OG rendered — every
+    // APPEARANCE, so the second one cannot be left open and unnoticed.
+    for (const k of Object.keys(W).concat([RG.TWICE.key])) {
+      for (let n = 0; n < 2; n++) {
+        const r = await read();
+        const row = rowsOf(r, k)[n];
+        if (row && row.open) await pressControl(k, 'click', n);
+      }
     }
     const r11b = await read();
+    const hiddenNames = [head(T.jC1a1), head(RG.BATCH_CHILDREN[0]), head(T.sibAGG1),
+                         head(RG.DEEP_LEVELS[3]), head(T.mixedRefC1)];
     record('P11.4', 'closing every panel returns the section to precisely what OG drew',
       r11b.panels === 0 &&
       r11b.rows.length === refs.rows.length &&
-      Object.keys(RG.WALL).every((k) => {
-        const hidden = [head(T.jC1a1), head(RG.BATCH_CHILDREN[0]), head(T.sibAGG1),
-                        head(RG.DEEP_LEVELS[3])];
-        return hidden.every((n) => !r11b.sectionText.includes(n));
-      }),
+      hiddenNames.every((n) => !r11b.sectionText.includes(n)),
       `${r11b.panels} panel(s), ${r11b.rows.length} rows (was ${refs.rows.length}); ` +
-      'nothing behind the wall is on the page any more');
+      `${hiddenNames.filter((n) => r11b.sectionText.includes(n)).length} of ` +
+      `${hiddenNames.length} withheld blocks still on the page`);
 
     phase('read-filter', 'open-the-filter-dialog');
     await page.locator('a.filter').first().click({ timeout: 15000 }).catch(() => null);

@@ -260,8 +260,8 @@ const DEEP_LEVELS = Array.from({ length: 6 }, (_, i) => {
 const CHILDREN = {
   leaf:    { own: 0,  namesPage: 0, descend: 0,  maxDepth: 0, ogShows: 0,  behind: 0 },
   two:     { own: 2,  namesPage: 0, descend: 2,  maxDepth: 1, ogShows: 2,  behind: 0 },
-  mixed:   { own: 4,  namesPage: 1, descend: 6,  maxDepth: 2, ogShows: 6,  behind: 0 },
-  mixedRef:{ own: 2,  namesPage: 0, descend: 2,  maxDepth: 1, ogShows: 2,  behind: 0 },
+  mixed:   { own: 4,  namesPage: 1, descend: 6,  maxDepth: 2, ogShows: 4,  behind: 2 },
+  mixedRef:{ own: 2,  namesPage: 0, descend: 2,  maxDepth: 1, ogShows: 0,  behind: 2 },
   sibA:    { own: 2,  namesPage: 0, descend: 5,  maxDepth: 3, ogShows: 3,  behind: 2 },
   sibB:    { own: 2,  namesPage: 0, descend: 2,  maxDepth: 1, ogShows: 2,  behind: 0 },
   wide:    { own: 14, namesPage: 0, descend: 14, maxDepth: 1, ogShows: 14, behind: 0 },
@@ -288,6 +288,47 @@ const WALL = {
             why: 'a journal source, Korean and emoji' },
 };
 
+
+/**
+ * The ONE block this fixture deliberately writes twice into the same list.
+ *
+ * `mixedRef` names the anchor page AND is a child of `mixed`, which also names
+ * it. OG therefore draws it TWICE in one linked-references list — once as its
+ * own result with its own breadcrumb, and once as context under its parent.
+ * The pre-feature baseline measured exactly that.
+ *
+ * On its own that is not enough to exercise occurrence identity, because
+ * neither appearance is collapsed by the LEVEL rule: as its own result it is a
+ * root, and under `mixed` it is a child rather than a grandchild. So the
+ * fixture writes `collapsed:: true` on it, which is what a reader folding the
+ * block would write, and which `block-default-collapsed?` honours through
+ * `util/collapsed?` at ANY level.
+ *
+ * That makes both appearances collapsed **deterministically**, rather than
+ * depending on which appearance mounted last — `state/set-collapsed-block!` is
+ * keyed by block uuid alone, so the two appearances share one collapsed flag
+ * and the last `:init` to run would otherwise decide it. Both are then
+ * eligible for the child-context control at once, which is the condition under
+ * which a DOM id built from the list and the block alone collided.
+ */
+const TWICE = {
+  key: 'mixedRef',
+  under: 'mixed',
+  occurrences: 2,
+  hidden: 2,
+  levels: 1,
+  collapsedBy: 'file',
+  why: 'the same block, drawn twice in one list, eligible in both appearances',
+};
+
+/**
+ * Every row this list collapses, counting an appearance rather than a block.
+ *
+ * WALL keys are collapsed by the level rule and appear once each; `TWICE` adds
+ * its own appearances. A scenario counting controls must use this, because the
+ * thing on screen is an appearance.
+ */
+const COLLAPSED_APPEARANCES = Object.keys(WALL).length + TWICE.occurrences;
 
 /**
  * How many BLOCK ancestors each referencing block has — the parent context OG
@@ -364,6 +405,7 @@ const PAGES = {
 \t\t\t  id:: ${UUID.mixedC1}
 \t\t\t- ${TEXT.mixedRef}
 \t\t\t  id:: ${UUID.mixedRef}
+\t\t\t  collapsed:: true
 \t\t\t\t- ${TEXT.mixedRefC1}
 \t\t\t\t  id:: ${UUID.mixedRefC1}
 \t\t\t\t- ${TEXT.mixedRefC2}
@@ -520,6 +562,7 @@ function readPage(graph, rel) {
 
 module.exports = {
   build, readPage, PAGES, TEXT, UUID, CONFIG, CHILDREN, DEPTH, KIDS, WALL,
+  TWICE, COLLAPSED_APPEARANCES,
   WIDE_CHILDREN, BATCH_CHILDREN, DEEP_LEVELS, BATCH_PRESSES, REFERENCING,
   CONTROL_FILE, ASSET_FILE, ASSET_BYTES, ANCHOR, FILTER_TAG,
   CHILD_PAGE, WIDE_PAGE, BATCH_PAGE, DEEP_PAGE, journalName, journalBody,
