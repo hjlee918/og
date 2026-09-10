@@ -34,19 +34,20 @@ e.app.on('ready', async () => {
   for (const partition of ['', 'synthetic-other']) {
    const s = e.session.fromPartition(partition);
    s.protocol.registerFileProtocol('lsp', (req, cb) => cb({path:${JSON.stringify(dir)} + '/local.html'}));
-   const w = new e.BrowserWindow({show:false,webPreferences:{session:s,nodeIntegration:true,contextIsolation:false}});
+   const w = new e.BrowserWindow({show:false,webPreferences:{session:s,sandbox:false,nodeIntegration:false,contextIsolation:true,preload:${JSON.stringify(path.join(REPO,'static/js/preload.js'))}}});
    await w.loadURL('lsp://logseq.com/local.html');
    r.probes.push({name:'local-'+partition,usable:(await w.webContents.executeJavaScript('document.body.textContent'))==='LOCAL_OK'});
    r.probes.push({name:'renderer-'+partition,refused:await w.webContents.executeJavaScript("fetch('https://example.invalid/synthetic').then(()=>false,()=>true)")});
    for (const op of ['httpRequest','httpFetchJSON','runCli','fetch-remote-files']) {
-    r.probes.push({name:op,refused:await w.webContents.executeJavaScript("require('electron').ipcRenderer.invoke('main',["+JSON.stringify(op)+"]).then(()=>false,()=>true)")});
+    r.probes.push({name:op,refused:await w.webContents.executeJavaScript("window.apis.doAction(["+JSON.stringify(op)+"]).then(()=>false,()=>true)")});
    }
+   r.probes.push({name:'preload-external',refused:await w.webContents.executeJavaScript("window.apis.openExternal('https://example.invalid').then(()=>false,()=>true)")});
    w.destroy();
   }
   r.evidence=global.__expNet;
   fs.writeFileSync(${JSON.stringify(path.join(dir,'result.json'))},JSON.stringify(r));
   e.app.exit(0);
- } catch (_) { e.app.exit(79); }
+ } catch (error) { console.error(error.message); e.app.exit(79); }
 });
 `);
   const p = spawnSync(bin,[dir],{timeout:30000,encoding:'utf8',env:{...process.env,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'}});
