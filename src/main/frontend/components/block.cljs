@@ -74,6 +74,7 @@
             [frontend.util.f27-inline-watch :as f27w]
             [frontend.util.f28-refctx :as f28ctx]
             [frontend.util.f28-refpath :as f28]
+            [frontend.util.f28-refrole :as f28role]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -6036,6 +6037,65 @@
    :whiteboard? (boolean (or (:whiteboard? config) (:whiteboard-view? config)))})
 
 ;; ---------------------------------------------------------------------------
+;; F28 reference roles — WHY a row is on a page's linked-references list.
+;;
+;; Row 8 of `project-notes/F28_CHILD_CONTEXT_SPEC.md` §1, measured in the
+;; packaged application and deliberately left unfixed by that slice: a counted
+;; reference and a child drawn beneath it are rendered IDENTICALLY — same
+;; classes, same bullet — and the only thing separating them is
+;; `data-refs-self`, which is not visible.
+;;
+;; The list holds two different things. A DIRECT mention names the page itself
+;; and is what the heading counts; a CONTEXT row arrived through
+;; `:block/path-refs`, inherited from an ancestor, and is drawn so the mention
+;; can be read in its surroundings. Both are ordinary blocks and both are
+;; ordinary rows, so nothing on screen says which is which.
+;;
+;; What is added is ONE compact, inert word per row, and its explanation as a
+;; `title`. It is a `<span>`: no tabindex, no handler, no href, so reading this
+;; list from a keyboard is exactly as many stops as it was.
+;;
+;; The decision itself is `frontend.util.f28-refrole`, which is pure and takes
+;; the block's OWN ref ids and the page's identity set — never a depth, a level,
+;; a position or a piece of text. This is the only place OG's config shape is
+;; known for it.
+
+(defn- f28-row-role
+  "What this row's label says, or nil when this surface has no labels.
+
+  `refs` is the block's own `:block/refs` — the same value two lines below
+  builds `data-refs-self` from, so the label and that attribute describe the
+  same fact.
+
+  `nested?` is `block-children`'s own marker for a row drawn UNDER another row.
+  It reaches `describe`, which uses it to pick a longer SENTENCE for a direct
+  mention drawn beneath another mention, and it is deliberately not passed to
+  `row-role`, which must not be able to see it."
+  [config refs nested?]
+  (let [page-ids (:f28/role-pages config)]
+    (when (f28role/label-rows?
+           (assoc (f28-surface config)
+                  :role-list? (boolean (:f28/source-path? config))
+                  :page-known? (boolean (seq page-ids))))
+      (f28role/describe
+       {:role (f28role/row-role {:ref-ids (map :db/id refs) :page-ids page-ids})
+        :nested? nested?}))))
+
+(rum/defc f28-ref-role
+  "One row's role, as a compact inert word with its explanation behind it.
+
+  `data-f28-role` carries the decision itself, so a check reads the ROLE rather
+  than the translated word — which is also the difference between testing this
+  feature and testing the dictionary."
+  [described]
+  (when-let [{:keys [role text-key why-key]} described]
+    [:span.f28-role
+     {:class (str "f28-role-" (name role))
+      :data-f28-role (name role)
+      :title (t why-key)}
+     (t text-key)]))
+
+;; ---------------------------------------------------------------------------
 ;; F28 child context — what is written UNDER a linked reference.
 ;;
 ;; OG's linked-references list ALREADY shows a reference's own children, and
@@ -6344,6 +6404,11 @@
         children-refs (get-children-refs children)
         data-refs (build-refs-data-value children-refs)
         data-refs-self (build-refs-data-value refs)
+        ;; F28: WHY this row is on the list — a direct mention of the page, or a
+        ;; block drawn under one for context. Decided from the block's own
+        ;; `refs` and the page identity `references*` opted this list in with;
+        ;; nil on every other surface, so nothing else changes.
+        ref-role (f28-row-role config refs (boolean (:ref-query-child? config)))
         edit-input-id (str "edit-block-" blocks-container-id "-" uuid)
         edit? (state/sub [:editor/editing? edit-input-id])
         card? (string/includes? data-refs-self "\"card\"")
@@ -6418,7 +6483,12 @@
           (block-content-or-editor config block edit-input-id block-id edit? hide-block-refs-count? selected?)))
 
       (when @*show-right-menu?
-        (block-right-menu config block edit?))]
+        (block-right-menu config block edit?))
+
+      ;; F28: one inert word saying why this row is here. Last in the row, so it
+      ;; is read after the block it describes and never before it; a `<span>`,
+      ;; so it adds no keyboard stop to a list that has few enough already.
+      (f28-ref-role ref-role)]
 
      (block-children config block children collapsed?)
 

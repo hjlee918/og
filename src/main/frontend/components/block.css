@@ -2246,3 +2246,52 @@ html.is-mac {
   color: var(--ls-link-text-color);
   background-color: var(--ls-tertiary-background-color);
 }
+
+/* ---------------------------------------------------------------------------
+   F28 reference roles — why a row is on a page's linked-references list.
+
+   One inert word per row, in the row's own right-hand gutter. It sits at the
+   END of `.block-main-container`, after the content, so the row reads before
+   its label does and OG's own left-hand controls, bullet and indentation are
+   untouched.
+
+   Quiet on purpose: this appears on EVERY row of the list, so it is small,
+   secondary-coloured and does not box or tint the row it belongs to. The
+   context word is quieter still than the mention word, because the mention is
+   the thing the reader came for and the context row is the surrounding.
+
+   `flex: 0 0 auto` keeps it from taking width from the block content, and
+   `user-select: none` keeps it out of a selection copied from the list.
+
+   Everything is scoped to `.f28-role*`, so removing this feature removes its
+   appearance with it and nothing in OG's own block styling changes.
+   --------------------------------------------------------------------------- */
+
+.f28-role {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-left: 0.5rem;
+  padding-top: 0.15rem;
+  font-size: 0.7em;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  color: var(--ls-secondary-text-color);
+}
+
+.f28-role-direct {
+  opacity: 0.8;
+}
+
+.f28-role-context {
+  opacity: 0.55;
+  font-style: italic;
+}
+
+/* Its own hover only. A rule reaching OG's `.ls-block` would put this feature's
+   appearance outside its own namespace, and removing the feature would then
+   leave a change behind. */
+.f28-role:hover {
+  opacity: 1;
+}

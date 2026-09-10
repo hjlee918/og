@@ -519,6 +519,13 @@
  :f28/context-complete "{1}개 모두 표시했습니다."
  :f28/context-partial "{2}개 중 {1}개 표시했습니다. {3}개 더 있습니다."
  :f28/context-snapshot "이 내용은 이 항목이 다시 그려질 때마다 다시 읽습니다. 다만 스스로 최신 상태를 유지하지는 않습니다. 여기의 어떤 것도 노트에 기록되지 않습니다."
+
+ ;; F28 참조 역할 — 이 행이 이 목록에 있는 이유.
+ :f28/role-direct "언급"
+ :f28/role-context "맥락"
+ :f28/role-direct-why "이 블록이 이 페이지를 직접 언급합니다. 위에 집계된 결과 중 하나입니다."
+ :f28/role-direct-again-why "이 블록이 이 페이지를 직접 언급합니다. 위에 집계된 결과 중 하나이며, 여기서는 이 블록이 적혀 있는 상위 블록 아래에 다시 표시되었습니다."
+ :f28/role-context-why "이 블록은 이 페이지를 언급하지 않습니다. 이 페이지를 언급한 블록 아래에 맥락으로 표시되었습니다."
  :linked-references/filter-search "링크된 페이지에서 검색"
  :notification/clear-all "모두 제거"
  :page/logseq-is-having-a-problem "Logseq에 문제가 발생하였습니다. 작업 환경으로 돌아가기 위해서는 다음 지시를 따라주십시오."

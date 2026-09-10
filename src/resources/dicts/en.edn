@@ -464,6 +464,16 @@
  :f28/context-complete "All {1} of them are shown."
  :f28/context-partial "{1} of {2} shown; {3} more."
  :f28/context-snapshot "This is re-read whenever this result redraws, and nothing keeps it up to date on its own. Nothing here is written to your notes."
+
+ ;; F28 reference roles — why a row is on a page's linked-references list.
+ ;; Two roles and nothing else: the block names this page itself, or it is
+ ;; drawn under one that does. The word is compact because it sits on every
+ ;; row; the sentence behind it is the explanation.
+ :f28/role-direct "mention"
+ :f28/role-context "context"
+ :f28/role-direct-why "This block mentions this page, so it is one of the results counted above."
+ :f28/role-direct-again-why "This block mentions this page, so it is one of the results counted above. It is shown here again, under the block it is written below."
+ :f28/role-context-why "This block does not mention this page. It is shown for context, under a block that does."
  :linked-references/filter-search "Search in linked pages"
  :linked-references/unexpected-error "Linked References: Unexpected error. Please re-index your graph first."
  :linked-references/filter-heading "Filter"

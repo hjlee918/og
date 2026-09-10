@@ -120,7 +120,7 @@
                       {:hiccup ref-hiccup})]))
 
 (rum/defc references-inner
-  [page-name filters filtered-ref-blocks source-path?]
+  [page-name filters filtered-ref-blocks source-path? role-pages]
   [:div.references-blocks
    (let [ref-hiccup (block/->hiccup filtered-ref-blocks
                                     {:id page-name
@@ -136,13 +136,25 @@
                                      ;; is this one rather than be inferred. False in
                                      ;; the right sidebar's copy of this list, whose
                                      ;; behaviour is protected as it is.
-                                     :f28/source-path? (boolean source-path?)}
+                                     :f28/source-path? (boolean source-path?)
+                                     ;; F28 reference roles: WHICH page this list is
+                                     ;; about, as the identity set `references*`
+                                     ;; itself filters `top-level-blocks` with. A row
+                                     ;; is a direct mention exactly when its own
+                                     ;; `:block/refs` meets this set, so a label and
+                                     ;; the count in the heading cannot disagree.
+                                     ;; Carried as ids rather than a name because a
+                                     ;; name would have to be re-resolved per row and
+                                     ;; would miss the aliases the count includes.
+                                     ;; nil in the sidebar's copy, which gets no
+                                     ;; labels at all.
+                                     :f28/role-pages role-pages}
                                     {})]
      (content/content page-name {:hiccup ref-hiccup}))])
 
 (rum/defc references-cp
   [page-name filters filters-atom filter-state total filter-n filtered-ref-blocks *ref-pages
-   source-path?]
+   source-path? role-pages]
   (let [threshold (state/get-linked-references-collapsed-threshold)
         default-collapsed? (>= total threshold)
         *collapsed? (atom nil)]
@@ -172,7 +184,7 @@
                           :size  22})]]
 
      (fn []
-       (references-inner page-name filters filtered-ref-blocks source-path?))
+       (references-inner page-name filters filtered-ref-blocks source-path? role-pages))
 
      {:default-collapsed? default-collapsed?
       :title-trigger? true
@@ -259,7 +271,12 @@
          (sub-page-properties-changed page-name page-props-v filters-atom)
          [:div.content.pt-6
           (references-cp page-name filters filters-atom filter-state total filter-n
-                         filtered-ref-blocks' *ref-pages source-path?)]]))))
+                         filtered-ref-blocks' *ref-pages source-path?
+                         ;; F28 reference roles: the same `aliases` set two lines
+                         ;; of `top-level-blocks` above use to decide what this
+                         ;; heading counts. Withheld from the sidebar's copy for
+                         ;; the same reason `source-path?` is.
+                         (when source-path? aliases))]]))))
 
 (rum/defc references
   "`opts` carries only `:sidebar?`, which F28 reads to keep the source-path

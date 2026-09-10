@@ -40,8 +40,8 @@ const PILOT_FILES = ['preflight.test.js', 'isolation.test.js', 'guards.test.js',
   .map((f) => path.join('f27-pilot', 'tests', f));
 
 const F28_FILES = ['feature-build.test.js', 'graph-fixture.test.js',
-                   'refctx-fixture.test.js', 'browser-noise.test.js',
-                   'packaged-app.test.js']
+                   'refctx-fixture.test.js', 'refrole-source.test.js',
+                   'browser-noise.test.js', 'packaged-app.test.js']
   .map((f) => path.join('f28-refpath', 'tests', f));
 
 // The inherited F27 suites that are still true in this checkout: the fixture
