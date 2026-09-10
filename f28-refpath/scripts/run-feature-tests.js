@@ -43,7 +43,12 @@ const F28_FILES = ['feature-build.test.js', 'graph-fixture.test.js',
                    'refctx-fixture.test.js', 'refrole-source.test.js',
                    'reforder-source.test.js', 'reforder-fixture.test.js',
                    'combined-fixture.test.js', 'inside-containers.test.js',
-                   'browser-noise.test.js', 'packaged-app.test.js']
+                   'browser-noise.test.js', 'packaged-app.test.js',
+                   // The plugin-coexistence batch's two gates: the artifact
+                   // identity check that decides whether third-party bytes may
+                   // be loaded at all, and the profile swap that keeps a plugin
+                   // out of every later F28 run.
+                   'plugin-artifacts.test.js', 'fresh-profile.test.js']
   .map((f) => path.join('f28-refpath', 'tests', f));
 
 // The inherited F27 suites that are still true in this checkout: the fixture

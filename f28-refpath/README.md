@@ -123,6 +123,88 @@ can never write into the accepted checkouts.
 | `tests/browser-noise.test.js` | the correlation rule, driven deterministically, including the case it must NOT excuse |
 | `tests/reforder-fixture.test.js` | the ordering fixture's own rules, and the JS mirror of the comparison |
 | `tests/reforder-source.test.js` | the ordering slice's source shape: `:original` hands OG's sequence back, the sort runs after OG's own, groups are keyed by `:db/id` and never by title, no locale collation, the choice reaches no store |
+| `checks/plugin-artifacts.js` | the three inventoried plugin packages: V5's recorded identity, the same tree-digest algorithm, and a placement that **refuses** unless the bytes still hash to what the project recorded |
+| `checks/fresh-profile.js` | the shared state root moved aside under this build's own ownership marker and put back — so a plugin never survives into a later F28 run |
+| `checks/reference-journey.js` | the short reference journey's readers and gestures, and the plugin-host readers, shared so plugin-free and plugin-present readings are the SAME measurement |
+| `checks/plugin-coexistence-checks.js` | the five-session coexistence run |
+| `tests/plugin-artifacts.test.js` | the artifact gate: a one-byte difference, an absent package, an unknown id and a non-empty target all refuse; a good install re-verifies at the destination |
+| `tests/fresh-profile.test.js` | the profile swap's fail-closed rules: unmarked, foreign-marked, malformed and symlinked roots all refuse, nothing is deleted, and restoration proves it returned the marker it took |
+
+## Plugin coexistence (`checks/plugin-coexistence-checks.js`)
+
+    node f28-refpath/checks/plugin-coexistence-checks.js [none|readwise|ollama|chatgpt|all ...]
+
+Five sessions, each on its **own fresh synthetic graph**, each running the same
+short reference journey — the list and its controls, the F27 badge → compact
+overview → Crystal marker → a row's context, both F28 disclosures, the ordering
+control with the panels still open, Korean and back, one keyboard interaction,
+and a source-page round trip:
+
+| session | installs |
+|---|---|
+| `none` | nothing — the control, so any later difference is attributable rather than assumed |
+| `readwise` | `logseq-readwise-official-plugin` v1.4.11 (the priority) |
+| `ollama` | `ollama-logseq` v1.1.6 |
+| `chatgpt` | `logseq-chatgpt-plugin` v2.0.3 |
+| `all` | all three together |
+
+**Identity comes from the project's own record, never from a display name.**
+V5 resolved all three through OG's own Marketplace metadata flow and recorded
+each installed package's tree digest, manifest digest, file count and byte
+count; `checks/plugin-artifacts.js` reproduces V5's digest algorithm exactly and
+refuses to place a package whose bytes no longer hash to it. The ChatGPT
+plugin's Marketplace id (`logseq-chatgpt-plugin`) and its manifest's own
+`logseq.id` (`_rw1zys420`) are both carried, because the host uses the second.
+
+**How the packages get in, and what that is not.** OG discovers installed
+plugins by enumerating its own plugins directory
+(`electron.utils/get-ls-default-plugins` → `LSPluginCore.register(metas, true)`),
+so placing an already-downloaded package there is the state OG's own Install
+action produces, reached with **no Marketplace call, no download and no in-app
+Install**. The provenance is V5's Marketplace install, carried forward and
+re-proved by hash. The run does not claim the Install *action* was exercised.
+
+**Why the profile is swapped rather than redirected.** `pilot-isolation.js`
+derives the state root from Electron's own `appData`, which a bounded probe in
+this batch measured **does not follow `HOME`** on macOS (only `logs` does). A
+plugin left in the shared `refpath-state` would still be there for every later
+F28 run, and each plugin writes its own default settings on first
+initialisation, so `checks/fresh-profile.js` moves the shared root aside under
+this build's own ownership marker and puts it back. It never deletes anything,
+never touches an unmarked or foreign-marked directory, and **never writes an
+ownership marker** — the fresh root is created and marked by a short seeding
+launch of the application itself, because that ownership rule is one of the
+guards this batch is not allowed to weaken.
+
+**Unauthenticated coexistence is not plugin compatibility.** No credential is
+entered, no plugin command, menu item, toolbar button or settings pane is
+invoked, and no plugin reaches a service. Readwise's bundle gates every network
+call and every resync on `logseq.settings.readwiseAccessToken`, ollama's on a
+configured host, the ChatGPT plugin's on an `OPENAI_API_KEY`; a fresh profile
+has none of those. Nothing in this run says a Readwise import, an Ollama
+request or a ChatGPT request would work.
+
+**Enrolment is not loading.** `registeredPlugins`/`enabledPlugins` say the host
+took the package; `status`, `loaded` and the load error say whether the plugin's
+own code ever ran. Both are reported separately, and neither is inherited from
+V5's finding.
+
+Two things the plugin readers must not do, and do not:
+
+* `LSPluginCore.hostMounted()` **is a command, not a predicate** — in the
+  packaged `js/lsplugin.core.js` it reads `hostMounted(){ this._hostMountedActor
+  .resolve() }`. Calling it settles the actor `_onHostMounted` waits on. The
+  mounted fact is read from `hostMountedActor.settled` instead. The first
+  version of the reader called it, which both reported `false` for a mounted
+  host and mutated the state it claimed to observe; that run's evidence is kept.
+* a plugin-shaped error is **attributed, never exempted**. Only the exact
+  browser notice `checks/browser-noise.js` names is ever excused, and a refused
+  `[frontend.handler]` line still fails its check.
+
+Every session hashes its graph before launch, with the application still open,
+and after it has closed; hashes the plugins directory either side (so "nothing
+was downloaded" is evidence, not assertion); and reads back any settings file a
+plugin wrote for itself to show no credential was stored.
 
 ## The one pre-existing condition this feature's runs name
 
