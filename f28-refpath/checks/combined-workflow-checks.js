@@ -58,12 +58,14 @@
 //
 // READ-ONLY INTERVALS AND DECLARED WRITES, KEPT APART. Everything up to and
 // including C8 is read-only and proved so by a hash taken while the
-// application is still open, BEFORE the first declared write (C8). The declared
-// writes are exactly two, both made by OG at this run's explicit request and
+// application is still open, BEFORE the first declared write (C8). The
+// declared writes are exactly two CONTENT FILES, changed by THREE mutation
+// operations — every one made by OG at this run's explicit request and
 // declared in advance in `make-combined-graph.js`:
 //
-//   * `logseq.api.update_block` on the joining source (twice: add, then remove
-//     the reference) — OG's own editor handler and outliner write the file;
+//   * `logseq.api.update_block` on the joining source, TWICE — add, then
+//     remove the reference — two operations on one file, both through OG's
+//     own editor handler and outliner;
 //   * a real exclude-filter click — OG's own `page-handler/save-filter!`
 //     persists a `filters::` property in the anchor page's file.
 //
@@ -98,6 +100,7 @@ const APP = require('./packaged-app.js');
 const NOISE = require('./browser-noise.js');
 const REC = require('./recorder.js');
 const RD = require('./reforder-read.js');
+const IC = require('./inside-containers.js');
 
 const EVIDENCE = path.join(FEATURE_DIR, 'evidence');
 const FEATURE_APP = 'Logseq-OG-F28-RefPath';
@@ -745,30 +748,26 @@ async function main() {
     // reforder-feature scenario, so it stays untouched. But the combined
     // workflow compares ACROSS VIEWS, and the fourth run measured that OG's
     // 'original' sequence is nondeterministic at TWO granularities: the group
-    // sequence per view (P13.2, recorded), AND — new — the per-parent CONTAINER
+    // sequence per view (P13.2, recorded), AND the per-parent CONTAINER
     // order INSIDE a multi-parent group, because `->hiccup`'s custom-query
     // branch assembles containers from `(group-by :block/parent)`, a hash map
     // whose iteration order is whatever this rendering produced (probe runs 1
     // and 2 drew 나/가 containers in different orders; run 4 differed across
     // re-entry/reorder re-renders for exactly the two multi-parent groups).
-    // CONTENT is stable — the same rows, the same nesting, the same crumbs —
-    // so cross-view comparisons here are SET-WISE per group: each group's row
-    // ids, `${id}<${parent}@${level}` tree strings and `${steps}::${ids}` crumb
-    // strings, each SORTED, compared key-wise. A within-view check may still
-    // use the order-sensitive reader; this one may not.
-    const insideSetOf = (r) => {
-      const byIndex = new Map((r.rows || []).map((x) => [x.i, x.id]));
-      const parentId = (p) => (p === null || p === undefined ? 'top' : (byIndex.get(p) || '?'));
-      const out = {};
-      for (const g of r.groups || []) {
-        out[g.ref] = {
-          rowIds: [...(g.rowIds || [])].sort(),
-          tree: g.rowTree.map((x) => `${x.id}<${parentId(x.parent)}@${x.level}`).sort(),
-          crumbs: g.crumbs.map((c) => `${c.steps.join('›')}::${c.ids.join(',')}`).sort(),
-        };
-      }
-      return out;
-    };
+    // The supervisor review (2026-09-10) closed the gap this first cut left:
+    // sorting every row id and tuple also erased SIBLING ORDER inside each
+    // container. Cross-view comparison is now IDENTITY-SCOPED — the shared
+    // module below reduces each group to a MULTISET OF CONTAINERS (container
+    // order tolerated, the documented nondeterminism), each container
+    // retaining its rows as an ORDERED, duplicate-preserving list keyed by
+    // parent block id — its semantics are asserted by
+    // f28-refpath/tests/inside-containers.test.js. The row's PROSE text is
+    // deliberately not compared: RD.read takes it from main.innerText, which
+    // carries the TRANSLATED control words, and C7.4 must hold across a
+    // language switch; prose changes are the declared-write accounting's job
+    // (C12.4), not this comparator's.
+    const insideSetOf = IC.insideSetOf;
+    const insideCompare = IC.insideCompare;
     const originalInside = insideSetOf(original);
 
     // =====================================================================
@@ -999,18 +998,29 @@ async function main() {
     // breadcrumbs key-wise identical. The sequence itself is observed.
     const returnedInside = insideSetOf(afterReturn);
     const sameSet = J([...RD.orderOf(afterReturn)].sort()) === J([...originalOrder].sort());
-    const sameInside = J(returnedInside) === J(originalInside);
+    const returnDiffs = insideCompare(originalInside, returnedInside);
+    // Retained as ordered observations so a later review can re-evaluate the
+    // comparison without a fresh run (what run 5 could not offer: lean dropped
+    // `rows`, and the readings behind the comparisons were not retained).
+    observations.insideScopes = {};
+    observations.insideScopes.c5_14 = { base: originalInside, after: returnedInside,
+                                        diffs: returnDiffs };
     // This view's own 'original' — the baseline every later comparison ON
     // THIS VIEW must use (the reorders of C6 and the keyboard of C7).
     const viewOriginalOrder = RD.orderOf(afterReturn).slice();
     record('C5.14', 'and the return finds the list exactly as the session left it',
       blockViewRead.present === false &&
-      afterReturn.present === true && sameSet && sameInside &&
+      afterReturn.present === true && sameSet && returnDiffs.length === 0 &&
       afterReturn.controlOrder === 'original' && afterReturn.editors === 0,
       () => `the block-scoped landing held no list, as OG builds it: ` +
         `${blockViewRead.present}; back on the page, group set identical ` +
-        `${sameSet}, every group's rows/nesting/breadcrumbs identical ` +
-        `${sameInside}, control ${J(afterReturn.controlOrder)}, ` +
+        `${sameSet}, every group's containers identical as identity-scoped ` +
+        `multisets — within-container row order, parentage, membership, role, ` +
+        `level and breadcrumb path compared exactly, duplicate occurrences ` +
+        `retained, container order across containers tolerated (OG's ` +
+        `documented per-render nondeterminism): ${returnDiffs.length} ` +
+        `difference(s)${returnDiffs.length ? ` — ${returnDiffs.join('; ')}` : ''}; ` +
+        `control ${J(afterReturn.controlOrder)}, ` +
         `${afterReturn.editors} editor(s)\n          this view's own 'original' ` +
         `sequence ${J(viewOriginalOrder)}\n          (the first view's was ` +
         `${J(originalOrder)} — OG's per-view choice, observed, not asserted)`);
@@ -1162,20 +1172,26 @@ async function main() {
         `expanded ${applePathShut && applePathShut.toggle.expanded}; focus now ` +
         `${focusAfterHide && focusAfterHide.tag}#${focusAfterHide && focusAfterHide.id}`);
     // Nothing inside any group moved across the whole reorder. Cross-rendering
-    // comparison, so it is set-wise (see `insideSetOf`): the reorders and the
-    // re-renders they force can redraw a multi-parent group's containers in a
-    // different order without anything moving BETWEEN rows, parents or crumbs.
+    // comparison, so it is identity-scoped (see `inside-containers.js`): the
+    // reorders and the re-renders they force can redraw a multi-parent group's
+    // containers in a different order — tolerated — but the rows INSIDE each
+    // container keep their order, parentage, membership, roles, levels and
+    // breadcrumb paths, and duplicate occurrences are counted, so a sibling
+    // reversal or a dropped/duplicated row under the reorders FAILS here.
     const finalRead = await RD.read(page);
     const finalInside = insideSetOf(finalRead);
-    const insideDiffs = [];
-    for (const ref of Object.keys(originalInside)) {
-      if (J(finalInside[ref]) !== J(originalInside[ref])) insideDiffs.push(ref);
-    }
-    record('C6.13', 'and inside every group nothing moved: same rows, same nesting, same breadcrumbs',
+    const insideDiffs = insideCompare(originalInside, finalInside);
+    observations.insideScopes.c6_13 = { base: originalInside, after: finalInside,
+                                        diffs: insideDiffs };
+    record('C6.13', 'and inside every group nothing moved: same rows in the same order, ' +
+      'same nesting, same breadcrumbs',
       insideDiffs.length === 0,
-      () => insideDiffs.length ? `differs: ${J(insideDiffs)}` :
-        `${Object.keys(originalInside).length} group(s) compared by row ids, parent BLOCK, ` +
-        `level and breadcrumb, set-wise per group — 0 differences`);
+      () => insideDiffs.length ? `differs: ${insideDiffs.join('; ')}` :
+        `${Object.keys(originalInside).length} group(s) compared as identity-scoped ` +
+        `container multisets — within-container row order, parentage, membership, ` +
+        `role, level and breadcrumb path exact, duplicates retained; only the ` +
+        `order of whole containers across each other is tolerated (OG's ` +
+        `documented per-render nondeterminism) — 0 differences`);
 
     // =====================================================================
     // C7 — JOURNEY 5a: Korean and English, and the keyboard
@@ -1261,18 +1277,23 @@ async function main() {
     // `insideSetOf`), the sequence observed.
     const koInside = insideSetOf(koRead);
     const koSameSet = J([...RD.orderOf(koRead)].sort()) === J([...RD.orderOf(finalRead)].sort());
-    const koSameInside = J(koInside) === J(finalInside);
+    const koDiffs = insideCompare(finalInside, koInside);
+    observations.insideScopes.c7_4 = { base: finalInside, after: koInside, diffs: koDiffs };
     record('C7.4', 'the ORDER is unchanged by the language — the rule is not a locale — and ' +
       'the graph\'s own Korean and emoji still read correctly',
       koSameView.present === true &&
       J(RD.orderOf(koSameView)) === J(RD.orderOf(finalRead)) &&
-      koRead.present && koSameSet && koSameInside &&
+      koRead.present && koSameSet && koDiffs.length === 0 &&
       koRead.groups.every((x) => !/�/.test(x.title)) &&
       koRead.groups.some((x) => /[가-힣]/.test(x.title)),
       () => `same view, language alone — English ${J(RD.orderOf(finalRead))}\n          ` +
         `Korean  ${J(RD.orderOf(koSameView))}\n          after the badge-page ` +
-        `round-trip: group set identical ${koSameSet}, content identical ` +
-        `${koSameInside}; this view's own 'original' ${J(RD.orderOf(koRead))}`);
+        `round-trip: group set identical ${koSameSet}, containers identical ` +
+        `as identity-scoped multisets with within-container order exact ` +
+        `(translated control words live inside each row's prose text and are ` +
+        `deliberately outside this comparison): ${koDiffs.length} difference(s)` +
+        `${koDiffs.length ? ` — ${koDiffs.join('; ')}` : ''}; this view's own ` +
+        `'original' ${J(RD.orderOf(koRead))}`);
     await setLanguage('en');
     await sleep(3000);
     await settle('back in English');
