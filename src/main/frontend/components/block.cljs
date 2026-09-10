@@ -6361,10 +6361,20 @@
                          :aria-expanded "true"})
        (t :f28/context-hide)]]]))
 
-(rum/defcs f28-child-context <
-  ;; `rum/local` FIRST, then the map — the same order `f27-inline-ref` records
-  ;; the reason for: Rum collects before-render hooks mixin-major, so a map
-  ;; placed first can run against state `rum/local`'s own hook has not built.
+(rum/defcs f28-child-context < rum/reactive
+  ;; `rum/reactive` first, then `rum/local`, then the map — `rum/local` before
+  ;; the map is the order `f27-inline-ref` records the reason for: Rum collects
+  ;; before-render hooks mixin-major, so a map placed before `rum/local` can run
+  ;; against state `rum/local`'s own hook has not built. `rum/reactive` changes
+  ;; nothing about that ordering; it is here for the reason the ordering select
+  ;; `f28-group-order-control` documents with the measurement that found it:
+  ;; every word this component draws goes through `t`, and `t` reads the
+  ;; interface language through `state/sub`, which degrades to a plain deref
+  ;; outside a reactive component. Without this mixin the language changed and
+  ;; the control's label stayed in the language it was first drawn in, until
+  ;; some unrelated re-render replaced it — the combined workflow's packaged run
+  ;; `C7.3` measured exactly that, on this component, beside a select that had
+  ;; already switched.
   (rum/local nil ::desc)
   {:init (fn [state _props]
            ;; ONE identity per MOUNTED OCCURRENCE. The same block can be drawn
@@ -7315,7 +7325,7 @@
      (when (and (pos? depth) (not complete?))
        [:div.f28-path-note.f28-path-incomplete (t :f28/path-not-complete)])]))
 
-(rum/defcs f28-source-path < (rum/local nil ::press) (rum/local nil ::refusal)
+(rum/defcs f28-source-path < rum/reactive (rum/local nil ::press) (rum/local nil ::refusal)
   "OG's breadcrumb for one linked-reference group, plus the source-path
   disclosure attached to the point where OG cut the path.
 
@@ -7328,6 +7338,14 @@
   this component must re-render whenever `breadcrumb-with-container` does, or
   the crumb would stop following the database — a regression in OG's own
   behaviour rather than a limit of this feature.
+
+  `rum/reactive`, same reason as `f28-child-context` and the ordering select:
+  the control's `aria-label`/`title` and every word the panel draws go through
+  `t`, which reads the interface language through `state/sub` — a plain deref
+  outside a reactive component, so without this mixin a language change leaves
+  this control's words in the language it was first drawn in. The combined
+  workflow's packaged run measured it beside a select that had already
+  switched.
 
   BOTH atoms belong to THIS group. `::press` is how far up this path has been
   read, and `::refusal` is the one step that was pressed and could not be
