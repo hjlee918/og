@@ -42,6 +42,7 @@ const PILOT_FILES = ['preflight.test.js', 'isolation.test.js', 'guards.test.js',
 const F28_FILES = ['feature-build.test.js', 'graph-fixture.test.js',
                    'refctx-fixture.test.js', 'refrole-source.test.js',
                    'reforder-source.test.js', 'reforder-fixture.test.js',
+                   'combined-fixture.test.js',
                    'browser-noise.test.js', 'packaged-app.test.js']
   .map((f) => path.join('f28-refpath', 'tests', f));
 
