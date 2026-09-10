@@ -91,8 +91,8 @@ test('the built application directory passes its own preflight', { skip: SKIP },
   assert.strictEqual(v.manifest.productName, ID.PRODUCT_NAME);
 });
 
-test('the guard entry files are the PILOT sources, byte for byte', { skip: SKIP }, () => {
-  for (const f of ['pilot-main.js', 'pilot-preflight.js', 'pilot-isolation.js', 'pilot-boundary.js']) {
+test('the isolation and boundary files remain the PILOT sources, byte for byte', { skip: SKIP }, () => {
+  for (const f of ['pilot-preflight.js', 'pilot-isolation.js', 'pilot-boundary.js']) {
     const a = fs.readFileSync(path.join(REPO, 'f27-pilot', 'src', f));
     const b = fs.readFileSync(path.join(STATIC, f));
     assert.strictEqual(sha256(a), sha256(b), `${f} must ship unchanged from the pilot source`);
@@ -150,4 +150,11 @@ test('experiment startup artifacts, identity and renderer provenance are verifie
   const forge = require(path.join(STATIC, 'forge.config.js'));
   assert.strictEqual(path.resolve(forge.outDir), path.resolve(REPO, '..', 'out-originexp'));
   assert.ok(!forge.packagerConfig.osxNotarize);
+});
+
+test('experiment startup files match the tested first-party sources', { skip: SKIP }, () => {
+  for (const [source, shipped] of [['experiment-main.js', 'pilot-main.js'], ['network-bootstrap.js', 'network-bootstrap.js']]) {
+    assert.strictEqual(sha256(fs.readFileSync(path.join(REPO,'f28-origin/src',source))), sha256(fs.readFileSync(path.join(STATIC,shipped))));
+    assert.ok(manifest().artifacts[shipped]);
+  }
 });

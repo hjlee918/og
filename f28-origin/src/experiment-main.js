@@ -79,6 +79,12 @@ function main() {
     return;
   }
 
+  if (!pre.manifest.artifacts['network-bootstrap.js']) {
+    fail('preflight', 'missing-network-control', 'Network bootstrap must be hash-verified');
+    exit(78);
+    return;
+  }
+
   // ---- stage 2: isolation, before OG's namespaces can read a path --------
   // Loaded only now: its bytes were just verified above.
   const isolation = require('./pilot-isolation.js');
