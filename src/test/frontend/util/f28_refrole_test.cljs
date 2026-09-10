@@ -163,6 +163,28 @@
     (is (= :direct (role/row-role {:ref-ids [anchor-id] :page-ids page-ids
                                    :content "no page name here at all"})))))
 
+(deftest the-name-a-page-is-registered-under-cannot-reach-the-role
+  (testing "the case the first packaged run failed on, at unit scale. The
+            fixture names its anchor page `맥락 대상 Context Anchor`; OG
+            registers it under `:block/name` \"맥락 대상 context anchor\" — the
+            `page-name-sanity-lc` mandate — and `data-refs-self` carries that
+            canonical form. A comparison against the display-case name
+            disagreed with every mention row on case alone. None of it can
+            reach the role, which reads ids, and a page is itself however its
+            name is cased"
+    (is (= :direct (role/row-role {:ref-ids [anchor-id] :page-ids page-ids}))))
+  (testing "and a genuinely different page — the fixture's filter page, whose
+            canonical name shares nothing with the anchor's — is context on
+            THIS page's list, however many of its rows name it"
+    (let [filter-page-id 300
+          an-unrelated-page-id 301]
+      (is (= :context (role/row-role {:ref-ids [filter-page-id]
+                                      :page-ids page-ids})))
+      (is (= :context (role/row-role {:ref-ids [filter-page-id
+                                                an-unrelated-page-id]
+                                      :page-ids page-ids})))
+      (is (false? (role/direct-mention? [filter-page-id] page-ids))))))
+
 ;; ---------------------------------------------------------------------------
 ;; What the label says
 ;; ---------------------------------------------------------------------------

@@ -214,6 +214,89 @@ test('the label follows the interface language', () => {
   assert.match(cp, /\(t text-key\)/, 'and so must the word');
 });
 
+// --- the packaged comparison's page identity --------------------------------
+//
+// The check script is part of this slice's source too, and it is where the
+// first packaged run's one defect lived: `data-refs-self` carries `:block/name`
+// — the identity OG's own `page-name-sanity-lc` mandate stores a page under,
+// lower-cased — and the check compared it against the fixture's display-case
+// name, so all 11 mention rows disagreed on case alone. Nothing here launches
+// an application or touches a graph; this pins the SHAPE of the comparison so
+// it cannot quietly regress to case-folding the fixture's string.
+
+test('the packaged run compares against the page\'s canonical identity, read live', () => {
+  const checks = read(path.join(REPO, 'f28-refpath', 'checks', 'refrole-feature-checks.js'));
+  assert.match(checks, /safe_page_name_sanity_lc/,
+    'the comparison must use OG\'s own name mandate, live from the application');
+  assert.match(checks, /logseq && window\.logseq\.api/,
+    'and OG\'s own page API, for the cross-check');
+  assert.match(checks, /includes\(canonical\)/,
+    'the disagreement filter must compare against the canonical name');
+  assert.match(checks, /originalName === RG\.ANCHOR/,
+    'the live page\'s original name must be cross-checked against the fixture, ' +
+    'so a case-folded guess cannot pass');
+  assert.ok(!/includes\(RG\.ANCHOR\)/.test(checks),
+    'the display-case fixture name must not be what `data-refs-self` is ' +
+    'compared against');
+});
+
+test('the packaged run exercises the normalization case and a genuinely different page', () => {
+  const checks = read(path.join(REPO, 'f28-refpath', 'checks', 'refrole-feature-checks.js'));
+  assert.match(checks, /canonical !== RG\.ANCHOR/,
+    'the fixture\'s display case must genuinely differ from its canonical name, ' +
+    'or the comparison proves nothing');
+  assert.match(checks, /FILTER_TAG/,
+    'and a genuinely different page must be read and distinguished');
+  assert.match(checks, /filterRows\.every\(\(r\) => r\.role === 'context'\)/,
+    'rows naming that different page must be asserted context');
+});
+
+// --- the packaged run's filter phase ----------------------------------------
+//
+// The two earlier runs of the packaged filter phase each taught one lesson,
+// pinned here so the tooling cannot quietly regress to either mistake:
+// run 3 dispatched a synthetic click that never happened (its `page.evaluate`
+// passed two arguments where Playwright accepts exactly one), and run 4 read
+// the section 2.5s after the click without settling — measuring whichever of
+// OG's lazily-rendered page-items happened to be in view, a heading of
+// "4 of 10" over 23 of the 26 rows the filter kept.
+
+test('the packaged run drives OG\'s filter with a real click carrying the modifier', () => {
+  const checks = read(path.join(REPO, 'f28-refpath', 'checks', 'refrole-feature-checks.js'));
+  assert.match(checks, /modifiers: exclude \? \['Shift'\] : \[\]/,
+    'include and exclude differ only by the shift modifier a user holds; ' +
+    'OG\'s own handler reads it off the event');
+  assert.ok(!/new MouseEvent/.test(checks),
+    'a dispatched synthetic click is not the user\'s interaction, and run 3\'s ' +
+    'two-argument evaluate never delivered one at all');
+});
+
+test('the packaged run settles before reading the list under a filter', () => {
+  const checks = read(path.join(REPO, 'f28-refpath', 'checks', 'refrole-feature-checks.js'));
+  assert.match(checks, /settle\('under the exclude filter'\)/,
+    'the exclude reading must settle, like every other reading in the scenario');
+  assert.match(checks, /settle\('under the include filter'\)/,
+    'and so must the include reading');
+});
+
+test('the packaged run records the drawn rows under filters and asserts only what the labels own', () => {
+  const checks = read(path.join(REPO, 'f28-refpath', 'checks', 'refrole-feature-checks.js'));
+  // The evidence carries every drawn row and the item/group structure under
+  // both filter states: which kept rows OG draws is a fact to record — the
+  // earlier runs measured it to be a subset of what the filter kept — and
+  // not something this feature promises.
+  assert.strictEqual((checks.match(/rowsDrawn: /g) || []).length, 2,
+    'both filter observations must record the rows actually drawn');
+  // The heading is the derived filtered count, asserted in full rather than
+  // `includes`-ed as a fragment.
+  assert.match(checks,
+    /excl\.heading === `\$\{DIRECT\.length - chosenDirectCount\} of \$\{DIRECT\.length\} Linked References`/,
+    'the exclude heading must be the filtered count the fixture derives');
+  assert.match(checks,
+    /incl\.heading === `\$\{chosenDirectCount\} of \$\{DIRECT\.length\} Linked References`/,
+    'and so must the include heading');
+});
+
 // --- inherited surface rules ------------------------------------------------
 
 test('the surface rules are the source-path slice\'s, delegated rather than restated', () => {

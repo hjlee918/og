@@ -32,13 +32,17 @@
 // BEFORE any feature interaction. This run writes nothing to the graph and
 // proves it by comparing every file's hash after the application has closed.
 //
-// ONE THING THIS RUN DELIBERATELY DOES NOT DO. It does not APPLY a linked-
-// references filter. `page-handler/save-filter!` persists the choice as a
-// `filters::` property in the page FILE, which is a graph write, and this run
-// must make none. The filter's dialog is opened and dismissed — a real redraw
-// of the section — and the role assignment is compared across it. Include and
-// exclude semantics themselves are unexercised here and are recorded as a limit
-// rather than implied.
+// THE FILTER, APPLIED — AND ITS WRITE, KEPT SEPARATE. The first run of this
+// scenario only opened and dismissed the filter dialog, which redraws the
+// section but proves nothing about roles UNDER a filter. This run applies both
+// semantics, exclude first and then include, on THIS RUN'S OWN fresh synthetic
+// graph (P1.1) — the only data any part of it may touch. Applying a filter
+// makes OG's own `page-handler/save-filter!` persist the choice as a
+// `filters::` property in the anchor page's FILE. That is OG's normal filter
+// behaviour acting at this run's explicit request, NOT a write by the labels,
+// which read only. It is therefore recorded in full (P12.6, P12.7) and kept out
+// of the labels' read-only claim (P12.1): the feature's own proof remains that
+// nothing else changed anywhere in the graph.
 //
 const fs = require('fs');
 const path = require('path');
@@ -89,6 +93,16 @@ function phase(name, operation) {
 async function main() {
   fs.mkdirSync(EVIDENCE, { recursive: true });
   say('\n=== F28 reference roles: which rows are mentions, and which are their surroundings ===\n');
+
+  // The filter phase (P13) runs inside the try below; its write is accounted
+  // for after the application has closed (P12.6, P12.7), so what it chose and
+  // the page file it is about travel out here.
+  const filterAccounting = {
+    anchorFile: `pages/${RG.ANCHOR}.md`,
+    anchorBefore: null,
+    page: null,
+    directCount: null,
+  };
 
   // ---------- P0 : preconditions ----------
   say('P0  preconditions');
@@ -357,14 +371,53 @@ async function main() {
       `${contextIds.size} distinct context block(s); ` +
       `overlap ${JSON.stringify([...contextIds].filter((id) => DIRECT_IDS.has(id)))}`);
     // The visible label and OG's own invisible marker must agree. `data-refs-self`
-    // holds the page names this block itself refs, which is the same fact.
-    const disagree = refs.rows.filter((r) =>
-      (r.role === 'direct') !== ((r.refsSelf || '').includes(RG.ANCHOR)));
+    // holds the page names this block itself refs — and `build-refs-data-value`
+    // reads them through `get-page-names-by-ids`, which pulls `:block/name`: the
+    // identity OG's own mandate (`page-name-sanity-lc`, lower-cased and sanitized)
+    // stores a page under, NOT the display case the fixture names it in. The
+    // first packaged run compared against the display-case name and disagreed
+    // with all 11 mention rows on case alone. The identity is therefore read
+    // LIVE from the application and cross-checked rather than case-folded here:
+    // OG's own API must return a real page whose original name is the fixture's,
+    // and OG's own mandate function applied to that display name must be the
+    // name that page is stored under. If the two do not agree, the check fails
+    // rather than guessing a case.
+    const readPageIdentity = (display) => page.evaluate((name) => {
+      const out = { apiPage: null, apiError: null, canonical: null, mandateError: null };
+      try {
+        const api = window.logseq && window.logseq.api;
+        const p = api && typeof api.get_page === 'function' ? api.get_page(name) : null;
+        out.apiPage = p ? { name: p.name || null, originalName: p.originalName || null }
+                       : null;
+      } catch (e) { out.apiError = String(e && e.message); }
+      try {
+        // The same mandate function `db.model/get-page` looks a page up with,
+        // live in the packaged renderer: `frontend.util/safe-page-name-sanity-lc`.
+        const f = window.frontend && window.frontend.util &&
+                  window.frontend.util.safe_page_name_sanity_lc;
+        out.canonical = typeof f === 'function' ? f(name) : null;
+      } catch (e) { out.mandateError = String(e && e.message); }
+      return out;
+    }, display).catch((e) => ({ apiPage: null, apiError: String(e && e.message),
+                                canonical: null, mandateError: null }));
+    const anchorIdentity = await readPageIdentity(RG.ANCHOR);
+    observations.anchorIdentity = anchorIdentity;
+    const canonical = anchorIdentity.canonical;
+    const identityHolds = canonical !== null && anchorIdentity.apiPage !== null &&
+      anchorIdentity.apiPage.name === canonical &&
+      anchorIdentity.apiPage.originalName === RG.ANCHOR;
+    const disagree = identityHolds ? refs.rows.filter((r) =>
+      (r.role === 'direct') !== ((r.refsSelf || '').includes(canonical))) : [];
     record('P5.5', 'the visible label agrees with OG\'s own invisible `data-refs-self`',
-      disagree.length === 0,
-      disagree.length ? JSON.stringify(disagree.slice(0, 4).map((r) =>
-        ({ role: r.role, refsSelf: r.refsSelf, text: r.text.slice(0, 30) })))
-        : `${refs.rows.length} row(s) agree`);
+      identityHolds && disagree.length === 0,
+      () => identityHolds
+        ? (disagree.length
+            ? JSON.stringify(disagree.slice(0, 4).map((r) =>
+                ({ role: r.role, refsSelf: r.refsSelf, text: r.text.slice(0, 30) })))
+            : `${refs.rows.length} row(s) agree, against the page's canonical name ` +
+              `"${canonical}", read live from the application`)
+        : `the page's identity could not be established live: ` +
+          JSON.stringify(anchorIdentity));
     record('P5.6', 'a context row is not merely an unlabelled one: it says what it is',
       context.length > 0 && context.every((r) => r.roleText && r.roleText.length > 0) &&
       direct.every((r) => r.roleText && r.roleText.length > 0) &&
@@ -376,6 +429,37 @@ async function main() {
       direct.every((r) => /mentions this page/i.test(r.roleTitle)) &&
       context.every((r) => /does not mention this page/i.test(r.roleTitle)),
       `mention: "${(direct[0] || {}).roleTitle}" | context: "${(context[0] || {}).roleTitle}"`);
+    // The regression for the case the first packaged run failed on, and for the
+    // page that must NOT match:
+    //   * the NORMALIZATION case is genuinely exercised — the fixture names the
+    //     anchor page in display case, so the canonical name really differs
+    //     from the display name, and every mention row's `data-refs-self`
+    //     carries the canonical form. If the fixture is ever renamed so the
+    //     two stop differing, this comparison stops proving anything and the
+    //     check says so instead of passing quietly;
+    //   * a GENUINELY DIFFERENT page — the fixture's filter page, which one
+    //     context row names — must not turn its row into a mention of THIS
+    //     page. That row is context, its `data-refs-self` names the filter
+    //     page, and the filter page is a real, distinct page in its own right,
+    //     verified by the same live identity read.
+    const filterIdentity = await readPageIdentity(RG.FILTER_TAG);
+    observations.filterPageIdentity = filterIdentity;
+    const filterCanonical = filterIdentity.canonical;
+    const filterRows = identityHolds && filterCanonical !== null &&
+                       filterCanonical !== canonical
+      ? refs.rows.filter((r) => (r.refsSelf || '').includes(filterCanonical)) : [];
+    record('P5.8', 'the identity the comparison used is the page\'s real one, and a genuinely ' +
+      'different page does not match it',
+      identityHolds && canonical !== RG.ANCHOR && filterCanonical !== null &&
+      filterCanonical !== canonical &&
+      filterIdentity.apiPage !== null && filterIdentity.apiPage.name === filterCanonical &&
+      filterIdentity.apiPage.originalName === RG.FILTER_TAG &&
+      filterRows.length >= 1 &&
+      filterRows.every((r) => r.role === 'context') &&
+      filterRows.every((r) => !(r.refsSelf || '').includes(canonical)),
+      () => `canonical "${canonical}" ≠ display "${RG.ANCHOR}"; ` +
+        `the different page "${filterCanonical}" is real and distinct, named by ` +
+        `${filterRows.length} row(s), all labelled context`);
 
     // ---------- P6 : a child that ALSO mentions the page ----------
     say('\nP6  a child that also mentions the page is never called context-only');
@@ -512,8 +596,9 @@ async function main() {
     await compare('P8.4', 'and OG\'s fold put back leaves the section exactly as it was',
                   'OG\'s own fold control');
 
-    // (c) the filter dialog — a real redraw, with nothing applied and nothing
-    //     written. See the header for why no filter is applied.
+    // (c) the filter dialog — a real redraw, with nothing applied yet and
+    //     nothing written. The filter APPLIED, and its write, are P13 and
+    //     P12.6/P12.7; this redraw happens while the page still has no filter.
     phase('roles', 'open-and-dismiss-the-filter-dialog');
     await page.locator('a.filter').first().click({ timeout: 15000 }).catch(() => null);
     await sleep(2500);
@@ -653,6 +738,257 @@ async function main() {
     const controlNow = RG.readPage(GRAPH, RG.CONTROL_FILE);
     record('P11.1', 'the control page is byte-identical while the application is still open',
       controlNow === controlBefore, `${controlNow.length} bytes`);
+
+    // ---------- P13 : the filter, APPLIED ----------
+    // Roles under a filter that really removes rows. The graph this run works
+    // on is its own fresh synthetic one, so OG's own `save-filter!` write lands
+    // only on data this run generated. Both semantics are exercised — exclude
+    // first, then include — and every still-drawn row must carry the same role
+    // it carried unfiltered, because the role is the BLOCK's and the filter
+    // only changes WHICH rows are drawn. See the header for how the write is
+    // kept separate from the labels' read-only claim.
+    //
+    // What the two earlier runs of this phase taught, and what this phase
+    // therefore does differently:
+    //
+    //   * The click is a REAL one with the keyboard modifier held, because
+    //     OG's own handler reads the event's shiftKey. Run 3 dispatched a
+    //     synthetic event through `page.evaluate` with TWO arguments —
+    //     Playwright's evaluate takes exactly one — so nothing was ever
+    //     clicked, and "NOT clicked" looked exactly like "filter did not
+    //     apply". A real click cannot be mis-issued that way.
+    //
+    //   * The reading SETTLES, like every other reading in this scenario.
+    //     OG renders each source page's item of this list behind a
+    //     viewport observer (`ui/lazy-visible`), and applying a filter
+    //     remounts those items as placeholders until they are scrolled
+    //     past. Run 4 read 2.5s after the click without scrolling, and
+    //     measured whichever items happened to be in view: a heading of
+    //     "4 of 10" with only 23 of the 26 rows the filter kept. The
+    //     heading counts the kept mentions correctly — it is `filter-n`,
+    //     derived from `:block/path-refs`, and both runs agreed with the
+    //     fixture's arithmetic — but a reading that has not settled says
+    //     nothing about what is drawn.
+    //
+    //   * What is ASSERTED is what the labels own: every drawn row keeps its
+    //     unfiltered role, and the heading counts the filtered set the
+    //     fixture says it must (10 mentions minus the 6 living on the
+    //     excluded page; 6 under the include). OG's own choice of WHICH
+    //     kept rows to draw is recorded in the evidence — every drawn row,
+    //     and the item/group structure — but not asserted, because it is
+    //     OG's drawing and not this feature's claim.
+    say('\nP13 the filter APPLIED: roles under a filter that really removes rows');
+    filterAccounting.anchorBefore = RG.readPage(GRAPH, filterAccounting.anchorFile);
+    // The right sidebar is still open from P10 and carries its own unlabelled
+    // copy of this list; close it with OG's own control so every reading below
+    // is of the main area's list, then return to the anchor page.
+    await page.evaluate(() => {
+      const st = window.frontend && window.frontend.state;
+      if (st && typeof st.hide_right_sidebar_BANG_ === 'function') st.hide_right_sidebar_BANG_();
+    }).catch(() => null);
+    await goTo(RG.ANCHOR);
+    await settle('back on the anchor page');
+    // The source page to filter on, read out of the unfiltered section rather
+    // than assumed: the group with the most direct mentions.
+    const groupDirect = refs.items.map((item) => ({
+      page: item.page,
+      rows: new Set(item.groups.flatMap((gp) => gp.ids)),
+      direct: [...new Set(item.groups.flatMap((gp) => gp.ids)
+        .filter((id) => DIRECT_IDS.has(id)))],
+    }));
+    const chosen = groupDirect.reduce((a, b) => (b.direct.length > a.direct.length ? b : a));
+    const chosenIds = new Set(chosen.rows);
+    const chosenDirectIds = new Set(chosen.direct);
+    const chosenDirectCount = chosen.direct.length;
+    filterAccounting.page = chosen.page;
+    filterAccounting.directCount = chosenDirectCount;
+
+    // Every step of the filter interaction is recorded, because the first
+    // attempt of this phase taught exactly that lesson: a swallowed click is
+    // indistinguishable from a filter that did not apply. `openFilter` records
+    // whether the section's own filter control was there to be clicked and
+    // whether OG's modal opened; `clickFilterButton` records which button the
+    // dialog offered, whether the click reached it, and — the only thing that
+    // counts — whether the section actually changed.
+    const filterDiagnostics = [];
+    const dialogState = () => page.evaluate(() => {
+      const m = document.querySelector('.ls-filters, .filters');
+      if (!m) return { open: false };
+      const buttons = [...m.querySelectorAll('button')]
+        .map((b) => (b.innerText || '').trim()).filter(Boolean);
+      return { open: true, buttons: buttons.slice(0, 12) };
+    }).catch((e) => ({ open: false, error: String(e && e.message) }));
+    const headingNow = () => page.evaluate(() => {
+      const sec = document.querySelector('#main-content-container .references.page-linked');
+      const h = sec && sec.querySelector('h2');
+      return h ? (h.innerText || '').trim() : null;
+    }).catch(() => null);
+    const openFilter = async () => {
+      const diag = { step: 'open', aFilter: await page.locator('a.filter').count()
+        .catch(() => -1), clickError: null, dialog: null };
+      try {
+        await page.locator('a.filter').first().click({ timeout: 15000 });
+      } catch (e) {
+        diag.clickError = String(e && e.message).split('\n')[0].slice(0, 220);
+      }
+      await sleep(2500);
+      diag.dialog = await dialogState();
+      filterDiagnostics.push(diag);
+      return diag;
+    };
+    // OG's own on-click handler decides include from exclude by reading the
+    // event's shiftKey, so the click is a real one with the keyboard modifier
+    // held — the interaction a user actually has. Run 3 of this phase
+    // dispatched a synthetic event instead, and its `page.evaluate` call
+    // passed two arguments where Playwright accepts exactly one, so the
+    // click never happened at all; a swallowed click is indistinguishable
+    // from a filter that did not apply. The click is only trusted once its
+    // EFFECT is visible in the section: the heading must change.
+    const clickFilterButton = async (pageName, exclude, headingBefore) => {
+      const diag = { step: exclude ? 'exclude' : 'toggle', clicked: false,
+                     applied: false, method: null, clickError: null,
+                     headingAfter: null, dialog: null };
+      try {
+        await page.locator('.ls-filters button', { hasText: pageName }).first()
+          .click({ timeout: 8000, modifiers: exclude ? ['Shift'] : [] });
+        diag.clicked = true;
+      } catch (e) {
+        diag.clickError = String(e && e.message).split('\n')[0].slice(0, 220);
+      }
+      let after = null;
+      for (let i = 0; i < 5 && !diag.applied; i++) {
+        await sleep(1200);
+        after = await headingNow();
+        diag.applied = after !== null && after !== headingBefore;
+      }
+      if (diag.applied) { diag.method = 'real-click'; diag.headingAfter = after; }
+      diag.dialog = await dialogState();
+      filterDiagnostics.push(diag);
+      return diag;
+    };
+    // A comparable role assignment over whichever rows are drawn now.
+    const rolesOf = (r) => new Map(r.rows.map((x) => [x.id, x.role]));
+    const unfilteredRoles = rolesOf(refs);
+    const everyDrawnRowAgrees = (r) => r.rows.every((x) =>
+      unfilteredRoles.get(x.id) === x.role);
+
+    // (a) EXCLUDE the chosen page: its mentions leave the list.
+    phase('filtering', 'apply-an-exclude-filter');
+    await openFilter();
+    const excludeClicked = await clickFilterButton(chosen.page, true, refs.heading);
+    await page.keyboard.press('Escape').catch(() => null);
+    // Settle — scroll the section into being — before reading, for the same
+    // reason every other reading settles: OG renders this list's page-items
+    // only once the viewport has reached them.
+    await settle('under the exclude filter');
+    const excl = await read();
+    observations.filterExclude = excl.present ? {
+      heading: excl.heading,
+      rows: excl.rows.length,
+      labels: excl.labels,
+      rowIds: [...new Set(excl.rows.map((x) => x.id))],
+      rowsDrawn: excl.rows.map((x) => ({ id: x.id, parent: x.parent, role: x.role })),
+      items: excl.items,
+      removedDirectIds: [...chosenDirectIds].filter((id) =>
+        !excl.rows.some((x) => x.id === id)),
+    } : excl;
+    record('P13.1', 'excluding a source page really removes its rows from the list',
+      excludeClicked.applied && excl.present &&
+      chosenDirectIds.size > 0 &&
+      [...chosenDirectIds].every((id) => !excl.rows.some((x) => x.id === id)) &&
+      [...new Set(excl.rows.map((x) => x.id))].every((id) => !chosenIds.has(id)),
+      () => `${excludeClicked.applied ? 'applied' : 'did NOT apply'} the exclude of ` +
+        `"${chosen.page}" (${excludeClicked.method || 'no method reached OG'}); ` +
+        `${chosenDirectIds.size} mention(s) and ${chosenIds.size} row(s) of that page ` +
+        `gone, ${excl.rows.length} row(s) drawn`);
+    // The heading is `filter-n`, counted by OG over `:block/path-refs` — the
+    // same identity the labels read. The fixture says what it must be: every
+    // mention of the anchor EXCEPT the ones living on the excluded page.
+    record('P13.2', 'and the heading now counts the filtered set, not the whole list',
+      excl.present &&
+      excl.heading === `${DIRECT.length - chosenDirectCount} of ${DIRECT.length} Linked References`,
+      () => `"${excl.heading}" (was "${refs.heading}"); ${DIRECT.length} mention(s) ` +
+        `minus the ${chosenDirectCount} that live on "${chosen.page}"`);
+    record('P13.3', 'every row still drawn keeps the role it had unfiltered',
+      excl.present && excl.rows.length > 0 &&
+      excl.rows.every((x) => x.labels === 1) &&
+      excl.rows.every((x) => x.role === 'direct' || x.role === 'context') &&
+      everyDrawnRowAgrees(excl),
+      () => `${excl.rows.length} row(s) drawn under the exclude, ` +
+        `${excl.rows.filter((x) => !unfilteredRoles.get(x.id) || unfilteredRoles.get(x.id) !== x.role).length} ` +
+        `of them reassigned`);
+
+    // (b) INCLUDE the chosen page: only its rows remain. The exclude is
+    // removed first (OG's own toggle: the second click dissocs), then the same
+    // button is clicked without shift to include.
+    phase('filtering', 'remove-the-exclude-then-apply-an-include-filter');
+    await openFilter();
+    const headingBeforeRemove = await headingNow();
+    const removeClicked = await clickFilterButton(chosen.page, false, headingBeforeRemove);
+    const headingBeforeInclude = await headingNow();
+    const includeClicked = await clickFilterButton(chosen.page, false, headingBeforeInclude);
+    await page.keyboard.press('Escape').catch(() => null);
+    await settle('under the include filter');
+    const incl = await read();
+    observations.filterInclude = incl.present ? {
+      heading: incl.heading,
+      rows: incl.rows.length,
+      labels: incl.labels,
+      rowIds: [...new Set(incl.rows.map((x) => x.id))],
+      rowsDrawn: incl.rows.map((x) => ({ id: x.id, parent: x.parent, role: x.role })),
+      items: incl.items,
+      directDrawn: [...new Set(incl.rows.filter((x) => x.role === 'direct').map((x) => x.id))],
+    } : incl;
+    // What is asserted here is the FEATURE's claim under an include: every
+    // row still drawn belongs to the included page, every row still drawn
+    // that is a mention is one of THAT page's mentions, at least one of its
+    // mentions is drawn, and the heading counts exactly its mentions. Which
+    // of the kept rows OG chooses to draw is recorded above — it is OG's
+    // drawing, measured in the earlier runs to be a subset, and not this
+    // feature's to promise.
+    record('P13.4', 'including one source page keeps only that page\'s rows',
+      removeClicked.applied && includeClicked.applied && incl.present &&
+      incl.rows.length > 0 &&
+      [...new Set(incl.rows.map((x) => x.id))].every((id) => chosenIds.has(id)) &&
+      incl.rows.filter((x) => x.role === 'direct')
+        .every((x) => chosenDirectIds.has(x.id)) &&
+      [...chosenDirectIds].some((id) => incl.rows.some((x) => x.id === id)) &&
+      incl.heading === `${chosenDirectCount} of ${DIRECT.length} Linked References`,
+      () => `${removeClicked.applied ? 'removed the exclude' : 'did NOT remove the exclude'} ` +
+        `(${removeClicked.method || 'no method'}), ` +
+        `${includeClicked.applied ? 'applied the include' : 'did NOT apply the include'} ` +
+        `(${includeClicked.method || 'no method'}); ` +
+        `${incl.rows.length} row(s) drawn, all from "${chosen.page}", ` +
+        `${new Set(incl.rows.filter((x) => x.role === 'direct').map((x) => x.id)).size} ` +
+        `of its ${chosenDirectCount} mention(s) drawn, heading "${incl.heading}"`);
+    record('P13.5', 'under the include too, the heading counts the filtered set and no row is reassigned',
+      incl.present &&
+      incl.heading === `${chosenDirectCount} of ${DIRECT.length} Linked References` &&
+      incl.rows.every((x) => x.labels === 1) &&
+      incl.rows.every((x) => x.role === 'direct' || x.role === 'context') &&
+      everyDrawnRowAgrees(incl),
+      () => `"${incl.heading}", ${incl.rows.length} row(s) drawn, ` +
+        `${new Set(incl.rows.filter((x) => x.role === 'direct').map((x) => x.id)).size} ` +
+        `distinct mention(s) of the page, ` +
+        `${incl.rows.filter((x) => !unfilteredRoles.get(x.id) || unfilteredRoles.get(x.id) !== x.role).length} reassigned`);
+    // What the application says it persisted, live — read through OG's own
+    // page API, recorded as an observation; the FILE is checked after close.
+    const liveState = await page.evaluate((display) => {
+      const out = { filters: null, error: null };
+      try {
+        const api = window.logseq && window.logseq.api;
+        const p = api && typeof api.get_page === 'function' ? api.get_page(display) : null;
+        out.filters = p && p.properties ? p.properties.filters : null;
+      } catch (e) { out.error = String(e && e.message); }
+      return out;
+    }, RG.ANCHOR).catch((e) => ({ filters: null, error: String(e && e.message) }));
+    observations.filterLiveState = liveState;
+    observations.filterClicks = filterDiagnostics;
+    record('P13.6', 'the application reports the include as the page\'s own filter property',
+      liveState.filters !== null && liveState.filters !== undefined &&
+      JSON.stringify(liveState.filters).includes(chosen.page.toLowerCase()),
+      () => `get_page(...).properties.filters = ${JSON.stringify(liveState.filters)}` +
+        (liveState.error ? ` (error: ${liveState.error})` : ''));
   } finally {
     errorEvidence = await session.collectErrorEvidence();
     await APP.close(session, { say });
@@ -662,15 +998,45 @@ async function main() {
   say('\nP12 the graph, after the application has closed');
   const after = GH.snapshot(GRAPH);
   const cmp = GH.compare(before, after);
-  record('P12.1', 'no content file changed: this feature only reads the graph',
-    cmp.content.length === 0,
-    cmp.content.length ? JSON.stringify(cmp.content.map((c) => `${c.change} ${c.file}`))
-                       : `0 content changes across ${cmp.afterCount} files`);
+  // The one write this run asked OG for: the filter property in the anchor
+  // page's own file (P13). Everything else must be unchanged — that, and not
+  // the absence of the recorded write, is the labels' read-only claim.
+  const filterWrite = cmp.content.filter((c) =>
+    c.file === filterAccounting.anchorFile && c.change === 'modified');
+  const otherContent = cmp.content.filter((c) => !filterWrite.includes(c));
+  record('P12.1', 'nothing changed except the one filter write this run asked OG for; the labels only read',
+    otherContent.length === 0 && filterWrite.length === 1,
+    otherContent.length
+      ? JSON.stringify(otherContent.map((c) => `${c.change} ${c.file}`))
+      : `${filterWrite.length} filter write(s) to ${filterAccounting.anchorFile} ` +
+        `(recorded under P12.6 and P12.7); 0 other content changes across ` +
+        `${cmp.afterCount} files`);
   record('P12.2', 'OG housekeeping is recorded separately rather than counted as content', true,
     cmp.housekeeping.length
       ? `${cmp.housekeeping.length}: ` +
         cmp.housekeeping.map((c) => `${c.change} ${c.file}`).slice(0, 6).join('; ')
       : 'none');
+
+  // ---------- the filter's write, recorded in full ----------
+  say('\nP12 the filter\'s own write, recorded in full and kept separate');
+  const anchorAfter = RG.readPage(GRAPH, filterAccounting.anchorFile);
+  const beforeLines = (filterAccounting.anchorBefore || '').split('\n');
+  const afterLines = anchorAfter.split('\n');
+  const added = afterLines.filter((l) => !beforeLines.includes(l));
+  const gone = beforeLines.filter((l) => !afterLines.includes(l));
+  const filterLine = added.find((l) => l.includes('filters::')) || null;
+  record('P12.6', 'the filter write is exactly `filters::` property line(s) in the anchor page, and ' +
+    'nothing the page said before was lost',
+    filterWrite.length === 1 && added.length >= 1 &&
+    added.every((l) => l.includes('filters::')) &&
+    gone.every((l) => afterLines.some((a) => a.trim() === l.trim())),
+    () => `added ${JSON.stringify(added)}, removed ${JSON.stringify(gone)}`);
+  record('P12.7', 'and the property names the included page with a true value, as OG wrote it',
+    !!filterLine && filterLine.includes(filterAccounting.page.toLowerCase()) &&
+    /true/.test(filterLine),
+    () => `filters line: ${JSON.stringify(filterLine)}` +
+      (filterLine ? '' : ` (page "${filterAccounting.page}", ` +
+        `${filterAccounting.directCount} mention(s))`));
 
   const cls = EC.summarise(errors.entries(),
     { outsidePath: BAD, graphPath: GRAPH, phases: errors.phases() });
@@ -696,7 +1062,9 @@ async function main() {
     unexpected: split.remaining.map((e) => ({ seq: e.seq, phase: e.phase, text: e.text })),
     ruleAccounting: split.evidence,
   };
-  const featurePhases = ['roles'];
+  // The filtering phases operate this feature's surface too — a window error
+  // while applying a filter is as much a finding as one while folding.
+  const featurePhases = ['roles', 'filtering'];
   const inFeature = split.remaining.filter((e) => featurePhases.includes(e.phase));
   record('P12.3', 'no window error arrived in any phase that operated this feature',
     inFeature.length === 0,
