@@ -698,7 +698,17 @@
   (state/set-state! :plugin/indicator-text "LOADING")
 
   (-> (p/let [root            (get-ls-dotdir-root)
-              _               (.setupPluginCore js/LSPlugin (bean/->js {:localUserConfigRoot root :dotConfigRoot root}))
+              ;; A renderer served from the privileged `lsp:` scheme CANNOT load
+              ;; a `file://` sandbox child, so plugin resources must resolve
+              ;; through `lsp://logseq.io/` too. Deriving it from the renderer's
+              ;; own protocol is what keeps the two halves of the origin
+              ;; experiment from ever being enabled independently: an ordinary
+              ;; `file://` renderer passes false and behaves exactly as before.
+              privileged?     (= "lsp:" js/location.protocol)
+              _               (.setupPluginCore js/LSPlugin
+                                                (bean/->js {:localUserConfigRoot root
+                                                            :dotConfigRoot root
+                                                            :privilegedPluginResources privileged?}))
 
               clear-commands! (fn [pid]
                                 ;; commands

@@ -102,7 +102,7 @@
     publishing?
     path
 
-    (util/file-protocol?)
+    (util/bundled-origin?)
     (string/replace path "/static/" "./")
 
     :else

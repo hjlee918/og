@@ -2,6 +2,7 @@
   (:require ["electron-window-state" :as windowStateKeeper]
             [electron.utils :refer [mac? win32? linux? dev? open] :as utils]
             [electron.configs :as cfgs]
+            [electron.origin-experiment :as origin-exp]
             [electron.context-menu :as context-menu]
             [electron.logger :as logger]
             ["electron" :refer [BrowserWindow app session shell] :as electron]
@@ -14,10 +15,14 @@
 
 (defonce *quitting? (atom false))
 
-(def MAIN_WINDOW_ENTRY (if dev?
-                         ;"http://localhost:3001"
-                         (str "file://" (node-path/join js/__dirname "index.html"))
-                         (str "file://" (node-path/join js/__dirname "electron.html"))))
+;"http://localhost:3001"
+;; Ordinary builds keep the historical `file://` entry unchanged. Under the
+;; ORIGIN EXPERIMENT the SAME document is served from `lsp://logseq.com/`
+;; instead, because a `file://` renderer cannot be replied to by a plugin
+;; sandbox at all under Chromium 146. See electron.origin-experiment.
+(def MAIN_WINDOW_ENTRY
+  (origin-exp/main-window-entry
+   (fn [page] (str "file://" (node-path/join js/__dirname page)))))
 
 (defn create-main-window!
   ([]
@@ -143,10 +148,13 @@
                         (utils/safe-decode-uri-component url) url)
                   url (if-not win32? (string/replace url "file://" "") url)]
               (logger/info "new-window" url)
-              (if (some #(string/includes?
-                          (.normalize node-path url)
-                          (.join node-path (. app getAppPath) %))
-                        ["index.html" "electron.html"])
+              (if (or
+                   ;; the application's own entry, served over its own scheme
+                   (string/starts-with? url origin-exp/APP_URL)
+                   (some #(string/includes?
+                           (.normalize node-path url)
+                           (.join node-path (. app getAppPath) %))
+                         ["index.html" "electron.html"]))
                 (logger/info "pass-window" url)
                 (open-default-app! url open))))
 

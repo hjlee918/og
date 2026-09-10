@@ -15,6 +15,7 @@
             [electron.configs :as cfgs]
             [electron.fs-watcher :as fs-watcher]
             ["path" :as node-path]
+            ["fs" :as fs]
             ["electron" :refer [BrowserWindow Menu app protocol ipcMain dialog shell] :as electron]
             ["electron-deeplink" :refer [Deeplink]]
             [electron.state :as state]
@@ -60,6 +61,56 @@
     (when (= (str LSP_SCHEME ":") (.-protocol parsed-url))
       (logseq-url-handler win parsed-url))))
 
+;; ---------------------------------------------------------------------------
+;; `lsp://` RESOLUTION.
+;;
+;; The scheme is registered standard + secure, so under the ORIGIN EXPERIMENT it
+;; is the application's OWN origin as well as the plugin origin. That makes two
+;; properties load-bearing rather than incidental, and the previous version had
+;; neither:
+;;
+;;   * HOST IS AUTHORITATIVE. It routed on `startsWith(url, PLUGIN_URL)` and
+;;     fell through to the application root for EVERY other host, so
+;;     `lsp://anything/...` served from `__dirname`. Hosts are now allow-listed
+;;     and an unknown host is refused.
+;;   * CONTAINMENT IS CHECKED. It `path.join`ed a percent-DECODED pathname onto
+;;     the root, so `%2e%2e%2f` arrived as `../` and walked straight out. The
+;;     decoded path is now re-rooted, resolved and canonically contained.
+;;
+;; The two hosts stay distinct on purpose: `logseq.com` is the application and
+;; `logseq.io` is plugin packages, so the application and plugin origins remain
+;; separate and mutually cross-origin.
+(def ^:private LSP_HOSTS {"logseq.com" :app "logseq.io" :plugins})
+
+(defn- path-contained?
+  [child parent]
+  (and (string? child) (string? parent)
+       (or (= child parent)
+           (string/starts-with? child (str parent (.-sep node-path))))))
+
+(defn- resolve-lsp-file
+  "Map an `lsp://` URL onto a real file inside the root its host names, or nil.
+
+   The pathname is percent-decoded AFTER the URL is parsed, so `%2e%2e%2f`
+   reaches this code as `../` and an encoded absolute path reaches it as
+   `/etc/...`. Joining onto `.` first makes an absolute decoded path relative;
+   `path.resolve` then collapses any remaining `..`, and the lexical containment
+   test is what refuses whatever is left. `realpath` is applied afterwards so a
+   symlink INSIDE the root cannot point outside it; a path that does not exist
+   is contained lexically and then simply reported as not found."
+  [url]
+  (when-let [^js u (try (js/URL. url) (catch :default _e nil))]
+    (when-let [kind (get LSP_HOSTS (.-host u))]
+      (let [root    (case kind :plugins PLUGINS_ROOT :app js/__dirname)
+            decoded (utils/safe-decode-uri-component (.-pathname u))
+            rebased (.join node-path "." (or decoded ""))
+            joined  (.resolve node-path root rebased)]
+        (when (path-contained? joined root)
+          (let [real      (try (.realpathSync fs joined) (catch :default _e joined))
+                root-real (try (.realpathSync fs root) (catch :default _e root))]
+            (when (path-contained? real root-real)
+              real)))))))
+
 (defn setup-interceptor! [^js app]
   ;; G1 (pilot only): never claim the OS handler for the upstream scheme, so the
   ;; pilot cannot take `logseq-og:` links away from the installed application.
@@ -101,21 +152,23 @@
   (.registerFileProtocol
    protocol FILE_LSP_SCHEME
    (fn [^js request callback]
-     (let [url (.-url request)
-           url' ^js (js/URL. url)
-           [_ ROOT] (if (string/starts-with? url PLUGIN_URL)
-                      [PLUGIN_URL PLUGINS_ROOT]
-                      [STATIC_URL js/__dirname])
+     (let [url   (.-url request)
+           path' (resolve-lsp-file url)]
+       (cond
+         ;; Unknown host, or a path that does not stay inside the root its host
+         ;; names. Refused rather than defaulted -- see `resolve-lsp-file`.
+         (nil? path')
+         (do (logger/warn ::resolve-lsp-url "refused lsp:// url" url)
+             (callback #js {:error -6}))
 
-           path' (.-pathname url')
-           path' (utils/safe-decode-uri-component path')
-           path' (.join node-path ROOT path')]
-
-       ;; G5 (pilot only). lsp:// serves bundled resources and plugin files;
-       ;; both are inside permitted roots, so anything else is refused.
-       (if (and pilot/PILOT (not (pilot/permitted-path? path' "resource")))
+         ;; G5 (pilot only), kept ON TOP of the containment above rather than
+         ;; replaced by it: lsp:// serves bundled resources and plugin files,
+         ;; both inside permitted roots, so anything else is refused.
+         (and pilot/PILOT (not (pilot/permitted-path? path' "resource")))
          (do (pilot/record! :graph-boundary (str "refused lsp:// " (pr-str path')))
              (callback #js {:error -6}))
+
+         :else
          (callback #js {:path path'})))))
 
   #(do

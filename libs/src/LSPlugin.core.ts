@@ -62,6 +62,13 @@ type DeferredActor = ReturnType<typeof deferred>
 
 interface LSPluginCoreOptions {
   dotConfigRoot: string
+  /**
+   * Resolve plugin resources through `lsp://logseq.io/` even for plugins whose
+   * manifest declares `effect: true`. The host sets this when it is itself
+   * served from a standard, secure scheme, because such a document cannot load
+   * a `file://` sandbox child. Absent/false keeps the historical behaviour.
+   */
+  privilegedPluginResources?: boolean
 }
 
 /**
@@ -507,7 +514,15 @@ class PluginLocal extends EventEmitter<
       const url = path.join(localRoot, filePath)
       filePath = reg.test(url) ? url : PROTOCOL_FILE + url
     }
-    return !this.options.effect && this.isInstalledInDotRoot
+    // `effect` is the plugin's OWN manifest flag and every real plugin sets it,
+    // so it used to suppress this rewrite for all of them and leave the entry a
+    // `file://` URL. A host that serves itself from the privileged scheme can
+    // not load a `file://` child at all, so it asks for the rewrite explicitly
+    // through `privilegedPluginResources`; without that option the behaviour is
+    // exactly what it has always been.
+    const privileged =
+      !this.options.effect || !!this._ctx?.options?.privilegedPluginResources
+    return privileged && this.isInstalledInDotRoot
       ? convertToLSPResource(filePath, this.dotPluginsRoot)
       : filePath
   }

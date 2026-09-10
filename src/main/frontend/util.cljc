@@ -158,9 +158,17 @@
      (def web-platform? nfs?)))
 
 #?(:cljs
-   (defn file-protocol?
+   (defn bundled-origin?
+     "True when the application is being served from its OWN bundled resources.
+
+      That is `file://` in an ordinary build and `lsp://logseq.com/` under the
+      origin experiment, and both answer the same question the callers are
+      actually asking: are `./js` and `./` this application's own files, or is
+      this a hosted deployment? Answering it by scheme name alone -- which this
+      predicate used to do -- sent the experiment down the hosted-asset path and
+      resolved local assets to `https://asset.logseq.com/...`."
      []
-     (string/starts-with? js/window.location.href "file://")))
+     (contains? #{"file:" "lsp:"} js/window.location.protocol)))
 
 (defn format
   [fmt & args]
@@ -1466,7 +1474,9 @@
 #?(:cljs
    (def JS_ROOT
      (when-not node-test?
-       (if (= js/location.protocol "file:")
+       ;; `lsp:` is the application's own bundled origin too, and its resources
+       ;; are laid out exactly as the `file:` ones are -- see `bundled-origin?`.
+       (if (contains? #{"file:" "lsp:"} js/location.protocol)
          "./js"
          "./static/js"))))
 

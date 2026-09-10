@@ -62,6 +62,12 @@ const INHERITED_FILES = ['graph-fixture.test.js', 'mutable-fixture.test.js',
                          'error-classifier.test.js']
   .map((f) => path.join('f27-inline', 'tests', f));
 
+// The ORIGIN EXPERIMENT's own suite. Separate from the F28 files above because
+// it belongs to a CANDIDATE build, not to the accepted one: its identity tests
+// exist precisely to prove the two cannot be confused.
+const ORIGIN_FILES = ['lsplugin-transform.test.js', 'experiment-source.test.js']
+  .map((f) => path.join('f28-origin', 'tests', f));
+
 // Exactly the two pilot tests above, by name.
 const SKIP = '(the compiled pilot bundle is the one the manifest describes' +
              '|the real built application directory passes its own preflight)';
@@ -86,6 +92,10 @@ status |= run(
 status |= run('F28 build identity, fixture rules, the named browser notice, ' +
               'the exact-path gate and the launcher\'s cleanup ownership',
               ['--test'].concat(F28_FILES));
+
+status |= run('origin experiment (candidate build: transform, identity separation, ' +
+              'coupled halves, hardened lsp:// handler)',
+              ['--test'].concat(ORIGIN_FILES));
 
 status |= run('inherited F27 tooling regression (fixtures and error classification)',
               ['--test'].concat(INHERITED_FILES));
