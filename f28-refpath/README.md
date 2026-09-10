@@ -81,6 +81,14 @@ names it explicitly:
 node f28-refpath/checks/refpath-baseline-checks.js
 ```
 
+The ordering slice's two runs. The baseline needs a build that does NOT contain
+`frontend.util.f28_reforder`, and refuses to run against one that does:
+
+```sh
+node f28-refpath/checks/reforder-baseline-checks.js   # what OG already does
+node f28-refpath/checks/reforder-feature-checks.js    # the three orders
+```
+
 The ClojureScript tests are the ordinary ones:
 
 ```sh
@@ -106,9 +114,15 @@ can never write into the accepted checkouts.
 | `checks/lookup-fault.js` | a narrow, restored, clearly-labelled **simulated** lookup fault — the only way the refusal path can be seen on screen |
 | `checks/refpath-baseline-checks.js` | the packaged OG-behaviour run |
 | `checks/refpath-feature-checks.js` | the packaged feature run |
+| `checks/make-reforder-graph.js` | the ORDERING fixture: 8 source pages whose titles discriminate case-folding, Korean alphabetical order and Unicode normalization — one written to disk with a **decomposed** file name — plus an alias mention, a block that is drawn twice, a five-deep path and a descendant past the level OG draws |
+| `checks/reforder-read.js` | ONE reading of the section, shared by the ordering slice's two scenarios so their claims cannot drift apart |
+| `checks/reforder-baseline-checks.js` | what OG already does about group order, and what it does not offer — refuses to run against a build carrying `frontend.util.f28_reforder` |
+| `checks/reforder-feature-checks.js` | the packaged ordering run |
 | `tests/feature-build.test.js` | identity, integrity, "this is none of the three earlier builds", and that the renderer really carries this feature |
 | `tests/graph-fixture.test.js` | the fixture's own rules — including its DEPTH table checked against the indentation it actually writes, and that the identical-label chain runs past OG's limit with distinct identities |
 | `tests/browser-noise.test.js` | the correlation rule, driven deterministically, including the case it must NOT excuse |
+| `tests/reforder-fixture.test.js` | the ordering fixture's own rules, and the JS mirror of the comparison |
+| `tests/reforder-source.test.js` | the ordering slice's source shape: `:original` hands OG's sequence back, the sort runs after OG's own, groups are keyed by `:db/id` and never by title, no locale collation, the choice reaches no store |
 
 ## The one pre-existing condition this feature's runs name
 
