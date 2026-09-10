@@ -301,11 +301,6 @@ test('`behind` on a case is exactly the sum of the rows collapsed underneath it'
   for (const want of Object.values(gen.WALL)) {
     sums[want.under] = (sums[want.under] || 0) + want.hidden;
   }
-  // `TWICE` is collapsed by the FILE rather than by the level rule, so it is
-  // not in WALL — but what it withholds is just as absent from the page, both
-  // under its parent and under itself.
-  sums[gen.TWICE.under] = (sums[gen.TWICE.under] || 0) + gen.TWICE.hidden;
-  sums[gen.TWICE.key] = (sums[gen.TWICE.key] || 0) + gen.TWICE.hidden;
   for (const [key, want] of Object.entries(gen.CHILDREN)) {
     assert.strictEqual(want.behind, sums[key] || 0,
       `${key}: declared behind ${want.behind}, the collapsed rows account for ${sums[key] || 0}`);
@@ -334,51 +329,51 @@ test('TWICE really names a block that OG draws twice in one list', () => {
   assert.ok(kDepth > pDepth, `${k} must sit under ${gen.TWICE.under}`);
 });
 
-test('TWICE is collapsed by the FILE, so BOTH appearances are eligible', () => {
-  // The level rule cannot do this: as its own result it is a root, and under
-  // its parent it is a child rather than a grandchild. Only `collapsed:: true`
-  // collapses it in both roles, and it must be written on THAT block.
-  const k = gen.TWICE.key;
-  const page = Object.values(gen.PAGES).find((b) => b.includes(`id:: ${gen.UUID[k]}`));
-  assert.ok(page, `${k}: no page carries it`);
-  const lines = page.split('\n');
-  const at = lines.findIndex((l) => l.includes(`id:: ${gen.UUID[k]}`));
-  assert.ok(at > 0);
-  assert.ok(lines[at + 1] && lines[at + 1].includes('collapsed:: true'),
-    `${k} must carry \`collapsed:: true\` directly under its id`);
-  assert.strictEqual(gen.TWICE.collapsedBy, 'file');
-
-  // Exactly one block in the whole fixture is folded this way, so a second one
-  // cannot quietly appear and change what the run is counting.
+test('nothing in the fixture is folded in the FILE, because that never arrives', () => {
+  // Measured, not assumed. A first attempt wrote `collapsed:: true` on TWICE to
+  // make both appearances eligible, and the packaged run drew both of them
+  // expanded: `outliner.tree/block-entity->map` rebuilds every block for the
+  // reference tree with a fixed set of keys, and `:block/collapsed?` is not one
+  // of them, so a fold written in the file cannot reach this list. The fixture
+  // therefore writes none, and the run folds with OG's own control instead.
   const folded = Object.values(gen.PAGES)
     .reduce((n, b) => n + (b.match(/collapsed:: true/g) || []).length, 0);
-  assert.strictEqual(folded, 1, 'exactly one block may be folded in the file');
+  assert.strictEqual(folded, 0,
+    'a fold in the file does not reach the linked-references list; do not write one');
+  assert.strictEqual(gen.TWICE.collapsedBy, 'ogs-own-fold-control');
 
-  // And it must actually have something to withhold, in both appearances.
-  assert.strictEqual(immediateChildren(gen.UUID[k]).length, gen.TWICE.hidden);
-  assert.strictEqual(descendants(gen.UUID[k]).length, gen.TWICE.hidden);
+  // It must still have something to withhold once a reader folds it.
+  assert.strictEqual(immediateChildren(gen.UUID[gen.TWICE.key]).length, gen.TWICE.hidden);
+  assert.strictEqual(descendants(gen.UUID[gen.TWICE.key]).length, gen.TWICE.hidden);
+
+  // And at rest OG draws it in full, in BOTH appearances, so the run can prove
+  // that no control exists before the fold.
+  assert.strictEqual(gen.CHILDREN[gen.TWICE.key].behind, 0);
+  assert.strictEqual(gen.CHILDREN[gen.TWICE.key].ogShows,
+                     gen.CHILDREN[gen.TWICE.key].descend);
 });
 
-test('the collapsed-appearance count counts APPEARANCES, not blocks', () => {
+test('the collapsed-appearance counts count APPEARANCES, not blocks', () => {
   // What a run counts on screen is controls, and one block wearing two
-  // appearances offers two of them.
-  assert.strictEqual(gen.COLLAPSED_APPEARANCES,
-    Object.keys(gen.WALL).length + gen.TWICE.occurrences);
+  // appearances offers two of them once it is folded.
+  assert.strictEqual(gen.COLLAPSED_APPEARANCES, Object.keys(gen.WALL).length,
+    'at rest, only the WALL rows are collapsed');
+  assert.strictEqual(gen.COLLAPSED_APPEARANCES_AFTER_FOLD,
+    gen.COLLAPSED_APPEARANCES + gen.TWICE.occurrences,
+    'folding one block adds BOTH of its appearances at once');
   assert.strictEqual(gen.TWICE.occurrences, 2);
   assert.ok(!Object.keys(gen.WALL).includes(gen.TWICE.key),
-    'TWICE is not a WALL row: it is collapsed by the file, not by the level rule');
+    'TWICE is not a WALL row: the level rule cannot collapse both appearances');
 });
 
 test('some cases are entirely inside what OG draws, and must gain nothing', () => {
-  // Pinned as an EXACT set rather than a minimum. `mixed` and `mixedRef` left
-  // it when `mixedRef` was folded in the file to make the two-occurrence case
-  // (see TWICE), and a threshold would have absorbed that silently in one
-  // direction and blocked it in the other. The four that remain still cover
-  // the shapes that matter: no children at all, ordinary children, a member of
-  // a shared parent group, and a wide fan of fourteen.
+  // Pinned as an EXACT set rather than a minimum, so a fixture change that
+  // moves a case in or out of it has to be stated rather than absorbed. A
+  // `>= 5` threshold hid exactly that once, while TWICE was briefly folded in
+  // the file.
   const untouched = Object.entries(gen.CHILDREN)
     .filter(([, v]) => v.behind === 0).map(([k]) => k).sort();
-  assert.deepStrictEqual(untouched, ['leaf', 'sibB', 'two', 'wide'],
+  assert.deepStrictEqual(untouched, ['leaf', 'mixed', 'mixedRef', 'sibB', 'two', 'wide'],
     'the set of cases OG draws in full changed; say so deliberately');
   for (const k of untouched) {
     assert.strictEqual(gen.CHILDREN[k].ogShows, gen.CHILDREN[k].descend);
