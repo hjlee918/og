@@ -229,9 +229,9 @@ test('a CLOSED control performs no ancestor walk — the one cost claim that is 
   assert.ok(panelStart > 0);
   const panel = src.slice(panelStart, start);
   assert.strictEqual((panel.match(/f27ctx\/load-ancestors/g) || []).length, 1);
-  const f28Region = src.slice(src.indexOf('(defn- f28-surface'), start);
+  const f28Region = src.slice(src.indexOf('(defn- f28-panel-id'), start);
   assert.strictEqual((f28Region.match(/f27ctx\/load-ancestors/g) || []).length, 1,
-    'the F28 feature must contain exactly one ancestor walk, inside the panel');
+    'the F28 source-path feature must contain exactly one ancestor walk, inside the panel');
 });
 
 // --- opening a disclosed level ----------------------------------------------
@@ -243,13 +243,31 @@ test('a CLOSED control performs no ancestor walk — the one cost claim that is 
 // Each rule below is read out of the source, because each is a property of the
 // shape rather than of one rendered outcome.
 
-/** The F28 feature's own source, from its first function to OG's container. */
+/**
+ * The F28 SOURCE-PATH feature's own source, from its panel id to OG's container.
+ *
+ * Bounded at `f28-panel-id` rather than at `f28-surface`: the surface decision
+ * is shared with the child-context feature and therefore now sits above
+ * `block-container-inner`, which renders that feature's control. A region that
+ * still started there would swallow OG's own block renderer, and assertions
+ * like "exactly one entity lookup" would be counting OG's lookups.
+ */
 function f28Source() {
   const src = fs.readFileSync(
     path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.cljs'), 'utf8');
-  const start = src.indexOf('(defn- f28-surface');
+  const start = src.indexOf('(defn- f28-panel-id');
   const end = src.indexOf('(rum/defcs breadcrumb-with-container <');
-  assert.ok(start > 0 && end > start, 'the F28 region was renamed or removed');
+  assert.ok(start > 0 && end > start, 'the F28 source-path region was renamed or removed');
+  return { all: src, region: src.slice(start, end) };
+}
+
+/** The F28 CHILD-CONTEXT feature's own source, from its banner to OG's container. */
+function f28CtxSource() {
+  const src = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.cljs'), 'utf8');
+  const start = src.indexOf('(rum/defc f28-context-line <');
+  const end = src.indexOf('(rum/defc ^:large-vars/cleanup-todo block-container-inner');
+  assert.ok(start > 0 && end > start, 'the F28 child-context region was renamed or removed');
   return { all: src, region: src.slice(start, end) };
 }
 
@@ -509,6 +527,206 @@ test('the F28 renderer really carries this feature and the F27 slices it builds 
   for (const ns of ['frontend.util.f28_refpath.js',
                     'frontend.util.f27_context.js',
                     'frontend.util.f27_inline.js']) {
+    assert.ok(names.includes(ns), `the renderer does not carry ${ns}`);
+  }
+});
+
+// --- the child-context disclosure -------------------------------------------
+//
+// A second, separate F28 control: where OG's linked-references list has
+// collapsed a row and is drawing none of what is under it, this discloses that
+// context. The claims below are properties of the SOURCE SHAPE rather than of
+// one rendered outcome, which is why they are read out of the source.
+
+test('a CLOSED child-context control performs no descendant walk', () => {
+  // The one cost claim that is structural: the panel renders only when the
+  // control has been opened, so a closed control never reaches `build-plan`.
+  const { region } = f28CtxSource();
+
+  const wrapper = form(region, '(rum/defcs f28-child-context <');
+  assert.match(wrapper, /\(when desc\s*\n?\s*\(f28-context-panel/,
+    'the panel must be rendered only when the control has been opened');
+  // The namespaced CALL, not the bare words: the wrapper's own docstring names
+  // `build-plan` in order to say that it never reaches it.
+  assert.ok(!wrapper.includes('f27ch/build-plan'),
+    'the control, which renders for every withheld row, must never walk itself');
+
+  // And the walk must live in exactly one place, so "closed costs nothing"
+  // cannot be quietly undone by a second call site.
+  assert.strictEqual((region.match(/f27ch\/build-plan/g) || []).length, 1,
+    'the child-context feature must contain exactly one descendant walk');
+  const panel = form(region, '(rum/defc f28-context-panel');
+  assert.strictEqual((panel.match(/f27ch\/build-plan/g) || []).length, 1,
+    'and it must be inside the panel');
+});
+
+test('the control exists only where OG has stopped, decided from what OG already computed', () => {
+  const src = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.cljs'), 'utf8');
+  const inner = src.slice(src.indexOf('(rum/defc ^:large-vars/cleanup-todo block-container-inner'),
+                          src.indexOf('(defn- attach-order-list-state!'));
+
+  assert.match(inner, /f28ctx\/offer-control\?/,
+    'the surface decision must be the pure one, not an inline cond');
+  assert.match(inner, /:withheld\?\s*\(f28ctx\/withheld\?\s*\{:collapsed\? collapsed\?/,
+    'it must be decided from the collapse state this component already has');
+  assert.match(inner, /:has-children\? \(some\? has-child\?\)/,
+    'and from the `:block/_parent` check it already performs for `haschild`');
+
+  // No NEW database read is introduced to decide whether the control exists.
+  const guard = inner.slice(inner.indexOf('(when (f28ctx/offer-control?'),
+                            inner.indexOf('(dnd-separator-wrapper block block-id slide? false false)]))'));
+  for (const forbidden of ['db/entity', 'db/pull', 'block/_parent', 'build-plan', 'model/']) {
+    assert.ok(!guard.includes(forbidden),
+      `deciding whether the control exists reads ${forbidden}; it must cost nothing`);
+  }
+});
+
+test('the child-context feature reuses the F27 walker and adds no second one', () => {
+  const { region } = f28CtxSource();
+  assert.match(region, /f27ch\/build-plan/, 'the walk must be f27-children\'s');
+  assert.match(region, /\(f27-children-fn repo\)/,
+    'and the children-fn must be the one the F27 panels already inject');
+  for (const forbidden of ['db/get-block-children', 'db/get-block-immediate-children',
+                           'sort-by-left raw', 'loop [', 'blocks->vec-tree']) {
+    assert.ok(!region.includes(forbidden),
+      `the feature contains ${forbidden}; the walk belongs to f27-children`);
+  }
+});
+
+test('a disclosed descendant is plain text — no second rich renderer', () => {
+  const { region } = f28CtxSource();
+  assert.match(region, /f28ctx\/plain-row/,
+    'a row\'s label must come from the pure, bounded reducer');
+  for (const forbidden of ['f27-body-text', 'inline-text', 'block-content',
+                           'block-container', 'markup-element', 'block-reference',
+                           'asset-link', 'macro-cp', 'page-cp']) {
+    assert.ok(!region.includes(forbidden),
+      `the panel renders through ${forbidden}; a disclosed descendant is plain text (M1)`);
+  }
+});
+
+test('the disclosure is read-only: it navigates nowhere and writes nothing', () => {
+  const { region } = f28CtxSource();
+  for (const forbidden of ['redirect-to-page!', 'route-handler', 'editor-handler',
+                           'toggle-collapsed-block!', 'set-collapsed-block!',
+                           'transact!', 'save-block!', 'outliner-core', 'file-handler']) {
+    assert.ok(!region.includes(forbidden),
+      `the feature reaches ${forbidden}; this disclosure is read-only (M5, B10)`);
+  }
+});
+
+test("OG's own collapse is left exactly as the reader set it", () => {
+  // The panel discloses BESIDE the collapse rather than undoing it, so the fold
+  // control still does what it did and closing the panel returns the row to
+  // precisely what OG rendered.
+  const { region } = f28CtxSource();
+  assert.ok(!region.includes('state/toggle-collapsed-block!'));
+  assert.ok(!region.includes('state/set-collapsed-block!'));
+  assert.ok(!region.includes('expand-block!') && !region.includes('collapse-block!'));
+});
+
+test('every control in the panel is a real button, reachable and announced', () => {
+  const { region } = f28CtxSource();
+  const buttons = (region.match(/:button\./g) || []).length;
+  assert.ok(buttons >= 3, `only ${buttons} buttons; the control, the row toggles and the more/hide`);
+  assert.strictEqual((region.match(/\[:a\./g) || []).length, 0,
+    'an anchor without an href cannot take focus; every control must be a button');
+  assert.strictEqual((region.match(/f27-btn /g) || []).length, buttons,
+    'every button must go through the shared f27-btn props, which restore Enter and Space');
+  assert.match(region, /:aria-expanded \(if desc "true" "false"\)/);
+  assert.match(region, /:aria-controls panel-id/);
+});
+
+test('collapsing from inside the panel returns focus to THIS row\'s own control', () => {
+  const { region } = f28CtxSource();
+  const wrapper = form(region, '(rum/defcs f28-child-context <');
+  assert.match(wrapper, /toggle-id \(f28ctx\/toggle-id panel-id\)/,
+    'the control id must be derived from this row\'s panel id');
+  assert.match(wrapper, /panel-id \(f28ctx\/panel-id \(:id config\) uuid'\)/,
+    'and the panel id from the list and this row\'s own block');
+  // Twice: synchronously, and after the re-render in case React replaced the node.
+  assert.strictEqual((wrapper.match(/\.focus/g) || []).length, 2,
+    'focus must be asserted synchronously and again after the re-render');
+  assert.match(wrapper, /js\/setTimeout/);
+});
+
+test('each row owns its own state, so two open panels cannot reach each other', () => {
+  const { region } = f28CtxSource();
+  assert.match(region, /\(rum\/local nil ::desc\)/,
+    'the expansion state must be a per-instance local, not a shared atom');
+  assert.strictEqual((region.match(/rum\/local/g) || []).length, 1,
+    'one atom per row: the open flag and the expansion state are the same value');
+  assert.ok(!region.includes('defonce') && !region.includes('def *'),
+    'nothing about one row may live outside that row');
+});
+
+test('the panel says which of three confusable things it is showing', () => {
+  const { region } = f28CtxSource();
+  assert.match(region, /:f28\/context-of-this-block/,
+    'the heading must name what these rows are');
+  const en = fs.readFileSync(
+    path.join(REPO, 'src', 'resources', 'dicts', 'en.edn'), 'utf8');
+  const line = en.split('\n').find((l) => l.includes(':f28/context-of-this-block'));
+  assert.ok(line, 'the English heading is missing');
+  assert.ok(/reference/i.test(line), 'it must rule out the blocks that reference this one');
+  assert.ok(/page/i.test(line), 'and the rest of the page whose list this is');
+});
+
+test('every string this feature shows exists in English and in Korean', () => {
+  const { region } = f28CtxSource();
+  const keys = [...new Set((region.match(/:f28\/context-[a-z-]+/g) || []))];
+  assert.ok(keys.length >= 8, `only ${keys.length} strings; the panel says more than that`);
+  for (const dict of ['en.edn', 'ko.edn']) {
+    const body = fs.readFileSync(
+      path.join(REPO, 'src', 'resources', 'dicts', dict), 'utf8');
+    for (const k of keys) {
+      assert.ok(body.includes(`${k} "`), `${dict} has no ${k}`);
+    }
+  }
+  // And the Korean is really Korean, not the English copied across.
+  const ko = fs.readFileSync(
+    path.join(REPO, 'src', 'resources', 'dicts', 'ko.edn'), 'utf8');
+  for (const k of keys) {
+    const line = ko.split('\n').find((l) => l.trim().startsWith(`${k} `));
+    assert.match(line, /[가-힣]/, `${k} is not translated`);
+  }
+});
+
+test('the surface rules are the source-path slice\'s, delegated rather than restated', () => {
+  const ctx = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'util', 'f28_refctx.cljs'), 'utf8');
+  assert.match(ctx, /f28\/excluded-surface/,
+    'the shared exclusions must be delegated to the source-path slice');
+  // Its own two questions, and nothing else, are answered here.
+  assert.match(ctx, /\(not withheld\?\)\s+:nothing-withheld/);
+  assert.match(ctx, /\(not context-list\?\)\s+:not-context-list/);
+  for (const restated of [':sidebar ', ':query ', ':preview ', ':embed ',
+                          ':whiteboard ', ':html-export ', ':block-refs-list ']) {
+    assert.ok(!ctx.includes(restated),
+      `f28-refctx restates ${restated.trim()}; it must inherit it and cannot be allowed to drift`);
+  }
+});
+
+test('the feature is scoped in CSS, so removing it removes its appearance', () => {
+  const css = fs.readFileSync(
+    path.join(REPO, 'src', 'main', 'frontend', 'components', 'block.css'), 'utf8');
+  const at = css.indexOf('F28 child context');
+  assert.ok(at > 0, 'the child-context CSS block was renamed or removed');
+  const block = css.slice(at);
+  const selectors = [...block.matchAll(/^\.([a-z0-9-]+)/gm)].map((m) => m[1]);
+  assert.ok(selectors.length > 5, 'too few rules to be this feature\'s appearance');
+  for (const s of selectors) {
+    assert.ok(s.startsWith('f28-ctx'),
+      `${s} is not scoped to this feature; removing it would change OG's own styling`);
+  }
+});
+
+test('the F28 renderer carries the child-context namespace too', () => {
+  const runtime = path.join(STATIC, 'js', 'cljs-runtime');
+  assert.ok(fs.existsSync(runtime), 'no compiled renderer in static/js/cljs-runtime');
+  const names = fs.readdirSync(runtime);
+  for (const ns of ['frontend.util.f28_refctx.js', 'frontend.util.f27_children.js']) {
     assert.ok(names.includes(ns), `the renderer does not carry ${ns}`);
   }
 });

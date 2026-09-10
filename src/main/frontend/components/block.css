@@ -2089,3 +2089,160 @@ html.is-mac {
   .f28-path-panel { margin-left: 0.5rem; }
   .f28-path-step + .f28-path-step { margin-left: 0.4rem; }
 }
+
+/* ---------------------------------------------------------------------------
+   F28 child context — what is written UNDER a linked reference.
+
+   OG's linked-references list draws a reference's own children for two levels
+   and then collapses, after which nothing below is rendered at all. This is the
+   control that discloses the rest, and the panel it opens — beneath the row's
+   own children, as a sibling of them, so a multi-line disclosure never has to
+   fight the outline it belongs to.
+
+   Everything is scoped to `.f28-ctx*`, so removing this feature removes its
+   appearance with it and nothing in OG's own block styling changes. The class
+   prefix is deliberately NOT `.f27-ctx`, which belongs to the F27 panels.
+   --------------------------------------------------------------------------- */
+
+.f28-ctx {
+  margin: 0.1rem 0 0.35rem 2rem;
+  min-width: 0;
+}
+
+.f28-ctx-open.f27-btn {
+  color: var(--ls-secondary-text-color);
+  opacity: 0.7;
+  font-size: 0.85em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+}
+
+.f28-ctx-open.f27-btn:hover,
+.f28-ctx-open[aria-expanded="true"] {
+  opacity: 1;
+  color: var(--ls-link-text-color);
+  background-color: var(--ls-secondary-background-color);
+}
+
+.f28-ctx-panel {
+  margin: 0.25rem 0 0.35rem 0;
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--ls-quaternary-background-color);
+  background-color: var(--ls-secondary-background-color);
+  border-radius: 0 4px 4px 0;
+  font-size: 0.9em;
+}
+
+/* The heading is not decoration: three different things could plausibly appear
+   under a reference row, and this says which one this is. */
+
+.f28-ctx-head {
+  font-weight: 500;
+  opacity: 0.8;
+  margin-bottom: 0.3rem;
+  font-size: 0.9em;
+}
+
+.f28-ctx-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.1rem 0;
+  min-width: 0;
+}
+
+.f28-ctx-line.is-heading .f28-ctx-text { font-weight: 600; }
+
+/* One indent step per level, so the shape of the outline survives the flatten
+   that rendering a plan produces. */
+
+.f28-ctx-line.depth-1 { margin-left: 0; }
+.f28-ctx-line.depth-2 { margin-left: 1rem; }
+.f28-ctx-line.depth-3 { margin-left: 2rem; }
+.f28-ctx-line.depth-4 { margin-left: 3rem; }
+.f28-ctx-line.depth-5 { margin-left: 4rem; }
+
+.f28-ctx-notes.depth-1 { margin-left: 0; }
+.f28-ctx-notes.depth-2 { margin-left: 1rem; }
+.f28-ctx-notes.depth-3 { margin-left: 2rem; }
+.f28-ctx-notes.depth-4 { margin-left: 3rem; }
+.f28-ctx-notes.depth-5 { margin-left: 4rem; }
+
+.f28-ctx-more.is-nested.depth-1 { margin-left: 0; }
+.f28-ctx-more.is-nested.depth-2 { margin-left: 1rem; }
+.f28-ctx-more.is-nested.depth-3 { margin-left: 2rem; }
+.f28-ctx-more.is-nested.depth-4 { margin-left: 3rem; }
+.f28-ctx-more.is-nested.depth-5 { margin-left: 4rem; }
+
+.f28-ctx-toggle.f27-btn,
+.f28-ctx-mark {
+  flex: 0 0 auto;
+  width: 1rem;
+  text-align: center;
+  opacity: 0.6;
+  font-size: 0.85em;
+  padding: 0;
+}
+
+.f28-ctx-toggle.f27-btn:hover { opacity: 1; color: var(--ls-link-text-color); }
+
+.f28-ctx-mark.is-stop { opacity: 0.8; cursor: help; }
+
+.f28-ctx-body {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.f28-ctx-badge {
+  flex: 0 0 auto;
+  font-size: 0.75em;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  background-color: var(--ls-quaternary-background-color);
+  opacity: 0.9;
+}
+
+.f28-ctx-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.f28-ctx-text.is-empty { opacity: 0.6; font-style: italic; }
+
+.f28-ctx-note {
+  opacity: 0.75;
+  font-size: 0.9em;
+  padding: 0.1rem 0;
+}
+
+.f28-ctx-note.is-error { color: var(--ls-error-text-color, var(--ls-secondary-text-color)); }
+.f28-ctx-note.is-capped { opacity: 0.7; }
+
+.f28-ctx-status {
+  opacity: 0.7;
+  font-size: 0.9em;
+  margin-top: 0.25rem;
+}
+
+.f28-ctx-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.f28-ctx-more.f27-btn,
+.f28-ctx-hide.f27-btn {
+  font-size: 0.85em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  color: var(--ls-secondary-text-color);
+}
+
+.f28-ctx-more.f27-btn:hover,
+.f28-ctx-hide.f27-btn:hover {
+  color: var(--ls-link-text-color);
+  background-color: var(--ls-tertiary-background-color);
+}

@@ -72,6 +72,7 @@
             [frontend.util.f27-outgoing :as f27o]
             [frontend.util.f27-inline :as f27il]
             [frontend.util.f27-inline-watch :as f27w]
+            [frontend.util.f28-refctx :as f28ctx]
             [frontend.util.f28-refpath :as f28]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
@@ -6004,6 +6005,281 @@
           block)]
     (merge block' (block/parse-title-and-body uuid format pre-block? content))))
 
+;; `f28-surface` is defined here rather than beside the source-path components
+;; below because BOTH features ask it, and the child-context control is
+;; rendered from `block-container-inner`, which comes first.
+(defn- f28-surface
+  "OG's `config` mapped to the one question `frontend.util.f28-refpath` asks.
+
+  This is the ONLY place OG's config shape is known for this feature, so every
+  rule in the specification is decided by a pure function over plain booleans
+  and is tested without a renderer.
+
+  `:source-path-list?` is an explicit opt-in, set by
+  `frontend.components.reference/references*`, rather than an inference from a
+  pile of flags: `breadcrumb-with-container` also serves the custom-query branch
+  and `block-linked-references`, and a surface must SAY that it is this one.
+
+  `:elided?` is deliberately absent here — only `breadcrumb` knows it. The
+  caller asks `surface-allows?`, which is every rule but that one."
+  [config]
+  {:source-path-list? (boolean (:f28/source-path? config))
+   :f27-panel? (some? (:f27/ref-render config))
+   :mobile? (boolean (util/mobile?))
+   :preview? (boolean (:preview? config))
+   :slide? (boolean (:slide? config))
+   :sidebar? (boolean (:sidebar? config))
+   :block-refs-list? (boolean (:f28/block-refs-list? config))
+   :embed? (boolean (or (:embed? config) (:page-embed? config)))
+   :query? (boolean (:custom-query? config))
+   :html-export? (boolean (:html-export? config))
+   :whiteboard? (boolean (or (:whiteboard? config) (:whiteboard-view? config)))})
+
+;; ---------------------------------------------------------------------------
+;; F28 child context — what is written UNDER a linked reference.
+;;
+;; OG's linked-references list ALREADY shows a reference's own children, and
+;; shows them well. That was measured in the packaged application before this
+;; was written (`f28-refpath/checks/refctx-baseline-checks.js`): right
+;; hierarchy, right order, markup rendered, Korean and emoji intact, a journal
+;; source, two references under one parent independent of each other. None of
+;; that is touched here.
+;;
+;; Where it STOPS is what this adds to. `non-consecutive-blocks->vec-tree`
+;; numbers a reference's own subtree from 1 and `block-default-collapsed?`
+;; collapses a `:ref?` row once `:block/level` reaches
+;; `ref/default-open-blocks-level` — 2 by default — after which `block-children`
+;; renders nothing at all. The same run measured `:block/level` `[nil 1 2]`
+;; across the whole section, 20 blocks behind 4 collapsed rows with none of them
+;; drawn, those blocks ABSENT from the page rather than hidden on it, no count
+;; of them anywhere, and 0 of the section's 53 fold controls able to take focus.
+;;
+;; This adds ONE control beneath such a row, which discloses that withheld
+;; context in bounded batches, read-only, in place. Specification:
+;; `project-notes/F28_CHILD_CONTEXT_SPEC.md`.
+;;
+;; THREE THINGS ABOUT THE SHAPE, all deliberate:
+;;
+;; 1. It appears ONLY where OG has stopped. `f28-refctx/withheld?` is
+;;    `collapsed?` AND `has-child?` — the two values this component has already
+;;    computed for its own `data-collapsed` attribute. A row OG is drawing in
+;;    full costs nothing at all: no walk, no probe, no query.
+;;
+;; 2. The walk is `f27-children/build-plan`, unchanged, with the SAME
+;;    `f27-children-fn` the F27 panels inject. No second walker, and no second
+;;    rich renderer: a disclosed descendant is the plain bounded label
+;;    `f28-refctx/plain-row` builds, never a rendered block.
+;;
+;; 3. Nothing here touches `state/toggle-collapsed-block!`. OG's own collapse is
+;;    exactly as the reader left it, its fold control still does what it did,
+;;    and closing this panel returns the row to precisely what OG rendered.
+;; ---------------------------------------------------------------------------
+
+(rum/defc f28-context-line < rum/static
+  "One disclosed descendant: its own expansion control, then its plain text.
+
+  A NATIVE BUTTON, not a styled anchor without an href: it must be reachable by
+  Tab, activated by Enter and Space, carry a visible focus ring and report its
+  own expanded state. Its accessible name says which block it opens, because
+  identical names on every row tell a screen-reader user nothing.
+
+  Every other outcome is a marker with a title rather than a dead affordance,
+  and each of them is a different outcome — a failed probe is not an ordinary
+  leaf, and a cycle is not a depth limit."
+  [row open? on-toggle]
+  (let [{:keys [entity depth descend probe]} row
+        {:keys [heading marker text empty?]} (f28ctx/plain-row
+                                              (f27-display-content
+                                               (:block/format entity)
+                                               (f27ch/node-label entity)))
+        said (if empty? (t :f28/context-empty) text)]
+    [:div.f28-ctx-line {:class (str "depth-" (min depth 5) (when heading " is-heading"))}
+     (cond
+       (= probe :error)
+       [:span.f28-ctx-mark.is-stop {:title (t :f27/children-probe-error)} "?"]
+
+       (= probe :unavailable)
+       [:span.f28-ctx-mark.is-stop {:title (t :f27/children-probe-unavailable)} "!"]
+
+       (= descend :cycle)
+       [:span.f28-ctx-mark.is-stop {:title (t :f27/children-cycle)} "↻"]
+
+       (= descend :depth)
+       [:span.f28-ctx-mark.is-stop {:title (t :f27/children-depth f27ch/max-depth)} "⋯"]
+
+       (= descend :budget)
+       [:span.f28-ctx-mark.is-stop {:title (t :f27/children-budget f27ch/max-visible)} "⋯"]
+
+       (f27ch/can-expand? row)
+       (let [name' (if open? (t :f28/context-hide-of said) (t :f28/context-show-of said))]
+         [:button.f28-ctx-toggle.f27-btn
+          (f27-btn on-toggle {:aria-expanded (if open? "true" "false")
+                              :aria-label name'
+                              :title name'})
+          (if open? "▾" "▸")])
+
+       :else [:span.f28-ctx-mark "·"])
+     [:span.f28-ctx-body
+      (when heading [:span.f28-ctx-badge (str "H" heading)])
+      (when marker [:span.f28-ctx-badge marker])
+      (if empty?
+        [:span.f28-ctx-text.is-empty said]
+        [:span.f28-ctx-text text])]]))
+
+(rum/defc f28-context-notes < rum/static
+  "Whatever one node has to say about its own children, beneath its row.
+
+  Order and completeness are separate claims, and a failure is never reported as
+  an answer of zero — both distinctions belong to `f27-children` and are simply
+  shown here."
+  [info depth]
+  (let [{:keys [summary remaining unordered withheld]} info]
+    [:div.f28-ctx-notes {:class (str "depth-" (min (inc (or depth 0)) 5))}
+     (case summary
+       :error [:div.f28-ctx-note.is-error (t :f27/children-error)]
+       :unavailable [:div.f28-ctx-note.is-error (t :f27/children-unavailable)]
+       nil)
+     (when (false? (:ordered? info))
+       [:div.f28-ctx-note.is-error (t :f27/children-unordered unordered)])
+     (when (and (= summary :partial) (pos? (or remaining 0)))
+       [:div.f28-ctx-note (t :f27/children-remaining remaining)])
+     (when (pos? (or withheld 0))
+       [:div.f28-ctx-note.is-capped (t :f27/children-withheld withheld f27ch/max-visible)])]))
+
+(rum/defc f28-context-panel
+  "The context this list is not drawing, disclosed under the row it belongs to.
+
+  The heading SAYS what these are, because three things are easy to confuse in a
+  reference list: this block's own children, the blocks that reference it, and
+  the children of the page whose list this is. Only the first is here.
+
+  Not `rum/static`: `build-plan` runs in this render body, so the panel must
+  re-render whenever its row does — see limit M4, which says exactly what that
+  makes the disclosure and what it does not."
+  [repo uuid' panel-id desc on-change on-hide]
+  (let [plan (f27ch/build-plan (f27-children-fn repo) uuid' desc)
+        {:keys [rows root status total shown remaining continue? capped? behind]}
+        (f28ctx/disclosure plan)
+        boundaries (f27ch/branch-continuations plan)
+        row-at (fn [path] (first (filter #(= path (:path %)) rows)))
+        toggle-path! (fn [path]
+                       (on-change (update desc :open
+                                          (fn [o] (let [o (or o #{})]
+                                                    (if (contains? o path)
+                                                      (disj o path)
+                                                      (conj o path)))))))
+        show-more! (fn [path]
+                     (on-change (update desc :limits
+                                        (fn [m] (assoc m path
+                                                       (f27ch/continue-limit
+                                                        (get m path f27ch/default-batch)))))))
+        more-button (fn [path label nested? depth]
+                      [:button.f28-ctx-more.f27-btn
+                       (f27-btn #(show-more! path)
+                                {:class (when nested? (str "is-nested depth-" (min depth 5)))
+                                 :aria-label label})
+                       label])]
+    [:div.f28-ctx-panel {:id panel-id
+                         :role "group"
+                         :aria-label (t :f28/context-panel-label)}
+     [:div.f28-ctx-head (t :f28/context-of-this-block)]
+     (if (#{:error :unavailable} status)
+       ;; A read that failed is not an empty outline, and it is never dressed as
+       ;; one. There is no retry here: this panel re-walks whenever its row
+       ;; redraws, so the honest thing to offer is the explanation, not a button
+       ;; that repeats what the next render does anyway.
+       [:div.f28-ctx-note.is-error
+        (if (= status :error) (t :f27/children-error) (t :f27/children-unavailable))]
+       [:<>
+        (map-indexed
+         (fn [i row]
+           (let [path (:path row)]
+             [:div.f28-ctx-item {:key (f28ctx/row-key row)}
+              (f28-context-line row (:open? row) (fn [] (toggle-path! path)))
+              ;; Every branch that CLOSES here, innermost first: what a node has
+              ;; to say about its own children and the control that acts on it
+              ;; belong at the END of that node's branch, beside the children
+              ;; they describe.
+              (for [bpath (get boundaries i)
+                    :let [binfo (get-in plan [:info bpath])
+                          brow (row-at bpath)]
+                    :when (and binfo brow)]
+                [:div.f28-ctx-branch-end
+                 {:key (str "b-" (string/join ">" (map str bpath)))}
+                 (f28-context-notes binfo (:depth brow))
+                 (when (f27ch/can-continue? binfo plan)
+                   (more-button bpath (t :f28/context-more) true (inc (:depth brow))))])]))
+         rows)
+        (f28-context-notes root 0)
+        (when continue? (more-button [] (t :f28/context-more) false 0))
+        (when capped?
+          [:div.f28-ctx-note.is-capped (t :f27/children-budget f27ch/max-visible)])
+        (when (pos? (or behind 0))
+          [:div.f28-ctx-note.is-capped
+           (t :f27/children-budget-behind behind f27ch/max-visible)])])
+     [:div.f28-ctx-status
+      (case status
+        :none (t :f28/context-none)
+        :ok (t :f28/context-complete shown)
+        :partial (t :f28/context-partial shown total remaining)
+        nil)]
+     [:div.f28-ctx-actions
+      [:button.f28-ctx-hide.f27-btn
+       (f27-btn on-hide {:aria-label (t :f28/context-hide)
+                         :aria-expanded "true"})
+       (t :f28/context-hide)]]]))
+
+(rum/defcs f28-child-context < (rum/local nil ::desc)
+  "The control that discloses what a collapsed linked-reference row is holding
+  back, and the panel it opens.
+
+  `::desc` is BOTH the open flag and the expansion state: nil means closed and
+  nothing has been walked; a map means open. One atom per row instance, so two
+  rows of one group are independent without either knowing the other exists, and
+  nothing is remembered across navigation.
+
+  A CLOSED control renders no panel, so `build-plan` is never called for it. Its
+  existence was decided by the caller from `collapsed?` and `has-child?`, both
+  of which the caller had already computed for its own rendering."
+  [state config block]
+  (let [*desc (::desc state)
+        desc @*desc
+        repo (state/get-current-repo)
+        uuid' (:block/uuid block)
+        panel-id (f28ctx/panel-id (:id config) uuid')
+        toggle-id (f28ctx/toggle-id panel-id)
+        label (f28ctx/plain-row (f27-display-content (:block/format block)
+                                                     (:block/content block)))
+        named (if (:empty? label) (t :f28/context-empty) (:text label))
+        ;; Collapsing from INSIDE the panel destroys the element that had focus,
+        ;; so focus is returned to THIS row's own control — the id is derived
+        ;; from this row's panel id, so two open panels cannot move each other's.
+        ;; Asserted twice: once synchronously, and once after the re-render, in
+        ;; case React replaced the control's node with the panel beside it.
+        focus-toggle! (fn []
+                        (some-> (gdom/getElement toggle-id) (.focus))
+                        (js/setTimeout
+                         (fn []
+                           (when-let [el (gdom/getElement toggle-id)]
+                             (when-not (identical? el (.-activeElement js/document))
+                               (.focus el))))
+                         0))]
+    [:div.f28-ctx
+     [:button.f28-ctx-open.f27-btn
+      (f27-btn (fn [] (if desc (do (reset! *desc nil) (focus-toggle!))
+                          (reset! *desc {:open #{} :limits {}})))
+               {:id toggle-id
+                :aria-expanded (if desc "true" "false")
+                :aria-controls panel-id
+                :aria-label (if desc (t :f28/context-hide-of named)
+                                (t :f28/context-show-of named))
+                :title (if desc (t :f28/context-hide) (t :f28/context-show))})
+      (t :f28/context-show)]
+     (when desc
+       (f28-context-panel repo uuid' panel-id desc
+                          (fn [d] (reset! *desc d))
+                          (fn [] (reset! *desc nil) (focus-toggle!))))]))
+
 (rum/defc ^:large-vars/cleanup-todo block-container-inner < rum/reactive db-mixins/query
   [state repo config* block*]
   (let [ref? (:ref? config*)
@@ -6118,6 +6394,17 @@
         (block-right-menu config block edit?))]
 
      (block-children config block children collapsed?)
+
+     ;; F28: what this list is holding back under THIS row. Rendered only
+     ;; where OG has collapsed the row and it has children — the same two
+     ;; values `data-collapsed` above is built from — so a row OG is drawing
+     ;; in full is untouched, and so is every surface but this list.
+     (when (f28ctx/offer-control?
+            (assoc (f28-surface config)
+                   :context-list? (boolean (:f28/source-path? config))
+                   :withheld? (f28ctx/withheld? {:collapsed? collapsed?
+                                                 :has-children? (some? has-child?)})))
+       (f28-child-context config block))
 
      (dnd-separator-wrapper block block-id slide? false false)]))
 
@@ -6673,33 +6960,6 @@
 ;;    nothing elided therefore renders neither the control nor the panel,
 ;;    without the wrapper asking a second time how deep the path is.
 ;; ---------------------------------------------------------------------------
-
-(defn- f28-surface
-  "OG's `config` mapped to the one question `frontend.util.f28-refpath` asks.
-
-  This is the ONLY place OG's config shape is known for this feature, so every
-  rule in the specification is decided by a pure function over plain booleans
-  and is tested without a renderer.
-
-  `:source-path-list?` is an explicit opt-in, set by
-  `frontend.components.reference/references*`, rather than an inference from a
-  pile of flags: `breadcrumb-with-container` also serves the custom-query branch
-  and `block-linked-references`, and a surface must SAY that it is this one.
-
-  `:elided?` is deliberately absent here — only `breadcrumb` knows it. The
-  caller asks `surface-allows?`, which is every rule but that one."
-  [config]
-  {:source-path-list? (boolean (:f28/source-path? config))
-   :f27-panel? (some? (:f27/ref-render config))
-   :mobile? (boolean (util/mobile?))
-   :preview? (boolean (:preview? config))
-   :slide? (boolean (:slide? config))
-   :sidebar? (boolean (:sidebar? config))
-   :block-refs-list? (boolean (:f28/block-refs-list? config))
-   :embed? (boolean (or (:embed? config) (:page-embed? config)))
-   :query? (boolean (:custom-query? config))
-   :html-export? (boolean (:html-export? config))
-   :whiteboard? (boolean (or (:whiteboard? config) (:whiteboard-view? config)))})
 
 (defn- f28-panel-id
   "A DOM id for one group's panel, stable across renders and unique on the page.
