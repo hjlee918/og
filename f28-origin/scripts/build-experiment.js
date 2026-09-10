@@ -49,7 +49,7 @@ const PROTECTED_CHECKOUTS = ['f27-slice-1', 'f27-pilot', 'f27-outgoing-context']
 const PILOT_ENTRY_FILES = ['pilot-main.js', 'pilot-preflight.js',
                            'pilot-isolation.js', 'pilot-boundary.js'];
 const IDENTITY_TARGET = 'pilot-identity.js';
-const ENTRY_FILES = PILOT_ENTRY_FILES.concat([IDENTITY_TARGET]);
+const ENTRY_FILES = PILOT_ENTRY_FILES.concat([IDENTITY_TARGET, 'network-bootstrap.js']);
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 const log = (...a) => console.log('[build-experiment]', ...a);
@@ -155,6 +155,12 @@ try {
   const untouched = fs.readFileSync(path.join(REPO, 'resources', 'js', 'lsplugin.core.js'), 'utf8');
   if (untouched !== before) die('the committed production plugin host bundle was modified');
   log('committed production plugin host bundle is unchanged');
+  const preload = path.join(STATIC, 'js', 'preload.js');
+  const text = fs.readFileSync(preload, 'utf8');
+  const anchor = "const IS_MAC =";
+  if (text.split(anchor).length !== 2) die('preload anchor mismatch');
+  fs.writeFileSync(preload, text.replace(anchor,
+    "for (const key of ['openExternal', 'openPath', 'showItemInFolder']) { Object.defineProperty(shell, key, {value: () => { return ipcRenderer.invoke('origin-experiment-refuse'); }, writable: false, configurable: false}); }\n" + anchor));
 }
 
 log('compiling :app (compile, local assets, telemetry defines absent)');
@@ -248,6 +254,8 @@ log('main bundle carries the experimental application origin lsp://logseq.com/')
 for (const f of PILOT_ENTRY_FILES) {
   fs.copyFileSync(path.join(PILOT_SRC, f), path.join(STATIC, f));
 }
+fs.copyFileSync(path.join(SRC, 'experiment-main.js'), path.join(STATIC, 'pilot-main.js'));
+fs.copyFileSync(path.join(SRC, 'network-bootstrap.js'), path.join(STATIC, 'network-bootstrap.js'));
 // The feature's identity, under the name the pilot entry requires.
 fs.copyFileSync(path.join(SRC, 'experiment-identity.js'), path.join(STATIC, IDENTITY_TARGET));
 log('entry files copied:', ENTRY_FILES.join(', '));

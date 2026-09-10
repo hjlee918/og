@@ -1,16 +1,34 @@
-"use strict";
-// Activation is refused BEFORE launching or changing any profile. The previous
-// post-launch defaultSession interceptor had a navigation race and did not cover
-// main-process node-fetch (electron.handler :httpRequest/:httpFetchJSON).
-// No credentials is not a network control. Do not restore activation until a
-// pre-navigation control covers the actual sessions AND main-process paths.
-const REASON = 'Origin experiment activation blocked: pre-navigation interception and main-process network coverage are not established';
-function assertReady() { throw new Error(REASON); }
-function launchWith(_launch) {
-  return async function refusedLaunch() { assertReady(); };
+'use strict';
+// Only packaged first-party startup control is accepted; never install after launch.
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const VERSION = require('../src/network-bootstrap').VERSION;
+function assertReady(executablePath) {
+  const built = require('../../f28-refpath/checks/packaged-app').resolve('Logseq-OG-F28-OriginExp');
+  if (executablePath && path.resolve(executablePath) !== built.exe) throw Error('activation blocked: wrong executable');
+  const m = built.preflight.manifest;
+  if (!built.preflight.ok || m.builtFrom.dirty || !m.artifacts['network-bootstrap.js'])
+    throw Error('activation blocked: verified clean startup control required');
+  const hash = p => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+  for (const [source, shipped] of [['network-bootstrap.js','network-bootstrap.js'], ['experiment-main.js','pilot-main.js']]) {
+    if (hash(path.join(__dirname,'../src',source)) !== hash(path.join(built.resApp,shipped)))
+      throw Error('activation blocked: startup source mismatch');
+  }
+  return built;
 }
-async function install() { assertReady(); }
-async function read(app) {
-  return app.evaluate(() => global.__expNet || null).catch(() => null);
+function launchWith(launch) {
+  return async opts => {
+    if (!opts || !opts.executablePath) throw Error('activation blocked: explicit executable required');
+    assertReady(opts.executablePath);
+    const app = await launch(opts);
+    try {
+      const evidence = await read(app);
+      if (!evidence || !evidence.active || evidence.version !== VERSION) throw Error('startup control evidence missing');
+      return app;
+    } catch (e) { await app.close(); throw e; }
+  };
 }
-module.exports = { REASON, assertReady, launchWith, install, read };
+async function install() { throw Error('activation blocked: post-launch installation forbidden'); }
+async function read(app) { return app.evaluate(() => global.__expNet || null).catch(() => null); }
+module.exports = {assertReady,launchWith,install,read};

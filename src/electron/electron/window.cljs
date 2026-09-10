@@ -30,6 +30,10 @@
   ([url]
    (create-main-window! url nil))
   ([url opts]
+   (when origin-exp/ORIGIN_EXPERIMENT
+     (when-not (true? (some-> js/global (aget "__expNet") (aget "active")))
+       (.exit app 78)
+       (throw (js/Error. "Origin experiment startup controls missing"))))
    (let [win-state (windowStateKeeper (clj->js {:defaultWidth 980 :defaultHeight 700}))
          native-titlebar? (cfgs/get-item :window/native-titlebar?)
          win-opts  (cond->
