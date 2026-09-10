@@ -474,6 +474,15 @@
  :f28/role-direct-why "This block mentions this page, so it is one of the results counted above."
  :f28/role-direct-again-why "This block mentions this page, so it is one of the results counted above. It is shown here again, under the block it is written below."
  :f28/role-context-why "This block does not mention this page. It is shown for context, under a block that does."
+
+ ;; F28 source-page group ordering — the order the GROUPS of a page's linked
+ ;; references are drawn in. Three orders and no more: OG's own, and the source
+ ;; page's title each way. Nothing inside a group moves.
+ :f28/order-label "Source page order"
+ :f28/order-why "Changes the order of the source-page groups in this list only. Nothing inside a group moves, nothing is added or removed, and nothing is written to your notes. This choice is not saved."
+ :f28/order-original "Original order (Logseq's own)"
+ :f28/order-title-asc "Source page title A → Z"
+ :f28/order-title-desc "Source page title Z → A"
  :linked-references/filter-search "Search in linked pages"
  :linked-references/unexpected-error "Linked References: Unexpected error. Please re-index your graph first."
  :linked-references/filter-heading "Filter"

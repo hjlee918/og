@@ -14,6 +14,7 @@
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
+            [frontend.util.f28-reforder :as f28ord]
             [rum.core :as rum]
             [frontend.modules.outliner.tree :as tree]))
 
@@ -119,10 +120,73 @@
      (content/content block-id
                       {:hiccup ref-hiccup})]))
 
-(rum/defc references-inner
-  [page-name filters filtered-ref-blocks source-path? role-pages]
+;; ---------------------------------------------------------------------------
+;; F28 source-page group ordering — one selectable order for the GROUPS.
+;;
+;; OG orders the source-page groups by `:block/journal-day` alone, which only a
+;; journal has; every ordinary page keeps whatever order `group-by` produced,
+;; and nothing offers the reader a choice. Measured on screen, in a build
+;; without this feature: `f28-refpath/checks/reforder-baseline-checks.js`.
+;;
+;; The choice is LOCAL TO THIS VIEW — a `rum/local` on `references*` below. Not
+;; a graph-file preference, not `config.edn`, not app state, not synchronised.
+;; It lasts as long as the list is on screen, and a fresh visit starts at
+;; `:original`, which is OG's own order.
+;; ---------------------------------------------------------------------------
+
+(rum/defc f28-group-order-control < rum/reactive
+  "One `<select>` choosing the order of this list's source-page groups.
+
+  `rum/reactive` is here for TWO measured reasons, not by habit:
+
+    * it reads `*group-order`, so choosing an order redraws the control itself
+      without redrawing `references*` and re-running its queries;
+    * `t` reads the interface language through `state/sub`, and
+      `frontend.util/react` degrades to a plain deref outside a reactive
+      component. The reference-role slice's first packaged run found exactly
+      that failure — the language changed and 47 labels stayed English — so the
+      subscription is made HERE, where the words are.
+
+  `data-f28-order` carries the DECISION, so a check reads the order rather than
+  the dictionary.
+
+  Both mouse-down handlers stop propagation and nothing else. `ui/foldable` is
+  rendered with `:title-trigger?`, so its header calls `util/stop` — which
+  PREVENTS THE DEFAULT ACTION — on mouse-down; a select whose default action is
+  prevented never opens. `stop-propagation` keeps the header from folding
+  without touching what the browser does with the control. The key handler is
+  the same bargain the F27 panel controls make: OG installs a global
+  `goog.ui.KeyboardShortcutHandler` on `window` which prevents the default
+  action of every key it matches, and a select is driven by exactly those keys,
+  so the event is stopped before it can reach it — and never prevented, because
+  the browser's own handling of the key IS the feature."
+  [*group-order]
+  (let [mode (f28ord/normalize-mode (rum/react *group-order))]
+    [:div.f28-order
+     {:on-mouse-down util/stop-propagation
+      :on-click util/stop-propagation}
+     [:select.f28-order-select
+      {:value (f28ord/mode-value mode)
+       :data-f28-order (f28ord/mode-value mode)
+       :aria-label (t :f28/order-label)
+       :title (t :f28/order-why)
+       :on-change (fn [e] (reset! *group-order (f28ord/value->mode (util/evalue e))))
+       :on-mouse-down util/stop-propagation
+       :on-key-down util/stop-propagation}
+      (for [m f28ord/modes]
+        [:option {:key (f28ord/mode-value m)
+                  :value (f28ord/mode-value m)}
+         (t (f28ord/label-key m))])]]))
+
+(rum/defc references-inner < rum/reactive
+  [page-name filters filtered-ref-blocks source-path? role-pages *group-order]
   [:div.references-blocks
-   (let [ref-hiccup (block/->hiccup filtered-ref-blocks
+   (let [;; F28 ordering: read HERE rather than in `references*`, so choosing an
+         ;; order redraws this list and not the component that queries for it.
+         ;; nil on every surface that was not offered the control, which is what
+         ;; `->hiccup` reads as "leave OG's own order exactly alone".
+         group-order (when *group-order (rum/react *group-order))
+         ref-hiccup (block/->hiccup filtered-ref-blocks
                                     {:id page-name
                                      :ref? true
                                      :breadcrumb-show? true
@@ -148,43 +212,56 @@
                                      ;; would miss the aliases the count includes.
                                      ;; nil in the sidebar's copy, which gets no
                                      ;; labels at all.
-                                     :f28/role-pages role-pages}
+                                     :f28/role-pages role-pages
+                                     ;; F28 source-page group ordering: the order
+                                     ;; the GROUPS are drawn in. `:original` is
+                                     ;; OG's own sequence handed back untouched,
+                                     ;; and nil means this surface has no control
+                                     ;; and nothing about the order changes.
+                                     :f28/group-order group-order}
                                     {})]
      (content/content page-name {:hiccup ref-hiccup}))])
 
 (rum/defc references-cp
   [page-name filters filters-atom filter-state total filter-n filtered-ref-blocks *ref-pages
-   source-path? role-pages]
+   source-path? role-pages *group-order]
   (let [threshold (state/get-linked-references-collapsed-threshold)
         default-collapsed? (>= total threshold)
         *collapsed? (atom nil)]
     (ui/foldable
      [:div.flex.flex-row.flex-1.justify-between.items-center
       [:h2.font-medium (t :linked-references/reference-count (if (seq filters) filter-n nil) total)]
-      [:a.filter.fade-link
-       {:title (t :linked-references/filter-heading)
-        :on-mouse-over (fn [_e]
-                         (when @*collapsed? ; collapsed
-                           ;; expand
-                           (reset! @*collapsed? false)))
-        :on-mouse-down (fn [e]
-                         (util/stop-propagation e))
-        :on-click (fn []
-                    (state/set-modal! (filter-dialog filters-atom *ref-pages page-name)
-                                      {:center? true}))}
-       (ui/icon "filter" {:class (cond
-                                   (empty? filter-state)
-                                   "opacity-60 hover:opacity-100"
-                                   (every? true? (vals filter-state))
-                                   "text-success"
-                                   (every? false? (vals filter-state))
-                                   "text-error"
-                                   :else
-                                   "text-warning")
-                          :size  22})]]
+      ;; F28 ordering sits BESIDE OG's own filter control, in the heading row
+      ;; the `justify-between` above already lays out: the count on the left,
+      ;; the controls on the right. `*group-order` is nil on every surface that
+      ;; is not this one, and then nothing is added here at all.
+      [:div.flex.flex-row.items-center.f28-order-row
+       (when *group-order (f28-group-order-control *group-order))
+       [:a.filter.fade-link
+        {:title (t :linked-references/filter-heading)
+         :on-mouse-over (fn [_e]
+                          (when @*collapsed? ; collapsed
+                            ;; expand
+                            (reset! @*collapsed? false)))
+         :on-mouse-down (fn [e]
+                          (util/stop-propagation e))
+         :on-click (fn []
+                     (state/set-modal! (filter-dialog filters-atom *ref-pages page-name)
+                                       {:center? true}))}
+        (ui/icon "filter" {:class (cond
+                                    (empty? filter-state)
+                                    "opacity-60 hover:opacity-100"
+                                    (every? true? (vals filter-state))
+                                    "text-success"
+                                    (every? false? (vals filter-state))
+                                    "text-error"
+                                    :else
+                                    "text-warning")
+                           :size  22})]]]
 
      (fn []
-       (references-inner page-name filters filtered-ref-blocks source-path? role-pages))
+       (references-inner page-name filters filtered-ref-blocks source-path? role-pages
+                         *group-order))
 
      {:default-collapsed? default-collapsed?
       :title-trigger? true
@@ -216,6 +293,10 @@
 
 (rum/defcs references* < rum/reactive db-mixins/query
   (rum/local nil ::ref-pages)
+  ;; F28 source-page group ordering: the reader's choice, LOCAL TO THIS VIEW.
+  ;; It starts at OG's own order, it is never written anywhere, and leaving the
+  ;; page and coming back starts at OG's own order again.
+  (rum/local :original ::group-order)
   {:init (fn [state]
            (let [page-name (first (:rum/args state))
                  filters (when page-name (atom nil))]
@@ -276,7 +357,11 @@
                          ;; of `top-level-blocks` above use to decide what this
                          ;; heading counts. Withheld from the sidebar's copy for
                          ;; the same reason `source-path?` is.
-                         (when source-path? aliases))]]))))
+                         (when source-path? aliases)
+                         ;; F28 ordering: withheld from the sidebar's copy for the
+                         ;; same reason again, and nil there means the control is
+                         ;; not rendered and the order is not touched.
+                         (when source-path? (::group-order state)))]]))))
 
 (rum/defc references
   "`opts` carries only `:sidebar?`, which F28 reads to keep the source-path

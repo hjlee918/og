@@ -526,6 +526,13 @@
  :f28/role-direct-why "이 블록이 이 페이지를 직접 언급합니다. 위에 집계된 결과 중 하나입니다."
  :f28/role-direct-again-why "이 블록이 이 페이지를 직접 언급합니다. 위에 집계된 결과 중 하나이며, 여기서는 이 블록이 적혀 있는 상위 블록 아래에 다시 표시되었습니다."
  :f28/role-context-why "이 블록은 이 페이지를 언급하지 않습니다. 이 페이지를 언급한 블록 아래에 맥락으로 표시되었습니다."
+
+ ;; F28 출처 페이지 묶음 순서 — 이 목록에서 묶음이 그려지는 순서.
+ :f28/order-label "출처 페이지 순서"
+ :f28/order-why "이 목록에서 출처 페이지 묶음의 순서만 바꿉니다. 묶음 안의 내용은 움직이지 않고, 무엇도 더해지거나 빠지지 않으며, 노트에는 아무것도 기록되지 않습니다. 이 선택은 저장되지 않습니다."
+ :f28/order-original "원래 순서 (OG 기본)"
+ :f28/order-title-asc "출처 페이지 제목 (ㄱ→ㅎ, A→Z)"
+ :f28/order-title-desc "출처 페이지 제목 (ㅎ→ㄱ, Z→A)"
  :linked-references/filter-search "링크된 페이지에서 검색"
  :notification/clear-all "모두 제거"
  :page/logseq-is-having-a-problem "Logseq에 문제가 발생하였습니다. 작업 환경으로 돌아가기 위해서는 다음 지시를 따라주십시오."

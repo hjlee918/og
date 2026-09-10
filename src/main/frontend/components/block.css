@@ -2295,3 +2295,53 @@ html.is-mac {
 .f28-role:hover {
   opacity: 1;
 }
+
+/* ---------------------------------------------------------------------------
+   F28 source-page group ordering — the order the GROUPS of a page's linked
+   references are drawn in.
+
+   One `<select>` in the linked-references heading, beside OG's own filter
+   icon. It is a control rather than a label, so it is legible rather than
+   quiet — but it is secondary to the count it sits next to, and it must not
+   push the filter icon out of the row on a narrow window.
+
+   Everything is scoped to `.f28-order*`, so removing this feature removes its
+   appearance with it and nothing in OG's own heading styling changes.
+   --------------------------------------------------------------------------- */
+
+.f28-order-row {
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.f28-order {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.f28-order-select {
+  max-width: 14rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--ls-border-color);
+  border-radius: 4px;
+  background-color: transparent;
+  color: var(--ls-secondary-text-color);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.f28-order-select:hover {
+  opacity: 1;
+}
+
+/* The keyboard stop this feature adds is its ONLY one, so it says where it is.
+   `:focus-visible` rather than `:focus`, so a mouse user is not given a ring
+   they did not ask for. */
+.f28-order-select:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--ls-link-text-color);
+  outline-offset: 1px;
+}

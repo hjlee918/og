@@ -75,6 +75,7 @@
             [frontend.util.f28-refctx :as f28ctx]
             [frontend.util.f28-refpath :as f28]
             [frontend.util.f28-refrole :as f28role]
+            [frontend.util.f28-reforder :as f28ord]
             [frontend.util.property :as property]
             [frontend.util.text :as text-util]
             [goog.dom :as gdom]
@@ -6037,6 +6038,63 @@
    :whiteboard? (boolean (or (:whiteboard? config) (:whiteboard-view? config)))})
 
 ;; ---------------------------------------------------------------------------
+;; F28 source-page group ordering — the order the GROUPS of a page's linked
+;; references are drawn in.
+;;
+;; OG's own ordering is one expression in `->hiccup` below, and it can see only
+;; `:block/journal-day`; every ordinary page's is nil, so ordinary pages keep
+;; whatever order `(group-by :block/page …)` produced. Measured on screen in a
+;; build without this feature (`f28-refpath/checks/reforder-baseline-checks.js`):
+;; the journal group first, the rest in neither title order, and no ordering
+;; control anywhere in the section.
+;;
+;; What is added is one selectable order over the GROUPS. `:original` hands OG's
+;; own sequence back untouched; the other two sort THAT sequence, so switching
+;; back cannot drift. The decision is `frontend.util.f28-reforder`, which is
+;; pure; this is the only place OG's config shape is known for it.
+
+(defn- f28-group-order
+  "The order this list's source-page groups are drawn in, or nil when this
+  surface has none — in which case nothing about the list changes at all.
+
+  `:f28/group-order` is set only by `frontend.components.reference/references*`,
+  and only for the main reading area's copy of the list. It is checked against
+  the same surface rules the other F28 slices delegate to, so a surface added to
+  one of them cannot silently diverge here."
+  [config]
+  (let [mode (:f28/group-order config)]
+    (when (and (some? mode)
+               (f28ord/offer-control?
+                (assoc (f28-surface config)
+                       :order-list? (boolean (:f28/source-path? config)))))
+      (f28ord/normalize-mode mode))))
+
+(defn- f28-group-title
+  "The title one source-page group is ordered by — the page's own
+  `:block/original-name`, which is what OG renders in the group's header.
+
+  `references*` replaces an ALIAS group's page map with `{:db/id …
+  :block/alias? true :block/journal-day …}`, stripping the name, so the entity
+  is resolved here. That is the SAME `(db/entity (:db/id page))` `->hiccup`
+  performs a few lines later to render the header, so ordering introduces no
+  read the list was not already making."
+  [page]
+  (let [e (db/entity (:db/id page))]
+    (or (:block/original-name e)
+        (:block/name e)
+        (:block/original-name page)
+        (:block/name page)
+        "")))
+
+(defn- f28-order-groups
+  "OG's own ordered groups, then this feature's order over them — or OG's own
+  sequence itself when there is no order to apply."
+  [groups order]
+  (if order
+    (f28ord/order-groups groups order (comp f28-group-title first))
+    groups))
+
+;; ---------------------------------------------------------------------------
 ;; F28 reference roles — WHY a row is on a page's linked-references list.
 ;;
 ;; Row 8 of `project-notes/F28_CHILD_CONTEXT_SPEC.md` §1, measured in the
@@ -7428,32 +7486,49 @@
                  {:debug-id page})])))))]
 
      (and (:ref? config) (:group-by-page? config))
-     [:div.flex.flex-col.references-blocks-wrap
-      (let [blocks (sort-by (comp :block/journal-day first) > blocks)]
-        (for [[page page-blocks] blocks]
-          (ui/lazy-visible
-           (fn []
-             (let [alias? (:block/alias? page)
-                   page (db/entity (:db/id page))
-                   ;; FIXME: parents need to be sorted
-                   parent-blocks (group-by :block/parent page-blocks)]
-               [:div.my-2.references-blocks-item {:key (str "page-" (:db/id page))}
-                (ui/foldable
-                 [:div
-                  (page-cp config page)
-                  (when alias? [:span.text-sm.font-medium.opacity-50 " Alias"])]
-                 (for [[parent blocks] parent-blocks]
-                   (let [blocks' (map (fn [b]
-                                        ;; Block might be a datascript entity
-                                        (if (e/entity? b)
-                                          (db/pull (:db/id b))
-                                          (update b :block/children
-                                                  (fn [col]
-                                                    (tree/non-consecutive-blocks->vec-tree col))))) blocks)]
-                     (rum/with-key
-                       (breadcrumb-with-container blocks' config)
-                       (:db/id parent))))
-                 {:debug-id page})])))))]
+     (let [f28-order (f28-group-order config)]
+       [:div.flex.flex-col.references-blocks-wrap
+        ;; What the LIST applied, beside what the control shows, so the two are
+        ;; separately observable rather than assumed to agree.
+        (if f28-order {:data-f28-order (f28ord/mode-value f28-order)} {})
+        (let [blocks (f28-order-groups
+                      (sort-by (comp :block/journal-day first) > blocks)
+                      f28-order)]
+          (for [[page page-blocks] blocks]
+            ;; F28 ordering: a group must SURVIVE being moved rather than be
+            ;; rebuilt in its new place. The `:key` below sits on the div INSIDE
+            ;; the closure, where React cannot see it, so this `for` reconciled by
+            ;; POSITION: reordering handed position 0 a different page, changed
+            ;; that div's key, unmounted the subtree and minted a new
+            ;; `blocks-container-id` — the first half of every `ls-block-…` id and
+            ;; of the child-context panel's `aria-controls`. Keyed by the page's
+            ;; `:db/id`, the identity that div already used, and never by its
+            ;; title, which is the thing being sorted.
+            (rum/with-key
+             (ui/lazy-visible
+              (fn []
+               (let [alias? (:block/alias? page)
+                     page (db/entity (:db/id page))
+                     ;; FIXME: parents need to be sorted
+                     parent-blocks (group-by :block/parent page-blocks)]
+                 [:div.my-2.references-blocks-item {:key (str "page-" (:db/id page))}
+                  (ui/foldable
+                   [:div
+                    (page-cp config page)
+                    (when alias? [:span.text-sm.font-medium.opacity-50 " Alias"])]
+                   (for [[parent blocks] parent-blocks]
+                     (let [blocks' (map (fn [b]
+                                          ;; Block might be a datascript entity
+                                          (if (e/entity? b)
+                                            (db/pull (:db/id b))
+                                            (update b :block/children
+                                                    (fn [col]
+                                                      (tree/non-consecutive-blocks->vec-tree col))))) blocks)]
+                       (rum/with-key
+                         (breadcrumb-with-container blocks' config)
+                         (:db/id parent))))
+                   {:debug-id page})])))
+             (:db/id page))))])
 
      (and (:group-by-page? config)
           (vector? (first blocks)))
