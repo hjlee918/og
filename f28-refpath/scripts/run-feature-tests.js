@@ -48,7 +48,11 @@ const F28_FILES = ['feature-build.test.js', 'graph-fixture.test.js',
                    // identity check that decides whether third-party bytes may
                    // be loaded at all, and the profile swap that keeps a plugin
                    // out of every later F28 run.
-                   'plugin-artifacts.test.js', 'fresh-profile.test.js']
+                   'plugin-artifacts.test.js', 'fresh-profile.test.js',
+                   // The plugin-loading diagnosis: which condition actually
+                   // suppresses the privileged `lsp://` entry, and why the
+                   // handshake dies on the HOST RENDERER's origin.
+                   'plugin-handshake.test.js']
   .map((f) => path.join('f28-refpath', 'tests', f));
 
 // The inherited F27 suites that are still true in this checkout: the fixture
