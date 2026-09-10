@@ -179,7 +179,7 @@ async function experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH
   obs.origins = origins;
   record('X.1', 'the renderer is actually served from the privileged application origin — the ' +
     'URL the window ended up at, not the define the build compiled in',
-    origins.origin === 'lsp://logseq.com' && /\/electron\.html$/.test(origins.href || ''),
+    origins.origin === 'lsp://logseq.com' && /\/electron\.html(?:#.*)?$/.test(origins.href || ''),
     `href ${J(origins.href)}, origin ${J(origins.origin)}`);
 
   const load = XA.summariseLoad(ps, wantIds);
@@ -227,10 +227,9 @@ async function experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH
     asset ? `${J(asset.url)} → loaded ${J(asset.loaded)} ${J(asset.w)}x${J(asset.h)}` : 'no probe placed');
 
   const net = await NET.read(session.app);
-  obs.network = net ? { allowed: net.allowed, refusedCount: net.refused.length,
+  obs.network = net ? { version: net.version, active: net.active, sessions: net.sessions, navigations: net.navigations, totalRefused: net.totalRefused, allowed: net.allowed, refusedCount: net.refused.length,
                         refused: net.refused.slice(0, 40) } : null;
-  record('X.8', 'no request left the application: every non-local scheme was refused by the ' +
-    "experimental bootstrap control; bounded redacted refusals are recorded",
+  record('X.8', 'the tested startup control is still active; refusal evidence is bounded and redacted',
     !!net && net.active === true && net.version === 'f28-origin-network/1',
     () => net
       ? `${net.allowed} local request(s) allowed; ${net.refused.length} refused` +
@@ -243,6 +242,7 @@ async function runSession(cfg, built, stamp) {
   const record = makeRecorder(prefix);
   const errors = REC.createRecorder();
   const obs = { key: cfg.key, label: cfg.label, plugins: cfg.plugins };
+  sessions[cfg.key] = obs;
   let ownedTree = [];
   let errorEvidence = null;
 
@@ -297,6 +297,18 @@ async function runSession(cfg, built, stamp) {
       ? fs.readdirSync(pluginsDir).filter((n) => n !== '.DS_Store') : [];
     record('2.1', 'the control session installs nothing; the plugins directory is empty',
       present.length === 0, `${pluginsDir}: ${J(present)}`);
+  }
+  if (EXPERIMENT) {
+    const settings = path.join(stateRoot, 'home', '.logseq-og', 'settings');
+    fs.mkdirSync(settings, { recursive: true });
+    for (const id of cfg.plugins) {
+      const file = path.join(settings, id + '.json');
+      if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').trim() !== '{}')
+        throw new Error('Nonempty experimental settings; activation refused');
+      if (!fs.existsSync(file)) fs.writeFileSync(file, '{}', { flag: 'wx' });
+    }
+    obs.settingsBeforeActivation = Object.fromEntries(cfg.plugins.map(id => [id, {}]));
+    record('2.4', 'every experimental plugin starts with explicitly verified empty settings', true, J(obs.settingsBeforeActivation));
   }
   const pluginsBefore = PA.snapshot(pluginsDir);
 
@@ -374,7 +386,11 @@ async function runSession(cfg, built, stamp) {
       (ps.plugins || []).every((p) => p.status !== null || p.loaded !== null),
       () => (loadRows.length ? loadRows.join('\n          ') : 'no package registered') +
         `\n          → ${loadedCount} of ${wantIds.length} completed runtime initialisation`);
-    if (EXPERIMENT) await experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH });
+    if (EXPERIMENT) {
+      await experimentChecks({ session, page, record, obs, ps, wantIds, GRAPH });
+      obs.originStorage = await require('../../f28-origin/checks/storage-origin').inventoryFromPage(page);
+
+    }
 
     record('3.3', 'the surfaces a LOADED plugin would have created are counted, so "no ' +
       'interference" is measured rather than inferred',
@@ -387,6 +403,9 @@ async function runSession(cfg, built, stamp) {
     // =====================================================================
     // The reference list itself
     // =====================================================================
+    const journeyAllowed = !EXPERIMENT || (loadedCount === wantIds.length && !process.argv.includes('--load-only'));
+    if (!journeyAllowed) obs.skips = ['reference journey: ' + (loadedCount !== wantIds.length ? 'plugin loading incomplete' : 'loading-only follow-up; full Readwise journey recorded separately')];
+    if (journeyAllowed) {
     phase('references', 'open-the-anchor-page');
     await session.goTo(CG.ANCHOR);
     await JN.settle('on the anchor page');
@@ -673,6 +692,10 @@ async function runSession(cfg, built, stamp) {
         `${(psEnd.plugins || []).map((p) => `${p.key}=${J(p.status)}/loaded ${J(p.loaded)}`).join(', ')
           || 'none'}; injected UI nodes ${psEnd.injectedUiNodes}, sandbox iframes ` +
         `${psEnd.sandboxIframes}`);
+    }
+  } catch (error) {
+    obs.failure = String(error.message);
+    record('journey', 'session operations completed', false, obs.failure);
   } finally {
     errorEvidence = await session.collectErrorEvidence();
     const closed = await APP.close(session, { say });

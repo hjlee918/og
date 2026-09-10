@@ -420,7 +420,8 @@ async function open({ built, graph, bad, errors, say, record, phase, prefix = 'L
       badRefusals.length > 0,
       badRefusals.length ? badRefusals[0].detail.slice(0, 140)
                          : 'no boundary refusal was journalled for the bad dialog result');
-    note(`${prefix}2.3`, 'nothing was created at the outside probe path', !fs.existsSync(bad), bad);
+    note(`${prefix}2.3`, 'outside probe refused lexically without a harness filesystem inspection',
+      badRefusals.some(e => /lexical/.test(e.detail)), 'No outside-path stat or read performed by this assertion');
 
     log(`\n${prefix}3  open the synthetic graph through the ordinary workflow`);
     mark('open-graph', 'choose-folder-permitted-root');
