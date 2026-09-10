@@ -79,8 +79,8 @@ function main() {
     return;
   }
 
-  if (!pre.manifest.artifacts['network-bootstrap.js']) {
-    fail('preflight', 'missing-network-control', 'Network bootstrap must be hash-verified');
+  if (!pre.manifest.artifacts['network-bootstrap.js'] || !pre.manifest.artifacts['js/preload.js']) {
+    fail('preflight', 'missing-network-control', 'Network bootstrap and preload must be hash-verified');
     exit(78);
     return;
   }

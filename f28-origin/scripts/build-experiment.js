@@ -290,7 +290,7 @@ log(`renderer asset set produced by THIS build: ${assets.size} files`);
 const buildId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(4).toString('hex')}`;
 
 const artifacts = {};
-for (const f of [ID.MAIN_BUNDLE].concat(ENTRY_FILES)) {
+for (const f of [ID.MAIN_BUNDLE].concat(ENTRY_FILES, ['js/preload.js'])) {
   const buf = fs.readFileSync(path.join(STATIC, f));
   artifacts[f] = { bytes: buf.length, sha256: sha256(buf) };
 }
@@ -343,7 +343,7 @@ const manifest = {
     note: 'CANDIDATE ONLY. Not an accepted architecture, not an installation, ' +
           'and not a migration of any existing profile.',
   },
-  guardSources: 'f27-pilot/src (unchanged); identity from f28-refpath/src/feature-identity.js',
+  guardSources: 'preflight/isolation/boundary from f27-pilot/src unchanged; experimental main/bootstrap/identity from f28-origin/src; experimental first-party preload derived by this build script',
   artifacts,
   rendererAssetCount: assets.size,
   rendererAssetSetSha256: sha256(Buffer.from(

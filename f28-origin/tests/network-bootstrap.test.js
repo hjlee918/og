@@ -21,7 +21,8 @@ const e = require('electron');
 e.app.setPath('userData', ${JSON.stringify(dir)} + '/profile');
 e.app.setPath('sessionData', ${JSON.stringify(dir)} + '/session');
 e.protocol.registerSchemesAsPrivileged([{scheme:'lsp',privileges:{standard:true,secure:true,supportFetchAPI:true}}]);
-if (${fail}) Object.defineProperty(e.net, 'request', {value:e.net.request,writable:false,configurable:false});
+if (${JSON.stringify(fail)} === 'session') e.app.on('session-created', s => Object.defineProperty(s.webRequest,'onBeforeRequest',{value:()=>{throw Error('synthetic install failure')},configurable:false,writable:false}));
+if (${JSON.stringify(fail)} === true) Object.defineProperty(e.net, 'request', {value:e.net.request,writable:false,configurable:false});
 try { require(${JSON.stringify(bootstrap)}).install(e); } catch (_) { e.app.exit(78); }
 e.app.on('window-all-closed', () => {});
 e.app.on('ready', async () => {
@@ -81,3 +82,5 @@ test('real Electron: bootstrap before navigation, main/renderer refusal, two ses
 test('real Electron: incomplete install exits before any window or activation', () => {
  const r=run(true); assert.equal(r.status,78,JSON.stringify(r)); assert.equal(r.result,null);
 });
+
+test('real Electron: session installation failure exits before the first window', () => { const r=run('session'); assert.equal(r.status,78,JSON.stringify(r)); assert.equal(r.result,null); });

@@ -8,6 +8,7 @@ const B = require('../../f27-pilot/checks/allowed-root');
 const GH = require('../../f27-pilot/checks/graph-hash');
 const OP = require('../../f27-pilot/checks/owned-process');
 const CG = require('../../f28-refpath/checks/make-combined-graph');
+const RJ = require('../../f28-refpath/checks/reference-journey');
 const RD = require('../../f28-refpath/checks/reforder-read');
 const NET = require('./network-refusal');
 const STORAGE = require('./storage-origin');
@@ -31,8 +32,9 @@ async function main() {
     session=await APP.open({built:old,graph,errors:REC.createRecorder(),bad:path.join(path.dirname(B.allowedRootReal()),'f28-inert-rollback'),record:note});
     await session.page.evaluate(k=>localStorage.setItem(k,'OLD-TEST-PREFERENCE'),KEY);
     await session.goTo(CG.ANCHOR);
+    await RJ.create({page:session.page,session,CG}).settle('old TEST baseline');
     const first=await RD.read(session.page);
-    if (!first.present) throw Error('old test baseline references missing');
+    if (!first.present || first.groups.length!==8) throw Error('old test baseline references missing');
     out.stages.push({name:'old-test-baseline',origin:await session.page.evaluate(()=>location.origin),storage:await STORAGE.inventoryFromPage(session.page),references:first.groups.length});
     out.stages[0].cleanup=await APP.close(session);session=null;
 
@@ -57,6 +59,8 @@ async function main() {
     if(preference!=='OLD-TEST-PREFERENCE')throw Error('old synthetic preference not preserved');
     await page.evaluate(n=>{location.hash='#/page/'+encodeURIComponent(n);},CG.ANCHOR);
     await OP.sleep(3500);
+    session.parkPointer=()=>page.mouse.move(5,5);
+    await RJ.create({page,session,CG}).settle('old TEST rollback');
     const refs=await RD.read(page);
     if(!refs.present || refs.groups.length!==first.groups.length)throw Error('old TEST reference behavior changed');
     out.stages.push({name:'actual-old-test-build-rollback',liveGraph:verdict,preferencePreserved:true,references:refs.groups.length,storage:await STORAGE.inventoryFromPage(page)});
