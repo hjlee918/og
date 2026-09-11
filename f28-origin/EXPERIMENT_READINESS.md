@@ -1,149 +1,165 @@
-# Origin experiment checkpoint — 2026-09-10
+# Isolated origin experiment — supervisor review
 
-**Not ready for live plugin activation or deployment.** This continues the
-approved experiment; it does not start a new phase. Source repair commit
-`7af0ce9a2bfecc8f6abf82926de9358e18b7e735` remains separately identifiable.
-The upstream branch was verified at `d5a73f73a4c8c751a46016bc01c5d3c0d1210d28`
-before the non-force push. Partial files and previous evidence are preserved.
+Updated 2026-09-10 (Los Angeles; final runs use September 11 UTC timestamps).
+The approved experiment now has a tested startup control and actual plugin
+activation evidence. It remains experimental and inactive in the accepted build.
+This is not deployment or general plugin compatibility acceptance.
 
-## Package identity
+## Package and source
 
-The completed build was in `static/`; no experimental package existed at resume.
-Forge packaging initially failed on sandbox DNS, then succeeded with network
-access. There was no rebuild of application source and no duplicate build.
+- Package: `../out-originexp/Logseq-OG-F28-OriginExp-darwin-x64/Logseq-OG-F28-OriginExp.app`
+- Build: `2026-09-10T22-15-35-426Z-4cf82a57`; bundle `com.logseq.logseq-og.f28originexp`.
+- Clean source: `cb04131613e1640ca0e64c47e07b3afca81c47f6`; renderer `cb0413161`.
+  The later documentation commit does not change this package's source identity.
+- Manifest SHA-256: `a1b50f3ed77cbdee9bf8e407c78d63b154d735349f2a11bf60284dbca105cbf3`.
+  All 15 package preflight checks pass, including bootstrap and preload hashes.
+- Accepted RefPath package remains build `2026-09-10T11-28-38-531Z-53b57083`,
+  manifest `3bff119b2449ed9121a1c74085be5cb60f0446780cff93ba381398ff4a111c0e`.
+- Original experiment is preserved in `../out-originexp-preserved-20260910-cf6bcbfe/`:
+  build `2026-09-10T20-58-54-326Z-cf6bcbfe`, source `7af0ce9a2-dirty`, dirty=true,
+  manifest `5b099b31a7c9a4fc39476322969c3a576536e12bc37575a7b21e2b1cf4398c76`.
+- The earlier clean bootstrap package is also preserved in
+  `../out-originexp-preserved-20260910-c886eac2/`. Its live evidence predates
+  explicit native proxy/PAC refusal and is not substituted for final-package evidence.
 
-- Experimental app: `../out-originexp/Logseq-OG-F28-OriginExp-darwin-x64/Logseq-OG-F28-OriginExp.app`
-- Build: `2026-09-10T20-58-54-326Z-cf6bcbfe`
-- Bundle: `com.logseq.logseq-og.f28originexp` (also read from Info.plist)
-- Manifest SHA-256: `5b099b31a7c9a4fc39476322969c3a576536e12bc37575a7b21e2b1cf4398c76`
-- Recorded source: `7af0ce9a2bfecc8f6abf82926de9358e18b7e735`, dirty=true;
-  renderer `7af0ce9a2-dirty`. This is preserved provenance, not a clean-build claim.
-- Experimental package preflight: passes.
-- Preserved RefPath package preflight: passes; build
-  `2026-09-10T11-28-38-531Z-53b57083`, manifest SHA-256
-  `3bff119b2449ed9121a1c74085be5cb60f0446780cff93ba381398ff4a111c0e`.
-- Default package selection now excludes OriginExp; explicit selection is required.
-- No existing profile was opened, moved, migrated or inspected by these checks.
+## Containment and tests
 
-## Activation safety finding and stop condition
+[Network control scope](NETWORK_CONTROL.md) records the experiment-only first-party
+bootstrap. It installs before the application bundle, first window, navigation or
+plugin activation. It covers actual Chromium sessions; main HTTP bridges and their
+node-fetch path; Node/Electron networking; native proxy resolution/configuration;
+external opening, child processes and reviewed service/CLI/update paths. Existing
+canonical local application/plugin/asset and graph guards remain enforced.
+Incomplete installation exits before activation. Evidence is bounded to 100 fixed
+refusal kinds without request URLs, headers, bodies or credentials.
 
-The partial `network-refusal.js` installed after Playwright launch returned.
-`electron.window/create-main-window!` constructs a BrowserWindow and calls
-`loadURL` itself, so that order cannot prove interception before navigation.
-Moreover `electron.handler` exposes `:httpRequest` and `:httpFetchJSON`, which
-call `electron.utils/fetch` backed by `node-fetch`. A defaultSession hook is
-not evidence of coverage for those main-process calls, other sessions, native
-network paths, or external browser activation. Empty credentials are insufficient.
+This is application-level containment of reviewed activation paths, not an OS
+sandbox or coverage of arbitrary native code. No wildcard origin, webSecurity
+relaxation, third-party bundle patch or host networking change was used.
 
-The plan's section 8 stop condition applies: no contained activation path has
-been established. The experimental runner now refuses at the very beginning of
-`main()`, before package resolution, profile swaps, seeding, graph creation or
-launch. The injectable launch adapter independently refuses before calling
-Playwright, so there is no post-launch installation failure that can strand a
-process. The unsafe partial implementation is retained as non-executable
-`checks/network-refusal-unaccepted.txt`, explicitly marked unaccepted.
+Final regression: **434 passed, 0 failed, 9 skipped**, with **2 additional pilot
+identity checks excluded by name**. Breakdown: pilot 74; F28 256 plus 9 skips;
+experiment 33; inherited F27 fixture/error tooling 71. The skipped accepted-build
+identity assertions and two excluded pilot properties have active experimental
+counterparts. Historical build-specific F27 checks remain outside this invocation.
 
-No product/plugin launch occurred. Readwise genuinely loaded state and handshake,
-Ollama/ChatGPT loading individually or together, actual product renderer origin,
-plugin URLs, reference journey, Korean, keyboard, navigation, local assets,
-runtime errors, blocked service attempts and graph integrity are **not measured
-for this experimental package**. No zero-error, zero-request or graph-hash
-acceptance is inferred from absence of a run. `[frontend.handler]` uncertainty
-remains unresolved. The dormant runtime probes are preserved, not accepted as
-executed evidence. No third-party bundle patch or Electron security relaxation
-was made.
+Real Electron synthetic preactivation probes: **3/3 passed**, including failure
+before main installation and failure during session installation. They prove
+controls precede navigation, default and additional sessions refuse service
+requests, main node-fetch/IPC/native proxy and built preload paths refuse requests,
+local lsp resources work, and failed installation exits without activation.
+Draft test/build failures and their corrected reruns remain in evidence; this is
+not a claim that every invocation passed. An early lingering owned fixture process
+was identified and stopped; final cleanup is checked separately.
 
-## Tests and explicit omissions
+## Actual plugin loading and reference checks
 
-Combined final results, with only affected failures/checks rerun:
-**430 passed, 0 unresolved failures, 9 skipped; 2 additional pilot identity
-checks excluded by name.** This is not the earlier 424/424 result and is not one
-single all-green invocation.
+Each activation used verified retained plugin bytes, fresh isolated profiles,
+explicitly empty settings, fresh canonical synthetic graphs, and exact LIVE graph
+identity assertions before interactions. Registration alone was not accepted.
 
-- Pilot regression: 74 passed. Its two built-directory identity checks remain
-  excluded by the existing name filter (not counted by Node as skipped).
-- F28: first run 254 passed, 2 Electron fixture launch failures, 9 skipped.
-  Unmodified handshake suite rerun outside the sandbox: 3/3 passed, resolving
-  those two failures. Effective F28 result: 256 passed, 9 skipped.
-- Experiment: final affected suite 29/29 passed.
-- Inherited F27 fixture/error tooling: 71/71 passed. Its historical build-specific
-  suite remains excluded as before; it targets a different static identity.
+- Readwise v1.4.11: completed handshake, host loaded state and actual injected UI.
+  The final full reference journey passed: 10 mentions, 8 groups, 22 rows; Korean
+  labels, keyboard disclosure, navigation and local asset loading. **53/54 checks**;
+  the strict window-error accounting check failed (9 unexplained captured errors,
+  including blocked resources/negative protocol probes; 0 feature-phase errors).
+- Ollama v1.1.6: completed handshake and injected one UI node, but startup throws
+  `TypeError` during shortcut registration (`undefined.replace`) and reports the
+  missing `ollama-logseq-config` page. This is partial initialization, not clean
+  functional acceptance.
+- ChatGPT v2.0.3: completed host handshake/loaded report, but zero injected UI and
+  a callback cross-origin `SecurityError` assigning `Window.ChatGPT` from
+  `lsp://logseq.io`. Actual initialization failed despite the host loaded flag.
+- Combined: 3/3 host handshakes, two injected UI nodes, both plugin failures above.
+  Individual Ollama/ChatGPT and combined loading checks total **90/93**. All three
+  failures are strict error accounting (12/9/12 unexplained errors respectively).
+  These runs deliberately skip the reference journey.
+- No OAuth, account access, credentials, import/sync or AI commands were requested.
+  Plugins can attempt automatic startup work: Readwise wrote `lastSyncFailed:true`
+  into its preserved settings. Remote/loopback requests are refused; no successful
+  import/sync or service feature is claimed. Other-plugin reference journeys are explicitly skipped (`--load-only`).
+  There is no claim that service features work under refusal.
 
-The nine accepted-build skips map to active experimental assertions in
-`tests/experiment-build.test.js`: build presence; main bundle hash and guard
-closure define; every startup file's manifest hash; preflight and check count;
-unchanged pilot guard bytes; full identity separation and shared boundary
-contract; branch/revision/schema/renderer build provenance; renderer revision,
-closure path and absent telemetry defines; packaging output, bundle identity,
-no signing/notarization/protocol registration/makers/publishers. The two excluded
-pilot properties are also covered by the active main-bundle and preflight checks.
-The historical file-origin reproducer is unchanged. The new tests also cover
-pre-launch refusal, refusal before profile work, explicit experimental selection,
-and preservation of unknown storage keys.
+Every final live session retained unchanged graph content and plugin package
+bytes, with only three expected housekeeping additions (`.DS_Store`,
+`logseq/custom.css`, `pages/contents.md`). Each session reports zero surviving owned
+processes. Refusal counts were Readwise 6, Ollama 6, ChatGPT 4 and combined 4,
+including three native proxy refusal records in each session. They are bounded
+application evidence, not packet capture or an OS-wide network claim.
 
-## Synthetic settings and rollback findings
+The strict error classifier was not relaxed. Earlier `[frontend.handler]`
+uncertainty remains unresolved even when absent in these runs.
 
-The prior fixture at `.../T/f28-origin-storage-2jVOID` contains both origin strings
-in its storage files, but no saved result was found in project evidence. That
-alone is not migration acceptance. A fresh fixture run now records:
+## Storage, rollback and preservation
 
-- Four synthetic keys exist at `file://`; `lsp://logseq.com` initially sees none.
-- Three synthetic preference keys copied to the new origin verify equal.
-- A deliberately corrupted in-memory comparison is detected; this is not an
-  injected browser-storage failure or interruption test.
-- All four old-origin values remain intact afterwards.
+Actual lsp storage inventory records eight key names/lengths and IndexedDB names
+`localforage`, `logseq`, `logseq-test-db-foo-bar-baz`, without values. The actual
+observed graph-bearing key is `current-repo`; fixture `git/current-repo` must not
+be assumed to describe product storage. Unknown stores, settings and preferences
+are preserved, not classified as disposable. Session settings/prefs are renamed
+aside and retained. Plugin bundle hashes remain unchanged.
 
-The fixture now serves exactly one allow-listed lsp URL and installs request
-refusal before creating its windows. It has no plugins or product IPC bridges;
-its network control is **not** claimed as product coverage. It records
-`acceptedAppRollback: false` explicitly. All temporary fixture profiles remain.
+The earlier synthetic storage fixture (`f28-origin-storage-resume-20260910.json`)
+proved new-origin isolation, copying three synthetic preferences, preservation of
+four old values and detection of an in-memory mismatch. It did not prove durable
+migration, interrupted-write recovery or actual app rollback. Its
+`acceptedAppRollback:false` remains accurate. No production migration/recovery
+implementation or user-profile migration was performed.
 
-Preservation inventory is still a design/source inventory for the product:
-UI preferences, unknown origin storage, config/config.edn, plugin settings,
-preferences.json, configs.edn and window-state.json must be preserved. Graph
-Markdown is authoritative and must not be migrated by this tooling. Search and
-DB indexes are potentially rebuildable only after exact product stores/keys are
-measured; broad name patterns cannot classify them safely. Classification now
-recognizes only this fixture's explicit synthetic cache as rebuildable.
+**Actual old TEST package rollback passed on the final package.** The preserved
+RefPath package opened a fresh TEST profile and synthetic graph; the experimental
+package used a separate fresh profile; the same old TEST profile then reopened.
+The old synthetic preference was absent in the candidate and remained unchanged
+on return. Exact LIVE graph identity passed before interactions; all eight
+reference groups were present before and after; graph content stayed unchanged
+(three expected housekeeping additions). All three stages exited with no owned
+processes left. This demonstrates actual package rollback, distinct from the
+storage fixture, and does not migrate a profile.
+The accepted shared profile was preserved by ownership-checked rename and restored
+with the original `2026-09-09T04:06:07.447Z` marker,
+not launched or migrated. All run profiles and prior evidence are retained.
 
-A future synthetic migration implementation must use a versioned key inventory,
-validate graph-bearing state against the exact canonical allowed test graph,
-refuse destination conflicts, journal original destination values durably,
-verify writes, and write the completion marker last. Recovery must detect
-intervening edits; blind retries are not idempotence. Test interruption after each
-write, conflict, verification failure and marker failure before claiming recovery.
-No such implementation or real-profile migration is delivered here.
+## Boundary and retained uncertainty
 
-Accepted-app rollback remains pending: after activation containment is established,
-use only an explicitly owned disposable TEST profile and canonical test graph;
-close owned experiment processes, verify the preserved accepted package identity,
-then launch the old TEST build/profile and assert exact LIVE graph identity before
-interactions. Retention of old-origin fixture values and accepted package preflight
-are useful evidence but do not substitute for that launch.
+Graph content access was confined to canonical test-owned subfolders of
+`/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test`.
+No personal graph investigation was performed to resolve historical uncertainty.
+The prior interrupted broad instruction search could have traversed out-of-scope
+metadata; that uncertainty remains. An inherited assertion in the first resumed
+live run checked existence of an explicitly nonexistent inert sibling probe path;
+it was removed, and final negative-path assertions perform lexical checks only.
+Neither point supports an unqualified historical no-metadata-access claim.
 
-## Boundary and cleanup
+No installation, default merge, release, deployment, accepted-build activation
+change or real-profile migration is authorized by these results. Return for
+supervisor review with compatibility and strict runtime-error failures retained.
+The earlier blocked checkpoint is preserved in
+[CHECKPOINT_BEFORE_BOOTSTRAP.md](CHECKPOINT_BEFORE_BOOTSTRAP.md).
 
-No Logseq app or plugin was launched; only synthetic Electron fixture applications
-ran. No graph content was read or written by these checks. **Execution limitation:**
-an initial `find .. -name AGENTS.md` instruction search was too broad and was
-interrupted. It returned no paths, but out-of-scope metadata traversal before the
-interrupt cannot be excluded. This prevents an unqualified no-metadata-access
-claim. Later instruction searches were restricted to exact project paths.
+## Final evidence
 
-Process inspection before work found no batch-owned app/build. Final inspection
-found no experiment, fixture Electron, or packaging process. An unrelated Claude
-crash handler was left untouched. No host networking setting was changed.
+Local evidence is retained under `../evidence/`:
+- `f28-origin-final-package-identity-20260910.json`
+- `f28-origin-final-regression-20260910.log`
+- `f28-origin-final-preactivation-tests-20260910.log`
+- `f28-origin-final-readwise-20260910.log` and `f28-origin-experiment-1789094584478.json`
+- `f28-origin-final-plugin-loading-20260910.log` and `f28-origin-experiment-1789094873779.json`
+- `f28-origin-final-test-build-rollback-20260910.log` and `f28-origin-test-build-rollback-1789094915454.json`
+- `f28-origin-final-preservation-20260910.json`
 
-Evidence under `../evidence/`:
-`f28-origin-package-resume[-network]-20260910.log`,
-`f28-origin-package-identity-resume-20260910.json`,
-`f28-origin-tests-resume-20260910.log`,
-`f28-origin-handshake-retry-20260910.log`,
-`f28-origin-affected-tests-final-20260910.log`,
-`f28-origin-gate-recheck-20260910.log`,
-`f28-origin-prior-storage-inspection-20260910.json`, and
-`f28-origin-storage-resume-20260910.json`.
+Final process inspection found no matching owned RefPath/OriginExp application,
+workspace Electron fixture or build process. [RESULTS.json](RESULTS.json) contains
+a compact source-controlled summary; raw evidence and prior failed runs remain
+local and preserved.
 
-Return to supervisor review with live activation and accepted-app rollback blocked.
-No merge, release, installation, deployment or real-profile migration is authorized
-by this checkpoint.
+## 한국어 진행 요약
+
+실험 전용 시작 차단을 먼저 검증한 뒤 실제 플러그인을 실행했습니다.
+Readwise는 악수·UI 생성과 참조/한국어/키보드/이동/로컬 자산 검사를 통과했습니다.
+Ollama는 UI가 생기지만 초기화 오류가 있고, ChatGPT는 악수 뒤 창 출처 오류로
+초기화가 실패합니다. 엄격한 오류 집계 실패는 그대로 남깁니다.
+자동 회귀 검사는 434개 통과·9개 건너뜀·pilot 2개 별도 제외입니다.
+기존 TEST 패키지로 실제 복귀해 설정과 참조 8그룹 보존을 확인했습니다.
+시험 그래프 내용 변경과 남은 소유 프로세스는 없습니다. 기존 패키지·설정·프로필과
+과거 메타데이터 탐색 불확실성을 보존하며, 설치·배포·실제 프로필 이전 없이 감독
+검토로 반환합니다.

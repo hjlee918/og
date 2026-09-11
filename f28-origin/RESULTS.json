@@ -1,0 +1,406 @@
+{
+  "package": {
+    "preflight": true,
+    "checks": 15,
+    "build": "2026-09-10T22-15-35-426Z-4cf82a57",
+    "builtFrom": {
+      "commit": "cb04131613e1640ca0e64c47e07b3afca81c47f6",
+      "branch": "feature/f28-reference-paths",
+      "dirty": false,
+      "rendererRevision": "cb0413161",
+      "describedAtBuild": "cb0413161"
+    },
+    "manifestSha256": "a1b50f3ed77cbdee9bf8e407c78d63b154d735349f2a11bf60284dbca105cbf3"
+  },
+  "regression": {
+    "passed": 434,
+    "failed": 0,
+    "skipped": 9,
+    "excludedPilotIdentityChecks": 2
+  },
+  "syntheticPreactivation": {
+    "passed": 3,
+    "failed": 0
+  },
+  "sessions": {
+    "readwise": {
+      "host": {
+        "count": 1,
+        "of": 1,
+        "rows": [
+          "logseq-readwise-official-plugin: status \"loaded\", loaded true, disabled false, version \"v1.4.11\""
+        ]
+      },
+      "activation": {
+        "rows": [
+          {
+            "key": "logseq-readwise-official-plugin",
+            "status": "loaded",
+            "loaded": true,
+            "loadError": null,
+            "entry": "lsp://logseq.io/logseq-readwise-official-plugin/dist/index.html"
+          }
+        ],
+        "allRegistered": true,
+        "loadedCount": 1,
+        "entriesOnPluginOrigin": true,
+        "anyHandshakeTimeout": false,
+        "anyFileEntry": false
+      },
+      "network": {
+        "version": "f28-origin-network/1",
+        "active": true,
+        "sessions": 1,
+        "navigations": 7,
+        "totalRefused": 6,
+        "allowed": 40,
+        "refusedCount": 6,
+        "refused": [
+          {
+            "kind": "proxy-configuration"
+          },
+          {
+            "kind": "proxy-reload"
+          },
+          {
+            "kind": "proxy-resolution"
+          },
+          {
+            "kind": "chromium-request"
+          },
+          {
+            "kind": "chromium-request"
+          },
+          {
+            "kind": "chromium-request"
+          }
+        ]
+      },
+      "graphChanges": {
+        "content": [],
+        "housekeeping": [
+          "added .DS_Store",
+          "added logseq/custom.css",
+          "added pages/contents.md"
+        ]
+      },
+      "pluginPackageChanges": [],
+      "ownedProcesses": {
+        "atLaunch": 4,
+        "stillAlive": []
+      },
+      "skips": [],
+      "unexplainedErrors": 9,
+      "featurePhaseErrors": 0,
+      "failedChecks": [
+        "READWISE.13.2"
+      ],
+      "injectedUiNodes": 1,
+      "initializationAssessment": "Handshake and injected UI; full reference journey passed; strict runtime error accounting failed."
+    },
+    "ollama": {
+      "host": {
+        "count": 1,
+        "of": 1,
+        "rows": [
+          "ollama-logseq: status \"loaded\", loaded true, disabled false, version \"v1.1.6\""
+        ]
+      },
+      "activation": {
+        "rows": [
+          {
+            "key": "ollama-logseq",
+            "status": "loaded",
+            "loaded": true,
+            "loadError": null,
+            "entry": "lsp://logseq.io/ollama-logseq/dist/index.html"
+          }
+        ],
+        "allRegistered": true,
+        "loadedCount": 1,
+        "entriesOnPluginOrigin": true,
+        "anyHandshakeTimeout": false,
+        "anyFileEntry": false
+      },
+      "network": {
+        "version": "f28-origin-network/1",
+        "active": true,
+        "sessions": 1,
+        "navigations": 7,
+        "totalRefused": 6,
+        "allowed": 40,
+        "refusedCount": 6,
+        "refused": [
+          {
+            "kind": "proxy-configuration"
+          },
+          {
+            "kind": "proxy-reload"
+          },
+          {
+            "kind": "proxy-resolution"
+          },
+          {
+            "kind": "chromium-request"
+          },
+          {
+            "kind": "chromium-request"
+          },
+          {
+            "kind": "chromium-request"
+          }
+        ]
+      },
+      "graphChanges": {
+        "content": [],
+        "housekeeping": [
+          "added .DS_Store",
+          "added logseq/custom.css",
+          "added pages/contents.md"
+        ]
+      },
+      "pluginPackageChanges": [],
+      "ownedProcesses": {
+        "atLaunch": 4,
+        "stillAlive": []
+      },
+      "skips": [
+        "reference journey: loading-only follow-up; full Readwise journey recorded separately"
+      ],
+      "unexplainedErrors": 12,
+      "featurePhaseErrors": 0,
+      "failedChecks": [
+        "OLLAMA.13.2"
+      ],
+      "injectedUiNodes": 1,
+      "initializationAssessment": "Partial: injected UI, but shortcut TypeError and missing configuration page errors."
+    },
+    "chatgpt": {
+      "host": {
+        "count": 1,
+        "of": 1,
+        "rows": [
+          "logseq-chatgpt-plugin: status \"loaded\", loaded true, disabled false, version \"v2.0.3\""
+        ]
+      },
+      "activation": {
+        "rows": [
+          {
+            "key": "logseq-chatgpt-plugin",
+            "status": "loaded",
+            "loaded": true,
+            "loadError": null,
+            "entry": "lsp://logseq.io/logseq-chatgpt-plugin/dist/index.html"
+          }
+        ],
+        "allRegistered": true,
+        "loadedCount": 1,
+        "entriesOnPluginOrigin": true,
+        "anyHandshakeTimeout": false,
+        "anyFileEntry": false
+      },
+      "network": {
+        "version": "f28-origin-network/1",
+        "active": true,
+        "sessions": 1,
+        "navigations": 7,
+        "totalRefused": 4,
+        "allowed": 39,
+        "refusedCount": 4,
+        "refused": [
+          {
+            "kind": "proxy-configuration"
+          },
+          {
+            "kind": "proxy-reload"
+          },
+          {
+            "kind": "proxy-resolution"
+          },
+          {
+            "kind": "chromium-request"
+          }
+        ]
+      },
+      "graphChanges": {
+        "content": [],
+        "housekeeping": [
+          "added .DS_Store",
+          "added logseq/custom.css",
+          "added pages/contents.md"
+        ]
+      },
+      "pluginPackageChanges": [],
+      "ownedProcesses": {
+        "atLaunch": 4,
+        "stillAlive": []
+      },
+      "skips": [
+        "reference journey: loading-only follow-up; full Readwise journey recorded separately"
+      ],
+      "unexplainedErrors": 9,
+      "featurePhaseErrors": 0,
+      "failedChecks": [
+        "CHATGPT.13.2"
+      ],
+      "injectedUiNodes": 0,
+      "initializationAssessment": "Failed: cross-origin Window.ChatGPT callback SecurityError; no injected UI."
+    },
+    "all": {
+      "host": {
+        "count": 3,
+        "of": 3,
+        "rows": [
+          "logseq-chatgpt-plugin: status \"loaded\", loaded true, disabled false, version \"v2.0.3\"",
+          "logseq-readwise-official-plugin: status \"loaded\", loaded true, disabled false, version \"v1.4.11\"",
+          "ollama-logseq: status \"loaded\", loaded true, disabled false, version \"v1.1.6\""
+        ]
+      },
+      "activation": {
+        "rows": [
+          {
+            "key": "logseq-chatgpt-plugin",
+            "status": "loaded",
+            "loaded": true,
+            "loadError": null,
+            "entry": "lsp://logseq.io/logseq-chatgpt-plugin/dist/index.html"
+          },
+          {
+            "key": "logseq-readwise-official-plugin",
+            "status": "loaded",
+            "loaded": true,
+            "loadError": null,
+            "entry": "lsp://logseq.io/logseq-readwise-official-plugin/dist/index.html"
+          },
+          {
+            "key": "ollama-logseq",
+            "status": "loaded",
+            "loaded": true,
+            "loadError": null,
+            "entry": "lsp://logseq.io/ollama-logseq/dist/index.html"
+          }
+        ],
+        "allRegistered": true,
+        "loadedCount": 3,
+        "entriesOnPluginOrigin": true,
+        "anyHandshakeTimeout": false,
+        "anyFileEntry": false
+      },
+      "network": {
+        "version": "f28-origin-network/1",
+        "active": true,
+        "sessions": 1,
+        "navigations": 11,
+        "totalRefused": 4,
+        "allowed": 45,
+        "refusedCount": 4,
+        "refused": [
+          {
+            "kind": "proxy-configuration"
+          },
+          {
+            "kind": "proxy-reload"
+          },
+          {
+            "kind": "proxy-resolution"
+          },
+          {
+            "kind": "chromium-request"
+          }
+        ]
+      },
+      "graphChanges": {
+        "content": [],
+        "housekeeping": [
+          "added .DS_Store",
+          "added logseq/custom.css",
+          "added pages/contents.md"
+        ]
+      },
+      "pluginPackageChanges": [],
+      "ownedProcesses": {
+        "atLaunch": 4,
+        "stillAlive": []
+      },
+      "skips": [
+        "reference journey: loading-only follow-up; full Readwise journey recorded separately"
+      ],
+      "unexplainedErrors": 12,
+      "featurePhaseErrors": 0,
+      "failedChecks": [
+        "ALL.13.2"
+      ],
+      "injectedUiNodes": 2,
+      "initializationAssessment": "Three host handshakes; Readwise/Ollama UI; Ollama and ChatGPT initialization errors retained."
+    }
+  },
+  "evidence": [
+    "f28-origin-experiment-1789094584478.json",
+    "f28-origin-experiment-1789094873779.json",
+    "f28-origin-test-build-rollback-1789094915454.json"
+  ],
+  "hostLoadedCaveat": "A host loaded flag proves handshake, not successful completion of plugin initialization.",
+  "rollback": {
+    "ok": true,
+    "kind": "actual-old-test-package-roundtrip",
+    "userProfileMigration": false,
+    "acceptedSharedProfileOpened": false,
+    "oldBuild": "2026-09-10T11-28-38-531Z-53b57083",
+    "candidateBuild": "2026-09-10T22-15-35-426Z-4cf82a57",
+    "actualOldTestBuildRollback": true,
+    "graphIntegrity": {
+      "changes": [
+        {
+          "file": ".DS_Store",
+          "change": "added",
+          "kind": "housekeeping",
+          "note": "created on first open, not a change to generated content"
+        },
+        {
+          "file": "logseq/custom.css",
+          "change": "added",
+          "kind": "housekeeping",
+          "note": "created on first open, not a change to generated content"
+        },
+        {
+          "file": "pages/contents.md",
+          "change": "added",
+          "kind": "housekeeping",
+          "note": "created on first open, not a change to generated content"
+        }
+      ],
+      "content": [],
+      "housekeeping": [
+        {
+          "file": ".DS_Store",
+          "change": "added",
+          "kind": "housekeeping",
+          "note": "created on first open, not a change to generated content"
+        },
+        {
+          "file": "logseq/custom.css",
+          "change": "added",
+          "kind": "housekeeping",
+          "note": "created on first open, not a change to generated content"
+        },
+        {
+          "file": "pages/contents.md",
+          "change": "added",
+          "kind": "housekeeping",
+          "note": "created on first open, not a change to generated content"
+        }
+      ],
+      "beforeCount": 17,
+      "afterCount": 20
+    },
+    "referenceGroupsBeforeAfter": [
+      8,
+      8
+    ],
+    "oldSyntheticPreferencePreserved": true,
+    "allStageCleanupEmpty": true,
+    "sharedProfileRestored": true,
+    "originalMarkerCreatedAt": "2026-09-09T04:06:07.447Z"
+  },
+  "finalOwnedProcessInspection": "No matching owned application, workspace Electron fixture or build processes"
+}
