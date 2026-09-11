@@ -243,8 +243,9 @@ function currentGraphVerdict({ api, liveRepo, storage, approved, allowedRoot }) 
 function resolve(prefer) {
   const wanted = prefer ? BUILDS.filter((b) => b.app === prefer)
     : BUILDS.filter((b) => b.app !== 'Logseq-OG-F28-OriginExp');
+  const darwinArch = process.arch === 'arm64' ? 'arm64' : 'x64';
   for (const b of wanted) {
-    const appDir = path.join(FEATURE_DIR, b.out || 'out', `${b.app}-darwin-x64`, `${b.app}.app`);
+    const appDir = path.join(FEATURE_DIR, b.out || 'out', `${b.app}-darwin-${darwinArch}`, `${b.app}.app`);
     const exe = path.join(appDir, 'Contents', 'MacOS', b.app);
     const resApp = path.join(appDir, 'Contents', 'Resources', 'app');
     if (!fs.existsSync(exe)) continue;

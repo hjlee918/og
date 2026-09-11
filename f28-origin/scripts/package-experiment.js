@@ -22,11 +22,15 @@ const REPO = path.resolve(__dirname, '..', '..');
 const STATIC = path.join(REPO, 'static');
 const ID = require(path.join(REPO, 'f28-origin', 'src', 'experiment-identity.js'));
 const EXPECTED_OUT = path.resolve(REPO, '..', 'out-originexp');
+const PLATFORM = 'darwin';
+const ARCH = process.arch;
 const FORGE_CLI = path.join(STATIC, 'node_modules', '@electron-forge', 'cli', 'dist',
                             'electron-forge.js');
 
 function die(msg) { console.error('\n[package-experiment] REFUSED: ' + msg + '\n'); process.exit(1); }
 
+if (process.platform !== PLATFORM) die(`host platform is ${process.platform}, expected ${PLATFORM}`);
+if (!['x64', 'arm64'].includes(ARCH)) die(`unsupported native architecture ${ARCH}`);
 if (!fs.existsSync(FORGE_CLI)) die(`electron-forge CLI not found at ${FORGE_CLI}`);
 
 // The accepted pilot's packaged application must never be the target.
@@ -60,16 +64,16 @@ if (v.manifest.productName !== ID.PRODUCT_NAME) die('preflight passed against an
 
 console.log(`[package-experiment] outDir ${forge.outDir}`);
 console.log(`[package-experiment] build ${v.manifest.pilotBuildId}`);
-console.log('[package-experiment] packaging darwin/x64 (unsigned, local only)');
+console.log(`[package-experiment] packaging ${PLATFORM}/${ARCH} (unsigned, local only)`);
 
 execFileSync(process.execPath,
-  [FORGE_CLI, 'package', '--platform=darwin', '--arch=x64'],
+  [FORGE_CLI, 'package', `--platform=${PLATFORM}`, `--arch=${ARCH}`],
   { cwd: STATIC, stdio: 'inherit' });
 
 // @electron/packager names the bundle after packagerConfig.name, not
 // productName, so the .app is Logseq-OG-F28-RefPath.app while the display name
 // inside Info.plist (CFBundleName) is "Logseq OG F28 RefPath".
-const appPath = path.join(forge.outDir, `${forge.packagerConfig.name}-darwin-x64`,
+const appPath = path.join(forge.outDir, `${forge.packagerConfig.name}-${PLATFORM}-${ARCH}`,
                           `${forge.packagerConfig.name}.app`);
 if (!fs.existsSync(appPath)) {
   const produced = fs.existsSync(forge.outDir) ? fs.readdirSync(forge.outDir) : [];
