@@ -1,6 +1,6 @@
 # Isolated origin experiment — supervisor review
 
-Updated 2026-09-10 (Los Angeles; final runs use September 11 UTC timestamps).
+Updated 2026-09-11 (Los Angeles; run evidence uses UTC timestamps).
 The approved experiment now has a tested startup control and actual plugin
 activation evidence. It remains experimental and inactive in the accepted build.
 This is not deployment or general plugin compatibility acceptance.
@@ -8,10 +8,9 @@ This is not deployment or general plugin compatibility acceptance.
 ## Package and source
 
 - Package: `../out-originexp/Logseq-OG-F28-OriginExp-darwin-x64/Logseq-OG-F28-OriginExp.app`
-- Build: `2026-09-10T22-15-35-426Z-4cf82a57`; bundle `com.logseq.logseq-og.f28originexp`.
-- Clean source: `cb04131613e1640ca0e64c47e07b3afca81c47f6`; renderer `cb0413161`.
-  The later documentation commit does not change this package's source identity.
-- Manifest SHA-256: `a1b50f3ed77cbdee9bf8e407c78d63b154d735349f2a11bf60284dbca105cbf3`.
+- Build: `2026-09-11T18-21-00-039Z-918adc55`; bundle `com.logseq.logseq-og.f28originexp`.
+- Clean source: `352b3ea7003e7c7c41b96fcc4271f5c88e841c71`; renderer `352b3ea70`.
+- Manifest SHA-256: `2df86456ce068cdeb4725c5e4a0984a5cae23c559f5242175819f84efb8a1d8d`.
   All 15 package preflight checks pass, including bootstrap and preload hashes.
 - Accepted RefPath package remains build `2026-09-10T11-28-38-531Z-53b57083`,
   manifest `3bff119b2449ed9121a1c74085be5cb60f0446780cff93ba381398ff4a111c0e`.
@@ -21,6 +20,25 @@ This is not deployment or general plugin compatibility acceptance.
 - The earlier clean bootstrap package is also preserved in
   `../out-originexp-preserved-20260910-c886eac2/`. Its live evidence predates
   explicit native proxy/PAC refusal and is not substituted for final-package evidence.
+- The immediately preceding package is preserved at
+  `../out-originexp-preserved-20260911-1821-pre-dracula/`: build
+  `2026-09-10T22-15-35-426Z-4cf82a57`, clean source
+  `cb04131613e1640ca0e64c47e07b3afca81c47f6`. A failed packaging output is
+  separately retained and is not a runnable-package claim.
+
+## Offline Dracula compatibility
+
+The independent Intel launcher installs exact, unmodified files from official
+`dracula/logseq` commit `0064af84b7236676f6b4b6d1b37c355501c91111`
+(manifest `2e3b6095...6981d`, CSS `3ba529d4...6260c`) into only its owned TEST
+profile. Dracula and Readwise both report genuinely loaded. Logseq selects
+Dracula in dark mode, the stylesheet stays on guarded `assets:`, and the observed
+root token is `#282a36`; graph-local `custom.css` also remains loaded. Integration
+is 14/14 with repeat launch, content integrity, overlap refusal and post-exit
+profile restoration. The theme's remote Google Fonts import remains refused.
+Strict error accounting therefore remains failed for blocked-resource entries;
+no classifier was widened. The accepted build, personal profile and user CSS are
+unchanged.
 
 ## Containment and tests
 

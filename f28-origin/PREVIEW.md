@@ -17,9 +17,9 @@ access. Cancellation makes no graph selection. The launcher never chooses or
 creates a graph for the user, and existing-graph preparation does not inject
 fixtures, overwrite graph settings or CSS, reset notes, or run an import.
 
-The launcher uses the preserved Intel experimental package, build
-`2026-09-10T22-15-35-426Z-4cf82a57`, clean product source
-`cb04131613e1640ca0e64c47e07b3afca81c47f6`, bundle
+The launcher uses the Intel experimental package, build
+`2026-09-11T18-21-00-039Z-918adc55`, clean product source
+`352b3ea7003e7c7c41b96fcc4271f5c88e841c71`, bundle
 `com.logseq.logseq-og.f28originexp`, and startup control
 `f28-origin-network/1`. The launcher bundle is
 `com.logseq.logseq-og.test.offline-launcher`, architecture `x86_64`; it is a local
@@ -27,9 +27,9 @@ test artifact, not an installation or release. Its manifest is at
 `Contents/Resources/launcher-manifest.json` inside the app.
 
 The app keeps an ownership-marked, app-specific TEST profile between normal
-launches so test preferences survive. It refuses any plugin set other than the
-verified Readwise artifact, refuses retained credentials or automatic Readwise
-loading, and does not install the optional AI plugins. A live lease refuses a
+launches so test preferences survive. It permits exactly the verified Readwise
+artifact and pinned official Dracula theme, refuses retained credentials or
+automatic Readwise loading, and does not install the optional AI plugins. A live lease refuses a
 second overlapping launch. A crash leaves the lease in place and the next launch
 fails closed with a bilingual recovery message; do not delete such a lease until
 owned processes have been reviewed. There is no inspection timeout. Use
@@ -42,15 +42,21 @@ path through the guarded main-process boundary. The launcher disables their inpu
 clicks and explains the limitation instead of claiming containment. Supporting a
 manual import later requires a separate path-contained file-selection design.
 
-Graph-local `logseq/custom.css` continues to load normally. Network refusal blocks
-online CSS `@import`, including the online Dracula import; configure a local copy
-separately if desired. This launcher does not download a theme or rewrite CSS.
+Graph-local `logseq/custom.css` continues to load normally. Official Dracula
+`0.1.0` is installed locally from exact upstream commit
+`0064af84b7236676f6b4b6d1b37c355501c91111` and selected through Logseq's own
+theme API. The experimental `lsp:` renderer keeps that verified stylesheet on
+guarded `assets:`; ordinary accepted/file-origin behavior is unchanged. Dracula's
+Google Fonts `@import` and every other remote CSS request remain blocked. The
+user's `custom.css` is not downloaded, rewritten or renamed.
 
-Fresh synthetic-data verification passed 13/13 integration checks: LaunchServices
+Fresh synthetic-data verification passed 14/14 integration checks: LaunchServices
 double-click and picker cancellation, valid selection and exact LIVE graph,
-outside-root and symlink refusal, local CSS, disabled import inputs, unchanged
+outside-root and symlink refusal, locally selected Dracula dark mode and
+`#282a36` token, local graph CSS, disabled import inputs, unchanged
 graph content, safe Quit, persistent-profile reuse, overlap refusal, lease cleanup
-and post-exit profile preservation. Focused tooling checks passed 8/8. The inherited
+and post-exit profile preservation/restoration. Focused source/package/tooling
+checks passed 30/30. The inherited
 synthetic reference preview then passed 16/16 and closed with no retained app
 process. The user's disposable sample graph was not used for automated mutation
 tests. Evidence and generated profiles remain local and are not Git inputs.
@@ -76,8 +82,8 @@ state in the disposable graph, and the user may edit it during the preview.
 Keep that terminal/supervisor running. There is no inspection timeout. Each launch
 creates a unique synthetic graph and preserves the previous run; a live lease
 refuses overlapping launches. Package identity, source and startup hashes are
-pinned to build `2026-09-10T22-15-35-426Z-4cf82a57`, clean product source
-`cb04131613e1640ca0e64c47e07b3afca81c47f6`. No rebuild or bundle modification.
+pinned to build `2026-09-11T18-21-00-039Z-918adc55`, clean product source
+`352b3ea7003e7c7c41b96fcc4271f5c88e841c71`.
 
 Close from another terminal in this checkout:
 
@@ -99,7 +105,8 @@ owned app PIDs, checks, strict errors and final cleanup. If the supervisor crash
 do not relaunch the package, remove the lease or manually restore a profile:
 retain everything for an owned-process review. No unrecorded watcher is required.
 
-Only the retained, verified Readwise artifact is installed in this fresh profile.
+The independent launcher installs only verified Readwise plus pinned official
+Dracula; the older synthetic command mode remains Readwise-only.
 Credentials are absent; `isLoadAuto:false` and `isResyncDeleted:false` are explicit
 preview settings. Unchanged startup refusal blocks service requests, main bridges,
 proxy and external opening. Readwise controls may still be visible, but import and

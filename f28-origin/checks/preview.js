@@ -43,10 +43,10 @@ async function restoreAfterExit(handle,owned,alive,restore){
 }
 function packageIdentity(){
   const b=NET.assertReady(),m=b.preflight.manifest;
-  assert(m.pilotBuildId==='2026-09-10T22-15-35-426Z-4cf82a57','Wrong preview build');
-  assert(m.builtFrom.commit==='cb04131613e1640ca0e64c47e07b3afca81c47f6'&&!m.builtFrom.dirty,'Wrong preview source');
+  assert(m.pilotBuildId==='2026-09-11T18-21-00-039Z-918adc55','Wrong preview build');
+  assert(m.builtFrom.commit==='352b3ea7003e7c7c41b96fcc4271f5c88e841c71'&&!m.builtFrom.dirty,'Wrong preview source');
   const hash=crypto.createHash('sha256').update(fs.readFileSync(path.join(b.resApp,'origin-experiment-build-manifest.json'))).digest('hex');
-  assert(hash==='a1b50f3ed77cbdee9bf8e407c78d63b154d735349f2a11bf60284dbca105cbf3','Manifest changed');
+  assert(hash==='2df86456ce068cdeb4725c5e4a0984a5cae23c559f5242175819f84efb8a1d8d','Manifest changed');
   return b;
 }
 function canonicalExistingGraph(input){
