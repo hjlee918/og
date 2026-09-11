@@ -22,7 +22,7 @@ function chooseGraph(exec=execFileSync){
 }
 function confirmLimitations(exec=execFileSync){
   if(process.env.F28_OFFLINE_TEST_NO_DIALOG==='1')return true;
-  const message='Experimental offline TEST build. Readwise sync/login and AI are disabled. Roam/JSON/OPML import is unavailable because the native file picker is not path-contained. Online CSS @import is blocked; use local CSS only.\n\n실험용 오프라인 TEST 빌드입니다. Readwise 동기화·로그인과 AI는 비활성화됩니다. 파일 선택 경로를 안전하게 제한할 수 없어 Roam/JSON/OPML 가져오기는 사용할 수 없습니다. 온라인 CSS @import는 차단되며 로컬 CSS만 사용할 수 있습니다.';
+  const message='Experimental offline TEST build. The pinned Dracula theme is installed locally; its online Google Fonts request remains blocked. Readwise sync/login and AI are disabled. Roam/JSON/OPML import is unavailable because the native file picker is not path-contained. Other online CSS @import remains blocked.\n\n실험용 오프라인 TEST 빌드입니다. 고정된 Dracula 테마는 로컬로 설치되지만 온라인 Google Fonts 요청은 계속 차단됩니다. Readwise 동기화·로그인과 AI는 비활성화됩니다. 파일 선택 경로를 안전하게 제한할 수 없어 Roam/JSON/OPML 가져오기는 사용할 수 없습니다. 그 밖의 온라인 CSS @import도 차단됩니다.';
   const script='on run argv\n try\n  display dialog (item 1 of argv) with title "Logseq OG Test — Offline" buttons {"Cancel", "Open Offline Test"} default button "Open Offline Test" cancel button "Cancel" with icon caution\n  return "OPEN"\n on error number -128\n  return "CANCEL"\n end try\nend run';
   return String(exec('/usr/bin/osascript',['-e',script,'--',message],{encoding:'utf8'})).trim()==='OPEN';
 }
@@ -50,7 +50,7 @@ async function main(){
     if(!selected)return {cancelled:true};
     const graph=PREVIEW.canonicalExistingGraph(selected);
     if(!confirmLimitations())return {cancelled:true};
-    const result=await PREVIEW.start({existingGraph:graph,persistentProfile:true,
+    const result=await PREVIEW.start({existingGraph:graph,persistentProfile:true,includeDracula:true,
       smokeClose:process.env.F28_OFFLINE_TEST_AUTOCLOSE==='1'});
     if(result.error||result.cleanupError)throw Error(result.cleanupError||result.error);
     return result;

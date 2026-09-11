@@ -34,15 +34,26 @@ const manifest=JSON.stringify({schema:'f28-origin-offline-launcher/1',name:NAME,
   launcherEntry:ENTRY,launcherSha256:sha(ENTRY),node:NODE,
   targetPackage:PRODUCT,targetBuild:'2026-09-10T22-15-35-426Z-4cf82a57',
   targetSource:'cb04131613e1640ca0e64c47e07b3afca81c47f6',
-  networkControl:'f28-origin-network/1',installed:false,release:false},null,2)+'\n';
+  networkControl:'f28-origin-network/1',
+  offlineTheme:{name:'logseq-dracula-theme',version:'0.1.0',
+    sourceCommit:'0064af84b7236676f6b4b6d1b37c355501c91111',
+    manifestSha256:'2e3b6095c3a5f71e47cf1556f9236aabb3e4a5e1bfd508753440dd268206981d',
+    cssSha256:'3ba529d41f2c5d5fc93f31630690f3e5ada1332cccb8eb74126e172d69b6260c'},
+  installed:false,release:false},null,2)+'\n';
 const files=new Map([
   [path.join(CONTENTS,'Info.plist'),plist],
   [path.join(MACOS,EXECUTABLE),wrapper],
   [path.join(RESOURCES,'launcher-manifest.json'),manifest],
 ]);
 if(fs.existsSync(APP)){
-  for(const [p,want] of files){if(!fs.existsSync(p)||fs.readFileSync(p,'utf8')!==want)throw Error('Refusing to overwrite changed launcher: '+p);}
-  console.log(APP);process.exit(0);
+  const same=[...files].every(([p,want])=>fs.existsSync(p)&&fs.readFileSync(p,'utf8')===want);
+  if(same){console.log(APP);process.exit(0);}
+  const oldManifest=path.join(APP,'Contents/Resources/launcher-manifest.json');
+  let old=null;try{old=JSON.parse(fs.readFileSync(oldManifest,'utf8'));}catch(e){}
+  if(old?.schema!=='f28-origin-offline-launcher/1'||old?.bundleId!=='com.logseq.logseq-og.test.offline-launcher')
+    throw Error('Refusing to replace a launcher without the owned manifest');
+  const preserved=APP+'.preserved-'+new Date().toISOString().replace(/[:.]/g,'-');
+  fs.renameSync(APP,preserved);console.log('Preserved '+preserved);
 }
 fs.mkdirSync(MACOS,{recursive:true});fs.mkdirSync(RESOURCES,{recursive:true});
 for(const [p,body]of files)fs.writeFileSync(p,body);

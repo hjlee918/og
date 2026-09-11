@@ -16,6 +16,7 @@ const EC=require('../../f27-inline/checks/error-classifier');
 const NOISE=require('../../f28-refpath/checks/browser-noise');
 const NET=require('./network-refusal');
 const XA=require('./experiment-assertions');
+const THEME=require('./theme-artifact');
 const {_electron}=require('../../node_modules/playwright');
 const EVIDENCE=path.resolve(__dirname,'../../../evidence');
 const ACTIVE=path.join(EVIDENCE,'origin-preview-active.json');
@@ -57,7 +58,7 @@ function canonicalExistingGraph(input){
   assert(fs.realpathSync(input)===graph,'Existing graph canonical path mismatch');
   return graph;
 }
-async function start({smokeClose=false,existingGraph=null,persistentProfile=false}={}){
+async function start({smokeClose=false,existingGraph=null,persistentProfile=false,includeDracula=false}={}){
   const built=packageIdentity();
   const requestedGraph=existingGraph?canonicalExistingGraph(existingGraph):null;
   assert(!runningPackage(built.exe).length,'Existing experimental process: no profile changes allowed');
@@ -97,13 +98,17 @@ async function start({smokeClose=false,existingGraph=null,persistentProfile=fals
       assert(!out.seed.cleanup.stillAlive.length,'Seed process remains');
     }else out.seed={skipped:true,reason:'reused ownership-verified persistent TEST profile'};
     const plugins=FP.pluginsDirIn(handle.root);
-    const present=fs.existsSync(plugins)?fs.readdirSync(plugins).filter(n=>n!=='.DS_Store'):[];
+    let present=fs.existsSync(plugins)?fs.readdirSync(plugins).filter(n=>n!=='.DS_Store'):[];
     if(present.length){
-      assert(present.length===1&&present[0]===PLUGIN,'Persistent profile contains an unexpected plugin');
+      const allowed=includeDracula?[PLUGIN,THEME.DEST_ID]:[PLUGIN];
+      assert(present.includes(PLUGIN)&&present.every(id=>allowed.includes(id)),
+        'Persistent profile contains an unexpected plugin/theme or lacks Readwise');
       const verified=PA.verify(PLUGIN,plugins);assert(verified.ok,'Persistent Readwise artifact changed');
       out.artifact=[{id:PLUGIN,reused:true,treeSha256:verified.measured.treeSha256,
         manifestSha256:verified.measured.manifestSha256}];
     }else out.artifact=PA.installInto(plugins,[PLUGIN]).installed;
+    if(includeDracula){out.themeArtifact=THEME.installOrVerify(plugins);present=fs.readdirSync(plugins).filter(n=>n!=='.DS_Store');
+      assert(present.length===2&&present.includes(PLUGIN)&&present.includes(THEME.DEST_ID),'Offline theme placement incomplete');}
     const settings=path.join(handle.root,'home','.logseq-og','settings');fs.mkdirSync(settings,{recursive:true});
     settingsFile=path.join(settings,PLUGIN+'.json');
     // Disable plugin automatic polling in addition to unconditional startup refusal.
@@ -144,7 +149,31 @@ async function start({smokeClose=false,existingGraph=null,persistentProfile=fals
     await live();
     const j=RJ.create({page:session.page,session,CG,say:console.log});
     errors.phase('plugin-host','observe-readwise');await OP.sleep(10000);out.plugin=await j.pluginState();
-    record('P3','Readwise-only handshake, loaded state and actual UI',out.plugin.registered?.length===1&&out.plugin.registered[0]===PLUGIN&&out.plugin.plugins[0]?.loaded&&out.plugin.injectedUiNodes>0,out.plugin);
+    const expectedPackages=includeDracula?[PLUGIN,THEME.DEST_ID]:[PLUGIN];
+    record('P3','Expected offline packages, Readwise loaded state and actual UI',
+      expectedPackages.every(id=>out.plugin.registered?.includes(id))&&
+      out.plugin.registered?.every(id=>expectedPackages.includes(id))&&
+      out.plugin.plugins.find(p=>p.key===PLUGIN)?.loaded&&out.plugin.injectedUiNodes>0,out.plugin);
+    if(includeDracula){
+      out.themeActivation=await session.page.evaluate(async id=>{
+        const core=window.LSPluginCore,themes=core?.themes?.get?.(id);
+        if(!Array.isArray(themes)||themes.length!==1)return {error:'expected one registered Dracula theme'};
+        const theme=themes[0];await core.selectTheme(theme);
+        for(let i=0;i<100&&(document.documentElement.getAttribute('data-theme')!=='dark'||
+          !getComputedStyle(document.documentElement).getPropertyValue('--dracula-bg').trim());i++)
+          await new Promise(r=>setTimeout(r,100));
+        const describe=value=>{try{const u=new URL(value);return {protocol:u.protocol,host:u.host,tail:u.pathname.split('/').slice(-2).join('/')};}catch(e){return {invalid:true};}};
+        const selectedLinks=[...document.querySelectorAll('link[rel="stylesheet"]')]
+          .filter(e=>/logseq-dracula-theme/.test(e.href||'')).map(e=>describe(e.href));
+        return {name:theme.name,declaredMode:theme.mode,mode:document.documentElement.getAttribute('data-theme'),
+          background:getComputedStyle(document.documentElement).getPropertyValue('--dracula-bg').trim(),
+          themeUrl:describe(theme.url),selectedLinks,selected:selectedLinks.length===1};
+      },THEME.DEST_ID);
+      record('P3T','Pinned Dracula theme loaded and selected locally',
+        out.themeActivation.name==='Dracula theme'&&out.themeActivation.mode==='dark'&&
+        out.themeActivation.background.toLowerCase()==='#282a36'&&out.themeActivation.selected,
+        out.themeActivation);
+    }
     const settingsNow=JSON.parse(fs.readFileSync(settingsFile));
     record('P4','Automatic import/resync disabled and no credential',settingsNow.isLoadAuto===false&&settingsNow.isResyncDeleted===false&&!Object.entries(settingsNow).some(([k,v])=>/token|secret|password|api.?key/i.test(k)&&v),{isLoadAuto:settingsNow.isLoadAuto,isResyncDeleted:settingsNow.isResyncDeleted,credentialsPresent:false});
     await live();

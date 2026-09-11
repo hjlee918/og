@@ -38,6 +38,7 @@ async function main(){
   const report={schema:'f28-offline-launcher-integration/1',graph,escapeRoot,checks:[]};
   const check=(name,ok,detail)=>{report.checks.push({name,ok,detail});assert(ok,name);};
   let child=null;
+  const displaced=FP.swapAside(ID,{stamp:'before-offline-launcher-integration-'+new Date().toISOString().replace(/[:.]/g,'-')});
   try{
     run(['/usr/bin/open','-W','-n',APP],{F28_OFFLINE_TEST_CANCEL:'1'});
     check('LaunchServices double-click path handles picker cancellation',!fs.existsSync(ACTIVE)&&!fs.existsSync(LOCK));
@@ -50,6 +51,7 @@ async function main(){
     run(['/usr/bin/open','-W','-n',APP],env);
     let evidence=latestFor(graph),first=JSON.parse(fs.readFileSync(evidence));
     check('valid double-click selection and exact LIVE graph',first.status==='closed'&&first.liveGraph?.ok&&first.graph===graph);
+    check('pinned Dracula theme loaded and selected locally',first.checks.some(c=>c.id==='P3T'&&c.ok)&&first.themeActivation?.background==='#282a36');
     check('local custom.css loaded',first.checks.some(c=>c.id==='P6'&&c.ok));
     check('import inputs disabled',first.importGuard?.enabled===true);
     check('safe Quit retains persistent profile',first.restoration?.persistent===true&&first.restoration.ok);
@@ -64,10 +66,16 @@ async function main(){
     await new Promise((resolve,reject)=>{const t=setTimeout(()=>reject(Error('launcher quit timeout')),180000);child.once('exit',()=>{clearTimeout(t);resolve();});});child=null;
     check('safe Quit clears leases',!fs.existsSync(ACTIVE)&&!fs.existsSync(LOCK));
     check('existing synthetic graph content still unchanged',GH.compare(before,GH.snapshot(graph)).content.length===0);
-    const archived=FP.swapAside(ID,{stamp:'integration-'+new Date().toISOString().replace(/[:.]/g,'-')});
-    check('integration TEST profile retained after every process exited',!!archived.preserved&&!fs.existsSync(archived.root),archived.preserved);
   }finally{
     if(child&&child.exitCode===null){try{run([process.execPath,PREVIEW,'close']);}catch(e){} await sleep(3000);}
+    if(!fs.existsSync(ACTIVE)&&!fs.existsSync(LOCK)){
+      const archived=FP.swapAside(ID,{stamp:'integration-'+new Date().toISOString().replace(/[:.]/g,'-')});
+      const restored=displaced.preserved?FP.restore(displaced):{ok:true,restored:false};
+      report.checks.push({name:'integration TEST profile retained and prior owned TEST profile restored after exit',
+        ok:!!archived.preserved&&fs.existsSync(archived.preserved)&&restored.ok,
+        detail:{archived:archived.preserved,restored:restored.restored}});
+    }else report.checks.push({name:'integration TEST profile retained and prior owned TEST profile restored after exit',
+      ok:false,detail:'active lease preserved; restoration refused'});
     report.finishedAt=new Date().toISOString();report.ok=report.checks.every(c=>c.ok);
     fs.writeFileSync(path.join(EVIDENCE,'f28-offline-launcher-integration-'+Date.now()+'.json'),JSON.stringify(report,null,2)+'\n');
   }

@@ -68,6 +68,12 @@ test('the two halves are coupled: plugin resources follow the RENDERER\'s protoc
     'and it must reach setupPluginCore');
 });
 
+test('experimental theme assets stay on the guarded protocol instead of raw file URLs', () => {
+  const ph = read('src', 'main', 'frontend', 'handler', 'plugin.cljs');
+  assert.match(ph, /\(and \(util\/electron\?\) \(not= "lsp:" js\/location\.protocol\)\)/,
+    'the lsp renderer must preserve assets: theme URLs; ordinary Electron keeps file conversion');
+});
+
 test('the renderer entry moves only under the experiment, to the same document', () => {
   const w = read('src', 'electron', 'electron', 'window.cljs');
   assert.match(w, /origin-exp\/main-window-entry/);
