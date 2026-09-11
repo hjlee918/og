@@ -57,7 +57,7 @@ function canonicalExistingGraph(input){
   assert(fs.realpathSync(input)===graph,'Existing graph canonical path mismatch');
   return graph;
 }
-async function start({smokeClose=false,existingGraph=null}={}){
+async function start({smokeClose=false,existingGraph=null,persistentProfile=false}={}){
   const built=packageIdentity();
   const requestedGraph=existingGraph?canonicalExistingGraph(existingGraph):null;
   assert(!runningPackage(built.exe).length,'Existing experimental process: no profile changes allowed');
@@ -70,7 +70,8 @@ async function start({smokeClose=false,existingGraph=null}={}){
   const out={...lease,stamp,status:'preparing',build:built.preflight.manifest.pilotBuildId,
     productSource:built.preflight.manifest.builtFrom,checks:[],
     title:requestedGraph?EXISTING_TITLE:TITLE,noInspectionTimeout:true,
-    mode:requestedGraph?'existing-disposable-graph':'synthetic-reference-preview'};
+    mode:requestedGraph?'existing-disposable-graph':'synthetic-reference-preview',
+    profileMode:persistentProfile?'persistent-test-profile':'preserve-and-restore'};
   let handle,session,seed,graph,before,pluginBefore,settingsFile;
   let requestClose=false;
   const signal=()=>{requestClose=true;};
@@ -78,22 +79,44 @@ async function start({smokeClose=false,existingGraph=null}={}){
   const record=(id,title,ok,detail)=>{out.checks.push({id,title,ok,detail});save(file,out);console.log((ok?'PASS ':'FAIL ')+id+' '+title);assert(ok,title);};
   const errors=REC.createRecorder();
   try{
-    handle=FP.swapAside(built.identity,{stamp});out.profile=handle;save(file,out);
-    // Let the unchanged application establish its ownership marker before placement.
-    seed=await NET.launchWith(o=>_electron.launch(o))({executablePath:built.exe,timeout:120000});
-    const seedPid=seed.process().pid,seedTree=OP.descendants(seedPid);
-    out.seed={pid:seedPid,owned:seedTree};save(file,out);
-    await seed.firstWindow();FP.assertOurs(handle.root,built.identity);
-    out.seed.cleanup=await APP.close({app:seed,appPid:seedPid,ownedTree:seedTree});seed=null;
-    assert(!out.seed.cleanup.stillAlive.length,'Seed process remains');
+    if(persistentProfile){
+      const state=FP.stateRootFor(built.identity);
+      const preExisting=fs.existsSync(state.root);
+      handle={identity:built.identity,root:state.root,productDir:state.productDir,stamp,
+        preserved:null,marker:preExisting?FP.assertOurs(state.root,built.identity):null,
+        preExisting,persistent:true};
+    }else handle=FP.swapAside(built.identity,{stamp});
+    out.profile=handle;save(file,out);
+    if(!fs.existsSync(handle.root)){
+      // Let the unchanged application establish its ownership marker before placement.
+      seed=await NET.launchWith(o=>_electron.launch(o))({executablePath:built.exe,timeout:120000});
+      const seedPid=seed.process().pid,seedTree=OP.descendants(seedPid);
+      out.seed={pid:seedPid,owned:seedTree};save(file,out);
+      await seed.firstWindow();FP.assertOurs(handle.root,built.identity);
+      out.seed.cleanup=await APP.close({app:seed,appPid:seedPid,ownedTree:seedTree});seed=null;
+      assert(!out.seed.cleanup.stillAlive.length,'Seed process remains');
+    }else out.seed={skipped:true,reason:'reused ownership-verified persistent TEST profile'};
     const plugins=FP.pluginsDirIn(handle.root);
-    out.artifact=PA.installInto(plugins,[PLUGIN]).installed;
+    const present=fs.existsSync(plugins)?fs.readdirSync(plugins).filter(n=>n!=='.DS_Store'):[];
+    if(present.length){
+      assert(present.length===1&&present[0]===PLUGIN,'Persistent profile contains an unexpected plugin');
+      const verified=PA.verify(PLUGIN,plugins);assert(verified.ok,'Persistent Readwise artifact changed');
+      out.artifact=[{id:PLUGIN,reused:true,treeSha256:verified.measured.treeSha256,
+        manifestSha256:verified.measured.manifestSha256}];
+    }else out.artifact=PA.installInto(plugins,[PLUGIN]).installed;
     const settings=path.join(handle.root,'home','.logseq-og','settings');fs.mkdirSync(settings,{recursive:true});
     settingsFile=path.join(settings,PLUGIN+'.json');
     // Disable plugin automatic polling in addition to unconditional startup refusal.
     // No token field; original defaults/previous settings are never imported.
-    fs.writeFileSync(settingsFile,JSON.stringify({isLoadAuto:false,isResyncDeleted:false}),{flag:'wx'});
-    out.settingsBeforeActivation={isLoadAuto:false,isResyncDeleted:false};
+    if(!fs.existsSync(settingsFile))
+      fs.writeFileSync(settingsFile,JSON.stringify({isLoadAuto:false,isResyncDeleted:false}),{flag:'wx'});
+    const retainedSettings=JSON.parse(fs.readFileSync(settingsFile));
+    const hasCredential=Object.entries(retainedSettings).some(([k,v])=>/token|secret|password|api.?key/i.test(k)&&v);
+    assert(retainedSettings.isLoadAuto===false,'Persistent profile enables Readwise automatic import');
+    assert(retainedSettings.isResyncDeleted===false,'Persistent profile enables Readwise deleted-item resync');
+    assert(!hasCredential,'Persistent profile contains a credential');
+    out.settingsBeforeActivation={isLoadAuto:false,isResyncDeleted:retainedSettings.isResyncDeleted,
+      reused:persistentProfile&&handle.preExisting};
     pluginBefore=PA.snapshot(plugins);
     if(requestedGraph){
       // Existing-graph preparation is deliberately content-blind and non-mutating.
@@ -123,11 +146,32 @@ async function start({smokeClose=false,existingGraph=null}={}){
     errors.phase('plugin-host','observe-readwise');await OP.sleep(10000);out.plugin=await j.pluginState();
     record('P3','Readwise-only handshake, loaded state and actual UI',out.plugin.registered?.length===1&&out.plugin.registered[0]===PLUGIN&&out.plugin.plugins[0]?.loaded&&out.plugin.injectedUiNodes>0,out.plugin);
     const settingsNow=JSON.parse(fs.readFileSync(settingsFile));
-    record('P4','Automatic import disabled and no credential',settingsNow.isLoadAuto===false&&!Object.entries(settingsNow).some(([k,v])=>/token|secret|password|api.?key/i.test(k)&&v),{isLoadAuto:settingsNow.isLoadAuto,credentialsPresent:false});
+    record('P4','Automatic import/resync disabled and no credential',settingsNow.isLoadAuto===false&&settingsNow.isResyncDeleted===false&&!Object.entries(settingsNow).some(([k,v])=>/token|secret|password|api.?key/i.test(k)&&v),{isLoadAuto:settingsNow.isLoadAuto,isResyncDeleted:settingsNow.isResyncDeleted,credentialsPresent:false});
     await live();
+    if(requestedGraph){
+      // Chromium file inputs expose bytes directly to the renderer and do not
+      // pass through the main-process path guard. Disable all importer inputs
+      // rather than claim their native picker is contained.
+      await session.page.addInitScript(()=>document.addEventListener('click',e=>{
+        const input=e.target?.closest?.('label')?.querySelector?.('input[type="file"]');
+        if(input&&/^import-(roam|lsq|opml)$/.test(input.id)){e.preventDefault();e.stopImmediatePropagation();}
+      },true));
+      await session.page.evaluate(()=>document.addEventListener('click',e=>{
+        const input=e.target?.closest?.('label')?.querySelector?.('input[type="file"]');
+        if(input&&/^import-(roam|lsq|opml)$/.test(input.id)){e.preventDefault();e.stopImmediatePropagation();}
+      },true));
+      out.importGuard={enabled:true,reason:'native renderer file input is not path-contained; import unavailable'};
+    }
     if(requestedGraph){
       record('P5','Exact LIVE disposable graph before handoff',out.liveGraph?.ok===true,{reason:out.liveGraph.reason,source:out.liveGraph.source});
       out.operatorInteractions='none after LIVE identity assertion';
+      const cssProperty=process.env.F28_OFFLINE_TEST_CSS_PROPERTY;
+      if(cssProperty){
+        assert(/^--[a-z0-9-]+$/.test(cssProperty),'Invalid CSS test property');
+        const cssValue=await session.page.evaluate(p=>getComputedStyle(document.body).getPropertyValue(p).trim(),cssProperty);
+        record('P6','Existing local custom.css loaded',cssValue===process.env.F28_OFFLINE_TEST_CSS_VALUE,
+          {property:cssProperty,value:cssValue});
+      }
     }else{
       errors.phase('reference-preview','short-reference-journey');
     await session.goTo(CG.ANCHOR);await j.settle('preview');out.references=await RD.read(session.page);
@@ -182,7 +226,11 @@ async function start({smokeClose=false,existingGraph=null}={}){
       if(session)out.cleanup=await APP.close(session,{say:console.log});
       const owned=[...(out.ownedProcesses||[]),...(out.seed?.owned||[])];
       assert(!runningPackage(built.exe).length,'Package still running: preservation remains pending');
-      if(handle)out.restoration=await restoreAfterExit(handle,owned,OP.alive,FP.restore);
+      if(handle&&persistentProfile){
+        assert(!owned.some(OP.alive),'Persistent profile retained only after owned app exit');
+        out.restoration={ok:true,persistent:true,root:handle.root,restored:false,
+          note:'TEST preferences retained in the app-owned profile'};
+      }else if(handle)out.restoration=await restoreAfterExit(handle,owned,OP.alive,FP.restore);
       if(graph&&before)out.finalIntegrity=GH.compare(before,GH.snapshot(graph));
       out.finalErrorEntries=requestedGraph?redactExistingGraphErrors(errors.entries()):errors.entries();
       out.status=out.error?'failed-closed':'closed';
@@ -192,6 +240,7 @@ async function start({smokeClose=false,existingGraph=null}={}){
     out.closedAt=new Date().toISOString();save(file,out);console.log('PREVIEW '+out.status+' '+file);
     process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);
   }
+  return out;
 }
 function closeRequest(){
   const lease=JSON.parse(fs.readFileSync(ACTIVE));
@@ -208,4 +257,4 @@ if(require.main===module){
     start({existingGraph:process.argv[4]}).catch(e=>{console.error(e.stack);process.exitCode=1;});
   }else throw Error('Use start, start-existing --graph /exact/path, close, or smoke-close');
 }
-module.exports={restoreAfterExit,packageIdentity,canonicalExistingGraph,redactExistingGraphErrors};
+module.exports={start,restoreAfterExit,packageIdentity,canonicalExistingGraph,redactExistingGraphErrors};

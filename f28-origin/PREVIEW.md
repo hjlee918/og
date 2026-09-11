@@ -4,6 +4,57 @@ User approved this limited preview after the compatibility report. Daily use,
 installation, deployment, account access and profile migration are not approved.
 The report's historical recommendation and all prior failures remain preserved.
 
+## Independent Intel test launcher
+
+The current local launcher is:
+
+`/Users/johnlee/LogseqOGRoam/development/f27-inline-context/out-launcher/Logseq OG Test — Offline.app`
+
+Double-click it in Finder. Its bilingual folder picker starts in the canonical
+`Logseq Test` root and accepts only an existing, canonically contained directory.
+It rejects outside paths, relative paths and symlink escapes before graph-content
+access. Cancellation makes no graph selection. The launcher never chooses or
+creates a graph for the user, and existing-graph preparation does not inject
+fixtures, overwrite graph settings or CSS, reset notes, or run an import.
+
+The launcher uses the preserved Intel experimental package, build
+`2026-09-10T22-15-35-426Z-4cf82a57`, clean product source
+`cb04131613e1640ca0e64c47e07b3afca81c47f6`, bundle
+`com.logseq.logseq-og.f28originexp`, and startup control
+`f28-origin-network/1`. The launcher bundle is
+`com.logseq.logseq-og.test.offline-launcher`, architecture `x86_64`; it is a local
+test artifact, not an installation or release. Its manifest is at
+`Contents/Resources/launcher-manifest.json` inside the app.
+
+The app keeps an ownership-marked, app-specific TEST profile between normal
+launches so test preferences survive. It refuses any plugin set other than the
+verified Readwise artifact, refuses retained credentials or automatic Readwise
+loading, and does not install the optional AI plugins. A live lease refuses a
+second overlapping launch. A crash leaves the lease in place and the next launch
+fails closed with a bilingual recovery message; do not delete such a lease until
+owned processes have been reviewed. There is no inspection timeout. Use
+**Command-Q** to quit; profile state is retained only after every owned app process
+has exited.
+
+Roam/JSON/OPML import is unavailable in this launcher. Those existing importer
+controls use Chromium renderer-native file inputs, which do not pass their chosen
+path through the guarded main-process boundary. The launcher disables their input
+clicks and explains the limitation instead of claiming containment. Supporting a
+manual import later requires a separate path-contained file-selection design.
+
+Graph-local `logseq/custom.css` continues to load normally. Network refusal blocks
+online CSS `@import`, including the online Dracula import; configure a local copy
+separately if desired. This launcher does not download a theme or rewrite CSS.
+
+Fresh synthetic-data verification passed 13/13 integration checks: LaunchServices
+double-click and picker cancellation, valid selection and exact LIVE graph,
+outside-root and symlink refusal, local CSS, disabled import inputs, unchanged
+graph content, safe Quit, persistent-profile reuse, overlap refusal, lease cleanup
+and post-exit profile preservation. Focused tooling checks passed 8/8. The inherited
+synthetic reference preview then passed 16/16 and closed with no retained app
+process. The user's disposable sample graph was not used for automated mutation
+tests. Evidence and generated profiles remain local and are not Git inputs.
+
 From this checkout, repeatable launch:
 
 ```sh
@@ -80,13 +131,15 @@ Graph access remains limited to canonical owned subfolders of
 `/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test`.
 Never open personal graphs, installed Logseq or personal profiles.
 
-## Verified inspection session
+## Historical verified inspection session (closed)
 
-Prepared September 10 LA / September 11 UTC; checked still open on resume.
+Prepared September 10 LA / September 11 UTC and later closed.
 Evidence: `../evidence/origin-preview-2026-09-11T03-48-17-210Z.json`.
 The screenshot beside that JSON records the verified starting view.
 
-- Status at handoff: intentionally open; supervisor PID **27278**, app PID **27340**.
+- Status at the original handoff: intentionally open; supervisor PID **27278**,
+  app PID **27340**. The later close retained the strict failure classification,
+  exited all owned processes and restored/preserved only owned TEST profile state.
 - Graph: `/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test/f28-reforder-offline-readwise-preview-2026-09-11T03-49-04-817Z`.
 - Profile: `/Users/johnlee/Library/Application Support/Logseq OG F28 OriginExp/originexp-state`.
 - No profile was displaced. After exit the supervisor will preserve this profile
@@ -105,11 +158,11 @@ The screenshot beside that JSON records the verified starting view.
   uses the simpler existing reference-order fixture, avoiding cyclic stress
   examples; no product source or package changed.
 
-한국어 상태: 승인된 격리 오프라인 미리보기를 의도적으로 열어 둡니다.
+한국어 상태: 승인된 격리 오프라인 미리보기 실행은 종료되었습니다.
 Readwise 가져오기·동기화는 사용할 수 없으며 일상 사용·배포 승인이 아닙니다.
 종료 뒤에만 시험 프로필을 보존하고, 이번 실행에서 옮겨 둔 이전 프로필은 없습니다.
 
-## Existing disposable Intel graph session — 2026-09-11
+## Historical disposable Intel graph session — 2026-09-11 (closed)
 
 The user confirmed `LogseqOGINTELTEST` is an Intel-only disposable copy, separate
 from their working graph and the Mac Studio test graph. No Roam JSON was supplied,
@@ -118,7 +171,9 @@ so import is not part of this session.
 - Window: **INTEL DISPOSABLE GRAPH · 인텔 폐기용 그래프 · OFFLINE**.
 - Exact LIVE graph: `/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test/LogseqOGINTELTEST`, confirmed independently by both live application APIs before handoff.
 - Profile: fresh `/Users/johnlee/Library/Application Support/Logseq OG F28 OriginExp/originexp-state`; no prior profile was displaced.
-- Ownership at handoff: supervisor PID **29571**, app PID **29644** and four initially retained app processes. The supervisor has no timeout.
+- Ownership at the original handoff: supervisor PID **29571**, app PID **29644**
+  and four initially retained app processes. The session later exited all owned
+  processes; its strict failures remain recorded as `failed-closed`.
 - 10/10 handoff checks passed: package guard, lexical outside-path refusal, both
   LIVE graph gates, isolated profile paths, startup control, Readwise-only
   handshake/loaded/UI, auto-import disabled/no credential, and final exact graph.
@@ -132,9 +187,9 @@ so import is not part of this session.
   interaction. The user may edit this disposable copy. Roam import should not be
   attempted in this session because no approved JSON path was provided.
 
-Use **Command-Q** to close safely. Only after the app exits will the supervisor
-preserve the fresh profile as `originexp-state.offline-preview-2026-09-11T13-06-18-414Z`.
-There is no displaced profile to restore. The graph itself is retained in place.
+The session was closed safely. Only after the app exited did the supervisor
+preserve its fresh TEST profile. There was no displaced profile to restore. The
+graph itself remained in place.
 
 한국어: 이 창은 인텔 전용 폐기 가능한 복사본을 연 격리 오프라인 실험입니다.
 Readwise 동기화·로그인·AI 요청은 사용하지 마세요. 이번 실행에는 승인된 Roam JSON
