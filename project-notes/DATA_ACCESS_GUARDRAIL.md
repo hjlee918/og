@@ -29,4 +29,3 @@ fail closed if containment or profile ownership cannot be established.
 On another host, verify that this exact approved root exists and canonicalizes
 as expected before graph access. Do not guess a substitute path. Do not perform
 simultaneous multi-host testing unless the user separately authorizes it.
-
