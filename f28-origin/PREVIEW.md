@@ -10,6 +10,18 @@ From this checkout, repeatable launch:
 node f28-origin/checks/preview.js start
 ```
 
+For a user-confirmed existing disposable graph, use the explicit path mode. It
+refuses relative paths, paths outside `Logseq Test`, symlinks and non-directories:
+
+```sh
+node f28-origin/checks/preview.js start-existing --graph "/exact/approved/path"
+```
+
+Existing mode does not generate, annotate, list, hash, screenshot or navigate the
+graph's notes during preparation. It asserts the application's exact LIVE graph
+identity before handoff. Normal application opening may create its ordinary local
+state in the disposable graph, and the user may edit it during the preview.
+
 Keep that terminal/supervisor running. There is no inspection timeout. Each launch
 creates a unique synthetic graph and preserves the previous run; a live lease
 refuses overlapping launches. Package identity, source and startup hashes are
@@ -96,3 +108,34 @@ The screenshot beside that JSON records the verified starting view.
 한국어 상태: 승인된 격리 오프라인 미리보기를 의도적으로 열어 둡니다.
 Readwise 가져오기·동기화는 사용할 수 없으며 일상 사용·배포 승인이 아닙니다.
 종료 뒤에만 시험 프로필을 보존하고, 이번 실행에서 옮겨 둔 이전 프로필은 없습니다.
+
+## Existing disposable Intel graph session — 2026-09-11
+
+The user confirmed `LogseqOGINTELTEST` is an Intel-only disposable copy, separate
+from their working graph and the Mac Studio test graph. No Roam JSON was supplied,
+so import is not part of this session.
+
+- Window: **INTEL DISPOSABLE GRAPH · 인텔 폐기용 그래프 · OFFLINE**.
+- Exact LIVE graph: `/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test/LogseqOGINTELTEST`, confirmed independently by both live application APIs before handoff.
+- Profile: fresh `/Users/johnlee/Library/Application Support/Logseq OG F28 OriginExp/originexp-state`; no prior profile was displaced.
+- Ownership at handoff: supervisor PID **29571**, app PID **29644** and four initially retained app processes. The supervisor has no timeout.
+- 10/10 handoff checks passed: package guard, lexical outside-path refusal, both
+  LIVE graph gates, isolated profile paths, startup control, Readwise-only
+  handshake/loaded/UI, auto-import disabled/no credential, and final exact graph.
+- Five network refusals were recorded by kind only. Strict error accounting remains
+  failed: one blocked startup resource and one other runtime error were retained.
+  The latter contains a disposable graph page title in this run's local evidence;
+  that evidence is not committed or uploaded. Future existing-graph evidence
+  redacts runtime text while retaining classification and SHA-256 identity.
+- Preparation did not generate, annotate, list, hash, screenshot or navigate the
+  graph's notes. After the LIVE assertion, the operator performed no scripted
+  interaction. The user may edit this disposable copy. Roam import should not be
+  attempted in this session because no approved JSON path was provided.
+
+Use **Command-Q** to close safely. Only after the app exits will the supervisor
+preserve the fresh profile as `originexp-state.offline-preview-2026-09-11T13-06-18-414Z`.
+There is no displaced profile to restore. The graph itself is retained in place.
+
+한국어: 이 창은 인텔 전용 폐기 가능한 복사본을 연 격리 오프라인 실험입니다.
+Readwise 동기화·로그인·AI 요청은 사용하지 마세요. 이번 실행에는 승인된 Roam JSON
+경로가 없으므로 가져오기를 시험하지 마세요. 종료는 **Command-Q**를 사용하세요.
