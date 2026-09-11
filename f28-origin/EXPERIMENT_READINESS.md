@@ -1,5 +1,9 @@
 # Isolated origin experiment — supervisor review
 
+Apple Silicon follow-up: [APPLE_SILICON_READINESS.md](APPLE_SILICON_READINESS.md)
+records the native arm64 bounded offline preview. Its strict startup-error
+limitation remains visible and does not change the acceptance boundary below.
+
 Updated 2026-09-10 (Los Angeles; final runs use September 11 UTC timestamps).
 The approved experiment now has a tested startup control and actual plugin
 activation evidence. It remains experimental and inactive in the accepted build.

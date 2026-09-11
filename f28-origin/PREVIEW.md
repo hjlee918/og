@@ -96,3 +96,19 @@ The screenshot beside that JSON records the verified starting view.
 한국어 상태: 승인된 격리 오프라인 미리보기를 의도적으로 열어 둡니다.
 Readwise 가져오기·동기화는 사용할 수 없으며 일상 사용·배포 승인이 아닙니다.
 종료 뒤에만 시험 프로필을 보존하고, 이번 실행에서 옮겨 둔 이전 프로필은 없습니다.
+
+## Intel feedback and Apple Silicon follow-up
+
+The user reported “Everything looks good” for the Intel inspection and confirmed
+closing it with Command-Q. Record that as positive UI/UX feedback for that
+isolated preview only. It is not daily-use, deployment, synchronization,
+authenticated-service or full-compatibility acceptance. This Apple host did not
+independently verify cleanup of the Intel processes.
+
+The bounded Apple Silicon equivalent completed on native arm64 and closed after
+automation. All 17 targeted containment/UI checks passed, including actual
+Readwise handshake and injected UI, 8 groups/22 rows, the three ordering modes,
+stable child structure, Korean controls, keyboard/path disclosure, navigation,
+local assets and content/plugin integrity. Strict error accounting still fails
+on one unexplained startup `ERR_BLOCKED_BY_CLIENT`. Exact package and cleanup
+details are in [APPLE_SILICON_READINESS.md](APPLE_SILICON_READINESS.md).

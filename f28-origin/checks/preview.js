@@ -30,10 +30,11 @@ async function restoreAfterExit(handle,owned,alive,restore){
 }
 function packageIdentity(){
   const b=NET.assertReady(),m=b.preflight.manifest;
-  assert(m.pilotBuildId==='2026-09-10T22-15-35-426Z-4cf82a57','Wrong preview build');
-  assert(m.builtFrom.commit==='cb04131613e1640ca0e64c47e07b3afca81c47f6'&&!m.builtFrom.dirty,'Wrong preview source');
+  assert(m.pilotBuildId==='2026-09-11T22-07-22-370Z-4750cad0','Wrong preview build');
+  assert(m.builtFrom.commit==='87b811663a298cb5a6ae4d4f73836a9ebc45a2a9'&&!m.builtFrom.dirty,'Wrong preview source');
+  assert(process.arch==='arm64'&&m.host?.platform==='darwin'&&m.host?.arch==='arm64','Wrong preview architecture');
   const hash=crypto.createHash('sha256').update(fs.readFileSync(path.join(b.resApp,'origin-experiment-build-manifest.json'))).digest('hex');
-  assert(hash==='a1b50f3ed77cbdee9bf8e407c78d63b154d735349f2a11bf60284dbca105cbf3','Manifest changed');
+  assert(hash==='8a3e818e851f7d3f6cce05cfb922198c5a7fe51f8d00a0cab784e5bd9d30dc23','Manifest changed');
   return b;
 }
 async function start({smokeClose=false}={}){
@@ -95,7 +96,24 @@ async function start({smokeClose=false}={}){
     record('P4','Automatic import disabled and no credential',settingsNow.isLoadAuto===false&&!Object.entries(settingsNow).some(([k,v])=>/token|secret|password|api.?key/i.test(k)&&v),{isLoadAuto:settingsNow.isLoadAuto,credentialsPresent:false});
     await live();errors.phase('reference-preview','short-reference-journey');
     await session.goTo(CG.ANCHOR);await j.settle('preview');out.references=await RD.read(session.page);
-    record('P5','Eight reference groups',out.references.present&&out.references.groups.length===8,{groups:out.references.groups.length});
+    record('P5','Complete synthetic reference overview',out.references.present&&out.references.groups.length===8&&out.references.rows.length===22,
+      {groups:out.references.groups.length,rows:out.references.rows.length});
+    const originalOrder=RD.orderOf(out.references),originalInside=RD.insideOf(out.references);
+    const liveTitles=out.references.groups.map(x=>({ref:x.ref,title:x.title}));
+    const expectedAsc=CG.orderTitles(liveTitles,'title-asc').map(x=>x.ref);
+    const expectedDesc=CG.orderTitles(liveTitles,'title-desc').map(x=>x.ref);
+    const ascPick=await j.chooseOrder('title-asc');await j.settle('title ascending');const asc=await RD.read(session.page);
+    const descPick=await j.chooseOrder('title-desc');await j.settle('title descending');const desc=await RD.read(session.page);
+    const backPick=await j.chooseOrder('original');await j.settle('original restored');const back=await RD.read(session.page);
+    const insideDiffs=(reading)=>{const got=RD.insideOf(reading);return [...new Set([...Object.keys(originalInside),...Object.keys(got)])]
+      .filter(ref=>JSON.stringify(got[ref])!==JSON.stringify(originalInside[ref]));};
+    out.ordering={original:originalOrder,expected:{ascending:expectedAsc,descending:expectedDesc},
+      ascending:RD.orderOf(asc),descending:RD.orderOf(desc),restored:RD.orderOf(back),
+      picks:{ascending:ascPick,descending:descPick,restored:backPick},
+      insideDiffs:{ascending:insideDiffs(asc),descending:insideDiffs(desc),restored:insideDiffs(back)}};
+    record('P5A','Ordering and child structure',Object.values(out.ordering.picks).every(x=>x.changed)&&
+      JSON.stringify(out.ordering.ascending)===JSON.stringify(expectedAsc)&&JSON.stringify(out.ordering.descending)===JSON.stringify(expectedDesc)&&
+      JSON.stringify(out.ordering.restored)===JSON.stringify(originalOrder)&&Object.values(out.ordering.insideDiffs).every(x=>x.length===0),out.ordering);
     let ds=await j.disclosureState();const id=Object.keys(ds.byId).find(k=>ds.byId[k].control);assert(id,'No context control');
     const ctrl=ds.byId[id];assert((await j.focusControl(ctrl.controlId)).ok,'Cannot focus context');
     await session.page.keyboard.press('Enter');await OP.sleep(1500);
