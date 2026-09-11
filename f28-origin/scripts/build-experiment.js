@@ -39,6 +39,9 @@ const PILOT_SRC = path.join(REPO, 'f27-pilot', 'src');
 const ID = require(path.join(SRC, 'experiment-identity.js'));
 const TRANSFORM = require(path.join(SRC, 'lsplugin-transform.js'));
 const PLUGIN_HOST_BUNDLE = path.join('js', 'lsplugin.core.js');
+const PRESERVED_ICON = path.resolve(REPO, '..', 'out-originexp-preserved-20260911-7e719ea-dracula-predecessor',
+  'Logseq-OG-F28-OriginExp-darwin-x64', 'Logseq-OG-F28-OriginExp.app', 'Contents', 'Resources', 'electron.icns');
+const PRESERVED_ICON_SHA256 = '81a393bfed88c21410e7b48a7c80041f345cedb586bbd13e856fccb644ebb27f';
 
 const FEATURE_BRANCH = 'feature/f28-reference-paths';
 // Checkouts this build must never write into, by directory name.
@@ -280,7 +283,12 @@ try {
   execFileSync(process.execPath, [path.join(REPO, 'f27-pilot', 'scripts', 'make-icon.js')],
                { stdio: 'inherit' });
 } catch (e) {
-  die('icon generation failed');
+  if (!fs.existsSync(PRESERVED_ICON) || sha256(fs.readFileSync(PRESERVED_ICON)) !== PRESERVED_ICON_SHA256) {
+    die('icon generation failed and the exact preserved experimental icon is unavailable');
+  }
+  const target=path.join(STATIC,'icons','pilot.icns');
+  fs.mkdirSync(path.dirname(target),{recursive:true});fs.copyFileSync(PRESERVED_ICON,target);
+  log('iconutil unavailable; reused hash-verified distinct icon from the preserved experimental package');
 }
 
 // ---------------------------------------------------------------- manifest

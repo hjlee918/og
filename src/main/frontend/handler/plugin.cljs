@@ -57,7 +57,11 @@
   [theme]
   (when theme
     (cond-> theme
-      (util/electron?)
+      ;; The origin experiment serves verified plugin/theme assets through its
+      ;; guarded `assets:` protocol. Converting that URL back to raw `file:`
+      ;; would bypass the protocol boundary and is refused by the startup
+      ;; control. Ordinary Electron/file-origin builds keep their old behavior.
+      (and (util/electron?) (not= "lsp:" js/location.protocol))
       (update :url #(some-> % (string/replace-first "assets://" "file://"))))))
 
 (defn load-plugin-preferences
