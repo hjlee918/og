@@ -112,3 +112,15 @@ test('the lsp:// handler allow-lists hosts and checks canonical containment', ()
   // The pilot check is kept on top, not replaced.
   assert.match(core, /pilot\/permitted-path\? path' "resource"/);
 });
+
+test('macOS package production and lookup select only the native supported architecture', () => {
+  const packageScript = read('f28-origin', 'scripts', 'package-experiment.js');
+  assert.match(packageScript, /const ARCH = process\.arch/);
+  assert.match(packageScript, /\['x64', 'arm64'\]\.includes\(ARCH\)/);
+  assert.match(packageScript, /`--arch=\$\{ARCH\}`/);
+  assert.match(packageScript, /`\$\{forge\.packagerConfig\.name\}-\$\{PLATFORM\}-\$\{ARCH\}`/);
+
+  const resolver = read('f28-refpath', 'checks', 'packaged-app.js');
+  assert.match(resolver, /const darwinArch = process\.arch === 'arm64' \? 'arm64' : 'x64'/);
+  assert.match(resolver, /`\$\{b\.app\}-darwin-\$\{darwinArch\}`/);
+});

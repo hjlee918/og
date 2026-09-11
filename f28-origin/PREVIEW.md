@@ -185,6 +185,22 @@ local assets and content/plugin integrity. Strict error accounting still fails
 on one unexplained startup `ERR_BLOCKED_BY_CLIENT`. Exact package and cleanup
 details are in [APPLE_SILICON_READINESS.md](APPLE_SILICON_READINESS.md).
 
+The Apple evidence remains bound to clean source `87b811663` and arm64 build
+`2026-09-11T22-07-22-370Z-4750cad0`. It does not show that package contains the
+later Intel Dracula/standalone-launcher work, and post-merge source tests are not
+a substitute for a new arm64 runtime run. The Intel launcher and its pinned x64
+package remain unchanged by the architecture-selection merge.
+
+The Intel integration review fast-forwarded the feature branch through the
+Apple merge without rebuilding either package. Fifty-eight focused non-launching
+tests passed for architecture selection, experimental source/build provenance,
+graph verdicts, cleanup ordering, launcher choices, error redaction and the
+pinned local Dracula artifact. A new Intel smoke run and the real-Electron
+bootstrap fixtures were deliberately not started while the user's owned Intel
+preview was open. The retained Intel 14/14 launcher smoke evidence and exact x64
+package remain the runtime basis; the unexplained startup
+`ERR_BLOCKED_BY_CLIENT` remains a strict failure.
+
 ## Historical disposable Intel graph session — 2026-09-11 (closed)
 
 The user confirmed `LogseqOGINTELTEST` is an Intel-only disposable copy, separate

@@ -145,6 +145,10 @@ not launched or migrated. All run profiles and prior evidence are retained.
 
 Graph content access was confined to canonical test-owned subfolders of
 `/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test`.
+The portable tracked rule is now in
+`project-notes/DATA_ACCESS_GUARDRAIL.md` for both Intel and future Apple
+sessions. Its addition after the Apple run does not change that run's tested
+source or evidence.
 No personal graph investigation was performed to resolve historical uncertainty.
 The prior interrupted broad instruction search could have traversed out-of-scope
 metadata; that uncertainty remains. An inherited assertion in the first resumed

@@ -18,10 +18,13 @@ application or normal profile was launched. Graph access was limited to a newly
 generated canonical child of
 `/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test`.
 
-The referenced `project-notes/DATA_ACCESS_GUARDRAIL.md` is not present in the
-local project container or source checkpoint. The enforced boundary in
-`f27-pilot/checks/allowed-root.js`, the F28 records and the task's explicit
-guardrails supplied the fail-closed contract; this absence remains disclosed.
+The referenced `project-notes/DATA_ACCESS_GUARDRAIL.md` was not present in the
+Apple session's local project container or tested source checkpoint. The
+enforced boundary in `f27-pilot/checks/allowed-root.js`, the F28 records and the
+task's explicit guardrails supplied that run's fail-closed contract; this
+historical absence remains disclosed. The later Intel integration adds a
+portable tracked copy for future sessions. That documentation change does not
+retroactively alter the package or evidence described here.
 
 ## Exact package identity
 
@@ -91,6 +94,12 @@ Final evidence is
 new harness assertion compared object key insertion order while intentionally
 reordering groups. The corrected check uses the repository's reviewed
 group-by-group comparison. Both failed runs and their profiles remain preserved.
+
+This runtime evidence is tied only to source
+`87b811663a298cb5a6ae4d4f73836a9ebc45a2a9` and the exact arm64 package above.
+That package predates the later Intel local-Dracula and standalone-launcher
+changes. Merging the source and passing post-merge unit tests do not establish
+post-merge arm64 runtime behavior.
 
 The final synthetic graph is
 `f28-reforder-offline-readwise-preview-2026-09-11T22-19-23-455Z` under the
