@@ -188,10 +188,13 @@ attachment transfer, block matching, parser-aware merge, mobile adapters,
 existing-graph enrollment and UI remain deferred. Real platform acceptance will
 still require separate real-device work after architecture review.
 
-The smallest proposed next integration step is a local synthetic reconciliation
-adapter that converts an explicitly supplied set of file events into this
-operation contract and produces a reviewable write plan without changing OG or
-applying the plan. That step is not authorized by this prototype batch.
+The next approved slice implemented the pure reconciliation planner in
+[`f28-sync-prototype`](../f28-sync-prototype/README.md). Given an explicit
+snapshot and explicit synthetic file events, it now produces a deterministic
+reviewable plan and blocks existing multi-head/relevant-conflict cases. It does
+not read or write files, discover changes, integrate with OG, or reserve a
+destination. A contained synthetic executor would be a separate future decision
+and would need an anchored directory boundary plus an atomic precondition check.
 
 ## Decisions needed from the user
 

@@ -27,6 +27,34 @@ an immutable revision whose parent is explicit.
    the installed inode, and syncing its directory. An injected failure before
    acknowledgement throws instead of reporting success.
 
+## Pure reconciliation planner
+
+The planner accepts an explicit JSON-serializable replica snapshot and an
+ordered list of synthetic create, update, rename and delete events. Every event
+has an explicit event ID, file ID and revision ID; non-create events also name
+their parent revision. The planner derives a stable operation ID from the graph
+and event IDs. It never reads a directory, applies a file change or infers an ID,
+rename or deletion.
+
+The output separates applicable actions, conflicts, exact duplicate events and
+invalid events. Each proposed action records its operation, expected current
+heads, expected parent revision content/path/deleted state, and reasons. The
+planner applies actions only to an in-memory projected snapshot. A conflict or
+invalid event does not advance that projection.
+
+A core operation result of `committed` is insufficient by itself. A file with
+multiple heads or a relevant open conflict remains blocked even if an operation
+names one current head. New stale-parent and normalized-path conflicts are also
+blocked. Update, rename and delete follow the same rule, so planning against one
+branch cannot hide another branch or clear an unresolved conflict.
+
+The plan records a stable fingerprint of the complete source snapshot. The pure
+precondition check rejects applicability when a supplied destination snapshot
+has any different fingerprint. It does not reserve or lock a destination; a
+future applying component would have to check again at its own atomic commit
+boundary. The planner clones its inputs and includes no clock, random value,
+filesystem access, watcher, network, account or application integration.
+
 The adapter caches the device/inode identities of the canonical approved root,
 test run and store directory, then verifies all three at every persistence entry
 point and around file operations. Reads use `O_NOFOLLOW` and match the opened
