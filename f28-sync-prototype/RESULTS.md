@@ -100,9 +100,43 @@ Focused in-memory verification:
   change. The controlled-prototype 15/15 result above remains historical.
 
 The plan is advisory and reserves nothing. Its fingerprint check can detect a
-changed supplied snapshot, but a future executor must repeat the precondition
-at its atomic application boundary. It does not read files, discover events,
-infer rename/delete/identity, resolve conflicts, merge text or write a graph.
-The smallest next proposal, requiring separate review, is a contained synthetic
-plan executor with an anchored directory boundary and no OG integration. It was
-not implemented in this slice.
+changed supplied snapshot, but an executor must repeat the precondition at its
+own application boundary. It does not read files, discover events, infer
+rename/delete/identity, resolve conflicts, merge text or write a graph.
+
+## In-memory plan executor slice
+
+Supervisor independently reran and accepted the preceding core/planner scope at
+17/17. The new [`executor.js`](./src/executor.js) completes the in-memory path
+from synthetic events through planning, integrity validation and private state
+application. It recomputes the plan from the original snapshot/events, rejects
+unexpected schema, altered actions or ordering, and mismatched projected-state
+fingerprints. It rejects the entire batch if any conflict or invalid event is
+present.
+
+Immediately before execution, the executor validates and fingerprints a fresh
+destination clone. A basis match may execute, an exact projected-state match is
+an already-applied retry, and every other destination is stale. Eligible actions
+apply to a private clone in order; the result is returned only when its final
+fingerprint matches the plan. Controlled failure after an early private action
+returns `state: null`. Existing unrelated conflict branches and history remain
+unchanged.
+
+Focused in-memory verification:
+
+- Executor tests: 12/12 passed.
+- Existing planner tests: 10/10 passed.
+- Existing core tests: 7/7 passed.
+- Final combined in-memory result: 29/29 passed.
+- New executor source/test syntax checks: 2/2 passed.
+- Persistence tests were not rerun because persistence did not change.
+
+The executor is synchronous and in memory. Its private-return behavior is not a
+durable transaction, filesystem atomicity guarantee or multi-process lock, and
+it does not solve the anchored-directory problem or the documented persistence
+races and power-loss limits. It has no filesystem, OG, watcher, network,
+account, profile or service integration.
+
+The smallest recommended next step is a separate design review of a
+platform-specific anchored directory-handle and atomic compare/apply boundary.
+No filesystem executor or application integration was started.

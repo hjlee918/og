@@ -188,13 +188,17 @@ attachment transfer, block matching, parser-aware merge, mobile adapters,
 existing-graph enrollment and UI remain deferred. Real platform acceptance will
 still require separate real-device work after architecture review.
 
-The next approved slice implemented the pure reconciliation planner in
+The next approved slices implemented the pure reconciliation planner and a
+small in-memory executor in
 [`f28-sync-prototype`](../f28-sync-prototype/README.md). Given an explicit
 snapshot and explicit synthetic file events, it now produces a deterministic
-reviewable plan and blocks existing multi-head/relevant-conflict cases. It does
-not read or write files, discover changes, integrate with OG, or reserve a
-destination. A contained synthetic executor would be a separate future decision
-and would need an anchored directory boundary plus an atomic precondition check.
+reviewable plan, blocks existing multi-head/relevant-conflict cases, recomputes
+and validates that plan, and applies an eligible whole batch to a private state
+clone. It distinguishes exact retry from stale destination and exposes no
+partial state on failure. It does not read or write files, discover changes,
+integrate with OG, or reserve a destination. Any filesystem executor remains a
+separate future decision and needs an anchored directory boundary plus an
+atomic precondition check.
 
 ## Decisions needed from the user
 

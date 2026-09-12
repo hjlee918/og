@@ -55,6 +55,34 @@ future applying component would have to check again at its own atomic commit
 boundary. The planner clones its inputs and includes no clock, random value,
 filesystem access, watcher, network, account or application integration.
 
+## In-memory plan executor
+
+The executor requires the original snapshot, original ordered event batch,
+planner output and an explicit destination snapshot. It treats the supplied
+plan as untrusted: it recomputes the canonical plan, checks the expected schema
+and projected-state fingerprint, and requires the entire supplied plan to match
+the recomputed plan. This covers altered actions, ordering, expectations,
+reasons, identities and classifications.
+
+The first executor rejects the whole batch when the plan contains any invalid
+event or conflict. Exact duplicate events are allowed and produce no duplicate
+operation. Immediately before execution it fingerprints a fresh clone of the
+destination. A basis match may execute; an exact projected-state match is
+reported as an already-applied batch; every other value is a stale-plan refusal
+and is never silently rebased.
+
+Eligible operations apply in order to a private clone. The clone is returned
+only after every operation succeeds and its final fingerprint matches the plan.
+Any error or controlled test failure returns a rejection with `state: null`, so
+no partially applied state is exposed. Source state, destination state, events
+and plan remain unchanged.
+
+This synchronous behavior is only an in-memory atomic-return property. It is
+not a durable transaction, filesystem atomicity guarantee, multi-process lock,
+or solution to the persistence adapter's documented concurrent ancestor race.
+The executor has no filesystem, watcher, network, account, profile or OG
+integration.
+
 The adapter caches the device/inode identities of the canonical approved root,
 test run and store directory, then verifies all three at every persistence entry
 point and around file operations. Reads use `O_NOFOLLOW` and match the opened
