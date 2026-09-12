@@ -39,8 +39,10 @@ has exited.
 Roam/JSON/OPML import is unavailable in this launcher. Those existing importer
 controls use Chromium renderer-native file inputs, which do not pass their chosen
 path through the guarded main-process boundary. The launcher disables their input
-clicks and explains the limitation instead of claiming containment. Supporting a
-manual import later requires a separate path-contained file-selection design.
+clicks and explains the limitation instead of claiming containment. The user has
+cancelled the previous dedicated Roam-import task: preserve OG's existing
+importer and historical records, but do not design, implement or specially test
+a replacement. The isolated launcher's refusal remains unchanged.
 
 Graph-local `logseq/custom.css` continues to load normally. Official Dracula
 `0.1.0` is installed locally from exact upstream commit
