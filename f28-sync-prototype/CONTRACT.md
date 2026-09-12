@@ -159,3 +159,39 @@ Tests create one fresh run beneath the approved `Logseq Test` root and do not
 enumerate that shared root. Persistence injection establishes the ordering and
 retry behavior under controlled in-process exceptions. It does not establish
 storage-hardware or sudden-power-loss durability.
+
+## Read-only selected-generation comparison
+
+The `read-selected` helper command opens only an explicitly named existing run
+and case. It verifies both ownership records, opens the existing metadata,
+generations and stable lock entries without creation, and holds a shared
+cooperative lock. It verifies `CURRENT`, the selected manifest, canonical state
+and every materialized file through anchored, non-following operations. Before
+returning, it rereads `CURRENT`, reverifies the generation and rechecks the
+opened directory and lock identities. Missing ownership, metadata, lock,
+selector or generation state is a refusal; this command creates nothing.
+
+Its `F28READ1` response has fixed ordered fields, a 128-file limit, per-path and
+per-file bounds, and an 8 MiB combined state/path/content bound. The Node side
+uses a five-second child-process limit and 20 MiB output cap, rejects malformed,
+truncated or trailing protocol data, validates UTF-8 and JSON, and requires the
+returned files to agree exactly with the returned state. This is an integrity
+check across the helper/coordinator boundary, not authentication.
+
+The pure comparison adapter accepts that verified envelope and an explicit
+synthetic target snapshot. Stable file IDs supplied by the caller are the only
+identity basis. It reports unchanged and unknown items, proposed events,
+conflicts and invalid inputs, then submits only eligible events to the existing
+planner. Absence remains unknown unless the target declares itself complete and
+explicitly authorizes missing-file deletion; a supplied tombstone can request
+deletion directly. Duplicate IDs, invalid paths, NFC/NFD/case-normalized path
+collisions, multi-head identities, implicit restore and a simultaneous rename
+plus content change are refused rather than inferred or merged. Inputs are
+cloned, event identities are deterministic, and the planner retains its source
+snapshot fingerprint precondition.
+
+Neither layer applies a plan, publishes a generation, discovers a graph or
+connects OG. The shared lock coordinates only participating helpers. The final
+rechecks detect the controlled mutations in tests but do not close races against
+an arbitrary writer after a check, prevent relocation of an already-open
+ancestor, or provide a durable compare/apply transaction.

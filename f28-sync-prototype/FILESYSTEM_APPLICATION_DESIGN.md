@@ -206,3 +206,17 @@ iOS cannot assume a desktop helper process or uninterrupted background time;
 Android has different APIs and lifecycle limits. Those adapters, along with
 accounts, network, encryption, attachments, real graph enrollment, block
 matching, Roam import and OG watcher integration, remain excluded.
+
+## Implemented read-only follow-up
+
+The later approved comparison slice adds one command beside this publication
+design; it does not change the writer protocol. `read-selected` requires an
+existing owned run/case and existing lock, takes a shared cooperative lock, and
+returns a bounded verified generation snapshot after repeating selector,
+generation, directory and lock checks. It has no initialization fallback.
+
+A separate pure adapter compares this envelope with caller-supplied synthetic
+IDs and target files, classifies absence conservatively, and feeds eligible
+events to the existing advisory planner. It never calls the writer. The next
+proposal is review of a synthetic compare/apply orchestration boundary; no such
+boundary or OG adapter is part of this implementation.

@@ -17,6 +17,7 @@
 #define MAX_FILES 128u
 #define MAX_PATH_BYTES 1024u
 #define MAX_CONTENT (1024u * 1024u)
+#define MAX_READ_PAYLOAD (8u * 1024u * 1024u)
 typedef struct {
   char *path;
   unsigned char *data;
@@ -238,7 +239,8 @@ static Request parse(void) {
   const char *allowed_failures[] = {
       "none", "during-staging", "before-prepared", "after-prepared",
       "after-generation-rename", "before-current-rename",
-      "pause-before-final-basis", "during-synchronization",
+      "pause-before-final-basis", "pause-read-before-recheck",
+      "during-synchronization",
       "after-current-rename", "before-ack"};
   int known_failure = 0;
   for (size_t i = 0; i < sizeof allowed_failures / sizeof allowed_failures[0]; i++)
@@ -254,7 +256,8 @@ static Request parse(void) {
         die("duplicate operation identity");
   }
   if (strcmp(r.command, "initialize") && strcmp(r.command, "apply") &&
-      strcmp(r.command, "inspect") && strcmp(r.command, "hold"))
+      strcmp(r.command, "inspect") && strcmp(r.command, "hold") &&
+      strcmp(r.command, "read-selected"))
     die("unknown command");
   return r;
 }
@@ -575,10 +578,158 @@ static void pause_before_final_basis(Request *r) {
     sleep(2);
   }
 }
+static void print_hex(const unsigned char *data, size_t length) {
+  static const char digits[] = "0123456789abcdef";
+  char buffer[8192];
+  size_t used = 0;
+  for (size_t i = 0; i < length; i++) {
+    buffer[used++] = digits[data[i] >> 4];
+    buffer[used++] = digits[data[i] & 15];
+    if (used == sizeof buffer) {
+      if (fwrite(buffer, 1, used, stdout) != used)
+        die("read response write failed");
+      used = 0;
+    }
+  }
+  if (used && fwrite(buffer, 1, used, stdout) != used)
+    die("read response write failed");
+}
+static File *load_manifest_files(int generation, size_t *file_count,
+                                 size_t *payload) {
+  size_t manifest_length;
+  unsigned char *manifest_data =
+      readfile(generation, "manifest.txt", 4u * 1024u * 1024u,
+               &manifest_length);
+  char *cursor = strstr((char *)manifest_data, "\nFILECOUNT ");
+  if (!cursor)
+    die("manifest file count missing");
+  cursor += 11;
+  char *end = NULL;
+  unsigned long count = strtoul(cursor, &end, 10);
+  if (end == cursor || count > MAX_FILES || *end != '\n')
+    die("invalid manifest file count");
+  File *files = xmalloc(sizeof(File) * (size_t)count);
+  cursor = end + 1;
+  for (unsigned long i = 0; i < count; i++) {
+    if (strncmp(cursor, "PATHHEX ", 8))
+      die("invalid manifest file row");
+    char *space = strchr(cursor + 8, ' '), *newline = strchr(cursor, '\n');
+    if (!space || !newline || space > newline || newline - space != 65)
+      die("invalid manifest file row");
+    *space = 0;
+    size_t path_length;
+    files[i].path =
+        (char *)unhex(cursor + 8, MAX_PATH_BYTES, &path_length);
+    if (!valid_utf8((unsigned char *)files[i].path, path_length))
+      die("invalid manifest path UTF-8");
+    valid_path(files[i].path);
+    char *leaf;
+    int parent = file_parent(generation, files[i].path, &leaf, 0);
+    files[i].data = readfile(parent, leaf, MAX_CONTENT, &files[i].len);
+    close(parent);
+    free(leaf);
+    sha256(files[i].data, files[i].len, files[i].hash);
+    if (strncmp(files[i].hash, space + 1, 64))
+      die("materialized file mismatch");
+    if (*payload > MAX_READ_PAYLOAD - path_length ||
+        *payload + path_length > MAX_READ_PAYLOAD - files[i].len)
+      die("read response exceeds bound");
+    *payload += path_length + files[i].len;
+    cursor = newline + 1;
+  }
+  free(manifest_data);
+  *file_count = (size_t)count;
+  return files;
+}
+static void emit_read_snapshot(const char *generation_name,
+                               const unsigned char *state, size_t state_length,
+                               File *files, size_t file_count) {
+  printf("SCHEMA F28READ1\nGENERATION %s\nSTATEHEX ", generation_name);
+  print_hex(state, state_length);
+  printf("\nFILECOUNT %zu\n", file_count);
+  for (size_t i = 0; i < file_count; i++) {
+    printf("PATHHEX ");
+    print_hex((unsigned char *)files[i].path, strlen(files[i].path));
+    printf("\nCONTENTHEX ");
+    print_hex(files[i].data, files[i].len);
+    printf("\n");
+  }
+  printf("END 1\n");
+  if (fflush(stdout))
+    die("read response flush failed");
+}
 int main(void) {
   Request r = parse();
   state_fp(&r);
-  int root = rootfd(), made = 0, run = mdir(root, r.run, &made);
+  int root = rootfd();
+  if (!strcmp(r.command, "read-selected")) {
+    int run = odir(root, r.run);
+    dev_t run_dev;
+    ino_t run_ino;
+    identity(run, &run_dev, &run_ino);
+    char owner[132];
+    int owner_length = snprintf(owner, sizeof owner, "%s\n", r.owner);
+    size_t actual_owner_length;
+    unsigned char *actual_owner =
+        readfile(run, "OWNER", sizeof owner, &actual_owner_length);
+    if (actual_owner_length != (size_t)owner_length ||
+        memcmp(actual_owner, owner, actual_owner_length))
+      die("run ownership refused");
+    free(actual_owner);
+    int kase = odir(run, r.kase);
+    dev_t case_dev;
+    ino_t case_ino;
+    identity(kase, &case_dev, &case_ino);
+    actual_owner = readfile(kase, "OWNER", sizeof owner, &actual_owner_length);
+    if (actual_owner_length != (size_t)owner_length ||
+        memcmp(actual_owner, owner, actual_owner_length))
+      die("case ownership refused");
+    free(actual_owner);
+    int meta = odir(kase, ".f28-sync"), generations = odir(meta, "generations");
+    dev_t meta_dev, generations_dev;
+    ino_t meta_ino, generations_ino;
+    identity(meta, &meta_dev, &meta_ino);
+    identity(generations, &generations_dev, &generations_ino);
+    int lock = openat(meta, "LOCK", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (lock < 0 || flock(lock, LOCK_SH | LOCK_NB))
+      die("existing read lock refused");
+    struct stat lock_opened, lock_path;
+    if (fstat(lock, &lock_opened) || !S_ISREG(lock_opened.st_mode) ||
+        fstatat(meta, "LOCK", &lock_path, AT_SYMLINK_NOFOLLOW) ||
+        lock_opened.st_dev != lock_path.st_dev ||
+        lock_opened.st_ino != lock_path.st_ino)
+      die("read lock inode changed");
+    char *selected = selector(meta);
+    verify_gen(generations, selected, NULL);
+    int selected_fd = odir(generations, selected);
+    size_t state_length, file_count, payload = 0;
+    unsigned char *state = readfile(selected_fd, "state.json",
+                                    MAX_READ_PAYLOAD, &state_length);
+    payload = state_length;
+    File *files = load_manifest_files(selected_fd, &file_count, &payload);
+    close(selected_fd);
+    if (!strcmp(r.failure, "pause-read-before-recheck")) {
+      puts("HOOK pause-read-before-recheck");
+      fflush(stdout);
+      sleep(2);
+    }
+    char *selected_again = selector(meta);
+    if (strcmp(selected, selected_again))
+      die("CURRENT changed during read");
+    free(selected_again);
+    verify_gen(generations, selected, NULL);
+    identity_path(root, r.run, run_dev, run_ino);
+    identity_path(run, r.kase, case_dev, case_ino);
+    identity_path(kase, ".f28-sync", meta_dev, meta_ino);
+    identity_path(meta, "generations", generations_dev, generations_ino);
+    if (fstatat(meta, "LOCK", &lock_path, AT_SYMLINK_NOFOLLOW) ||
+        lock_opened.st_dev != lock_path.st_dev ||
+        lock_opened.st_ino != lock_path.st_ino)
+      die("read lock inode changed before response");
+    emit_read_snapshot(selected, state, state_length, files, file_count);
+    return 0;
+  }
+  int made = 0, run = mdir(root, r.run, &made);
   dev_t rd;
   ino_t ri;
   identity(run, &rd, &ri);

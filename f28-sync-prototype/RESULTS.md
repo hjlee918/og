@@ -235,3 +235,56 @@ These corrections close the reviewed entry paths in the controlled one-writer
 experiment. They do not make generation preparation a multi-file atomic write,
 make `flock` control unrelated writers, prove power-loss durability, or remove
 the documented race after a check and concurrent-ancestor relocation limit.
+
+## Read-only selected-generation comparison slice
+
+The standalone helper now has a non-initializing `read-selected` command. It
+opens one explicit existing owned run/case, opens the existing stable lock
+without `O_CREAT`, holds a shared cooperative lock, and verifies the selected
+state and files before returning a bounded `F28READ1` response. It repeats the
+selector/generation and opened-directory/lock identity checks immediately before
+the response. The coordinator strictly parses and cross-checks the response and
+uses bounded child-process time/output limits.
+
+The new pure comparison adapter uses only caller-supplied synthetic file IDs.
+It deterministically reports unchanged/unknown items, eligible create/update/
+rename/delete events, conflicts and invalid inputs, and returns the existing
+planner output without executing it. Absence is not deletion without an
+explicit complete-snapshot authorization or tombstone. Duplicate or ambiguous
+IDs, combined rename/content edits, implicit restore and normalized path
+collisions are refused.
+
+All native evidence is contained in the single fresh owned run
+`f28-read-compare-20260912-fc023e4f-a1`; no shared-root enumeration or prior-run
+access occurred. Final verification results:
+
+- Pure core/planner/executor/comparison/response tests: 40/40 passed.
+- Focused release `read-selected` integration: 5/5 passed.
+- Focused AddressSanitizer/UndefinedBehaviorSanitizer read integration: 5/5
+  passed (`ASAN_OPTIONS=detect_leaks=0`).
+- Existing affected publication/recovery integration: 23/23 passed once with
+  the release helper.
+- Strict JavaScript syntax checks and C warning-as-error build passed.
+
+The focused native cases cover verified Korean/English state and file bytes,
+missing metadata without initialization, invalid ownership, missing lock
+without replacement, and a controlled `CURRENT` change between verification
+passes. Directory-entry names/types and file bytes were hashed before and after
+each helper read/refusal; access times were not used. Strict parser tests cover
+truncated, malformed, oversized and state/file-inconsistent responses. Every
+spawned helper exited or was bounded and awaited; no owned helper remains.
+
+Apple Clang remained 16.0.0 (`clang-1600.0.26.6`), targeting
+`x86_64-apple-darwin23.6.0`. The tested C source SHA-256 was
+`d8349709023585a5082055c17701aa1ec0497b97633e7fa61cda4dfe7d2ebd4a` and the
+release helper SHA-256 was
+`746d82f82772beaeb6e17d0d5d3b2389b9c7594a9076f6b4a60684f381654240`.
+Native binaries and generated state remain outside Git.
+
+This demonstrates a bounded read and advisory comparison for the controlled
+synthetic experiment. It does not apply a comparison plan, make read/compare/
+apply atomic, control unrelated writers, prove power-loss behavior, enroll an
+existing graph or integrate OG. Accounts, networking, encryption, attachments,
+mobile adapters and imports remain excluded. The smallest next proposal is a
+documentation review for a synthetic compare/apply orchestration boundary;
+implementation requires separate approval.
