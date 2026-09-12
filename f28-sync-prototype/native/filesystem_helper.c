@@ -25,8 +25,8 @@ typedef struct {
   char hash[65];
 } File;
 typedef struct {
-  char command[16], run[96], kase[96], owner[129], basis[72], projected[72],
-      plan[129], tx[65], failure[40];
+  char command[16], run[96], kase[96], owner[129], basis[72], selected[65],
+      projected[72], plan[129], tx[65], failure[40];
   unsigned char *state;
   size_t state_len;
   char **ops;
@@ -197,6 +197,8 @@ static Request parse(void) {
   copy_text(r.kase, sizeof r.kase, line(&c, "CASE"), "bad case");
   copy_text(r.owner, sizeof r.owner, line(&c, "OWNER"), "bad owner");
   copy_text(r.basis, sizeof r.basis, line(&c, "BASIS"), "bad basis");
+  copy_text(r.selected, sizeof r.selected, line(&c, "SELECTED"),
+            "bad selected generation");
   copy_text(r.projected, sizeof r.projected, line(&c, "PROJECTED"),
             "bad projected");
   copy_text(r.plan, sizeof r.plan, line(&c, "PLAN"), "bad plan");
@@ -234,6 +236,8 @@ static Request parse(void) {
     die("unsafe ownership fields");
   if (!fingerprint(r.basis) || !fingerprint(r.projected))
     die("invalid state fingerprint");
+  if (strcmp(r.selected, "none") && !hex64(r.selected))
+    die("invalid selected generation");
   if (!safe_component(r.plan) || (strcmp(r.tx, "none") && !hex64(r.tx)))
     die("invalid plan or transaction identity");
   const char *allowed_failures[] = {
@@ -428,8 +432,8 @@ static char *manifest(Request *r) {
       4096 + r->file_count * (MAX_PATH_BYTES * 2 + 100) + r->op_count * 600;
   char *b = xmalloc(cap);
   size_t n = (size_t)snprintf(
-      b, cap, "F28MAN1\nGEN %s\nBASIS %s\nPROJECTED %s\nPLAN %s\nSTATEHASH ",
-      r->tx, r->basis, r->projected, r->plan);
+      b, cap, "F28MAN1\nGEN %s\nBASIS %s\nSELECTED %s\nPROJECTED %s\nPLAN %s\nSTATEHASH ",
+      r->tx, r->basis, r->selected, r->projected, r->plan);
   char h[65];
   sha256(r->state, r->state_len, h);
   n += (size_t)snprintf(b + n, cap - n, "%s\nOPCOUNT %zu\n", h, r->op_count);
@@ -796,6 +800,9 @@ int main(void) {
       die("already initialized");
     if (!hex64(r.tx))
       die("invalid transaction ID");
+    if (strcmp(r.selected, "none") && strcmp(cur, r.selected) &&
+        strcmp(cur, r.tx))
+      die("preview generation changed");
     int cg = odir(gs, cur);
     size_t mn;
     unsigned char *md = readfile(cg, "manifest.txt", 4u * 1024u * 1024u, &mn);
@@ -875,6 +882,9 @@ int main(void) {
   char *cur = present(meta, "CURRENT") ? selector(meta) : NULL;
   if (cur) {
     verify_gen(gs, cur, NULL);
+    if (strcmp(r.selected, "none") && strcmp(cur, r.selected) &&
+        strcmp(cur, r.tx))
+      die("preview generation changed before publication");
     int cg = odir(gs, cur);
     size_t mn;
     unsigned char *md = readfile(cg, "manifest.txt", 4u * 1024u * 1024u, &mn);

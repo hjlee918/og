@@ -27,6 +27,7 @@ function encodeProtocol(request) {
     'MAGIC\tF28FS1', `COMMAND\t${request.command}`, `ROOTHEX\t${hex(request.root)}`,
     `RUN\t${request.runName}`, `CASE\t${request.caseName}`, `OWNER\t${request.ownerToken}`,
     `BASIS\t${request.basisFingerprint || request.projectedFingerprint}`,
+    `SELECTED\t${request.selectedGeneration || 'none'}`,
     `PROJECTED\t${request.projectedFingerprint}`, `PLAN\t${request.planId || 'none'}`,
     `TX\t${request.transactionId || 'none'}`, `FAILURE\t${request.failurePoint || 'none'}`,
     `OPCOUNT\t${operations.length}`, ...operations.map((id) => `OPHEX\t${hex(id)}`),

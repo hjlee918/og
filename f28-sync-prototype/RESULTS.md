@@ -319,3 +319,63 @@ invalid entry in a supposedly complete target, mixed valid and invalid or
 conflicting entries, genuine authorized complete absence, conservative partial
 absence, valid explicit tombstones, deterministic results and unchanged inputs.
 Native code did not change, so native filesystem tests were not rerun.
+
+## Synthetic compare/preview/apply workflow
+
+The accepted components now complete one standalone path: verified selected
+read, comparison schema v2, reviewable preview, explicit in-memory apply request,
+planner/executor validation, locked native publication, verified read-back and
+deterministic retry/recovery. Preview is the read-only default. Invalid,
+conflicting or diagnostic comparisons expose no plan to the workflow publisher.
+
+The apply request binds the exact issued preview, location, target, source
+snapshot, selected generation and plan. Altered or copied previews and changed
+requests are refused. Immediately before execution the workflow rereads the
+destination without rebasing. The helper independently checks the exact
+previewed generation under its existing exclusive lock; exact published retry
+may instead match the deterministic transaction generation. An unchanged target
+rechecks its original selected generation and returns a successful no-op without
+publishing.
+
+All filesystem evidence is contained in the single fresh owned run
+`f28-compare-workflow-20260912-cc42856e-a1`. The shared root and prior runs were
+not enumerated or opened. Final verification:
+
+- Accepted pure core/planner/executor/comparison/response tests: 46/46 passed.
+- Focused release end-to-end workflow tests: 7/7 passed.
+- AddressSanitizer/UndefinedBehaviorSanitizer workflow tests: 7/7 passed
+  (`ASAN_OPTIONS=detect_leaks=0`).
+- Affected native publication/recovery regressions: 23/23 passed.
+- Affected read-selected regressions: 5/5 passed.
+- Strict JavaScript syntax, diff checks and warning-as-error x86_64 C build
+  passed.
+
+The cases prove preview entry/file bytes stay unchanged; explicit apply and
+read-back match previewed state/files; unchanged targets add no generation;
+invalid, duplicate and NFC/NFD-colliding targets cannot reach the writer;
+tampered previews/requests are refused; a changed destination is stale; partial
+absence preserves files; authorized absence creates a tombstone while retaining
+history; Korean/English bytes survive; and interrupted preparation plus exact
+retry reuse one generation. A direct regression also proves the helper refuses
+a changed preview generation while holding its lock.
+
+Apple Clang remained 16.0.0 (`clang-1600.0.26.6`), targeting
+`x86_64-apple-darwin23.6.0`. The tested C source SHA-256 was
+`723c36c2fbf35eb2193ac2b04c1d30b387443a1998f551cafd7801f937a76774`; the
+release helper SHA-256 was
+`5b86c4689de1783a49ce6989bf40d866a086e8f199a3801c839b16fb7b0c5a99`.
+Native binaries and generated state remain outside Git. Earlier results remain
+historical evidence for their recorded source and do not substitute for these
+workflow cases.
+
+The in-memory preview is lost on process restart and is not an account or
+durable approval record. The workflow does not make the separate read and apply
+one transaction; the helper revalidates at its own locked boundary. Cooperative
+locking does not block arbitrary editors, selector publication is not
+multi-file atomicity, and controlled failure injection is not a power-loss
+test. Existing graph identity enrollment, change discovery, OG/mobile adapters,
+networking, accounts, encryption, attachments and imports remain absent.
+
+The next meaningful milestone is a design review for explicit synthetic
+identity enrollment and change capture. It should remain separate from OG and
+must not infer identities or deletions; it has not begun.

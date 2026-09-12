@@ -220,3 +220,20 @@ IDs and target files, classifies absence conservatively, and feeds eligible
 events to the existing advisory planner. It never calls the writer. The next
 proposal is review of a synthetic compare/apply orchestration boundary; no such
 boundary or OG adapter is part of this implementation.
+
+## Implemented synthetic orchestration follow-up
+
+The later approved workflow keeps the exact preview and apply request in one
+process. It rejects diagnostic comparisons, revalidates the preview and current
+destination, executes the accepted plan privately, then asks the helper to
+publish. The helper now receives and records the exact previewed generation and
+checks it under its publication lock. Post-publication read-back must match the
+previewed state and files. Unchanged targets bypass publication, while
+deterministic interrupted and exact-retry paths reuse the existing generation
+recovery rules.
+
+This closes the bounded synthetic end-to-end demonstration only. It does not
+provide a persistent approval record, arbitrary-writer exclusion, graph
+enrollment or an OG adapter. A future meaningful milestone is a separate design
+for explicit synthetic identity enrollment and change capture; no implementation
+is implied by this experiment.

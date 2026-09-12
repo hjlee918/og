@@ -203,3 +203,45 @@ connects OG. The shared lock coordinates only participating helpers. The final
 rechecks detect the controlled mutations in tests but do not close races against
 an arbitrary writer after a check, prevent relocation of an already-open
 ancestor, or provide a durable compare/apply transaction.
+
+## Synthetic compare/preview/apply workflow
+
+The standalone workflow joins the accepted reader, comparison schema v2,
+planner, executor and native publisher for one explicitly named synthetic case.
+`previewComparison` is the default entry point and performs only the verified
+read and pure comparison. It records the exact selected generation, source
+state, target, comparison and plan in one preview object. An unchanged eligible
+target is marked `no-op`; a conflict, invalid input or null plan is marked
+`rejected`.
+
+Apply requires a separate `apply-exact-preview` request binding the preview ID,
+run/case, selected generation, source snapshot fingerprint, exact target
+fingerprint and exact plan fingerprint. Preview objects are registered and
+checked in memory, including their complete canonical bytes. A copied, altered
+or unissued object is not approval. These hashes detect accidental or test
+tampering inside this process; they are not authentication, signatures or a
+persistent approval store.
+
+Before application, the workflow recomputes the comparison and plan, refuses
+every ineligible or partial diagnostic result, reads the destination again and
+runs the accepted executor precondition without rebasing. The publisher request
+now carries `SELECTED`; while holding its exclusive lock, the helper requires
+`CURRENT` to equal that exact preview generation, or the deterministic exact
+transaction generation during retry. The selected generation is also recorded
+in the request-derived manifest. Thus the earlier read is not treated as the
+transaction boundary.
+
+After acknowledged publication, the workflow reads the selected generation
+again and requires its generation, state fingerprint, canonical state and
+materialized files to match the previewed result. The deterministic transaction
+identity permits prepared recovery and exact published retry without another
+generation. A no-op rechecks the exact original generation/state and never calls
+the publisher. Explicit completeness and deletion authority remain part of the
+target covered by the preview and apply request.
+
+This is one-process test orchestration, not a general synchronization service.
+The in-memory preview cannot survive process restart. `flock` remains
+cooperative, selector publication does not make generation writes multi-file
+atomic, final checks do not control arbitrary writers, and injected failures do
+not prove power-loss durability. There is no graph discovery, identity
+enrollment, OG integration, watcher, account, network, encryption or import.
