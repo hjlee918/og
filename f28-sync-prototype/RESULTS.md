@@ -288,3 +288,34 @@ existing graph or integrate OG. Accounts, networking, encryption, attachments,
 mobile adapters and imports remain excluded. The smallest next proposal is a
 documentation review for a synthetic compare/apply orchestration boundary;
 implementation requires separate approval.
+
+## Snapshot-comparison deletion correction
+
+Supervisor reproduction after the original 40/40 pure checkpoint found that a
+complete target containing an invalid entry for an existing file ID could emit
+both `invalid-file` and an absence-derived delete for that same ID. The original
+result remains historical evidence for its covered cases; it did not establish
+safe deletion behavior for invalid or duplicate target entries.
+
+The adapter now records explicitly mentioned valid string IDs independently of
+entry usability. Invalid or duplicated mentions therefore cannot become
+absence. Any invalid or ambiguous comparison input makes claimed completeness
+untrustworthy and suppresses all absence-derived deletes. Valid explicit
+tombstones remain distinguishable and continue to propose deletion.
+
+Comparison eligibility is now part of the versioned
+`f28-snapshot-comparison/2` result contract. Any comparison
+invalidity or conflict returns `comparison-not-eligible` and `plan: null`.
+Valid changes may remain in `proposedEvents` for diagnosis, but there is no
+executable partial plan; only a wholly eligible result exposes the planner plan.
+This preserves the executor's all-or-nothing model without relying on a future
+caller to combine unrelated fields correctly.
+
+Focused pure verification, run without graph, profile, application or native
+filesystem access, passed 46/46 across core, planner, executor, response parser
+and comparison tests. New cases cover invalid content and path for an existing
+ID with missing-delete permission, duplicated existing IDs, an unidentified
+invalid entry in a supposedly complete target, mixed valid and invalid or
+conflicting entries, genuine authorized complete absence, conservative partial
+absence, valid explicit tombstones, deterministic results and unchanged inputs.
+Native code did not change, so native filesystem tests were not rerun.

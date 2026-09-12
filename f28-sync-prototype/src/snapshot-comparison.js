@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { normalizedPathKey, stableStringify } = require('./core');
 const { planReconciliation, snapshotFingerprint } = require('./planner');
 
-const COMPARISON_SCHEMA = 'f28-snapshot-comparison/1';
+const COMPARISON_SCHEMA = 'f28-snapshot-comparison/2';
 const TARGET_SCHEMA = 'f28-synthetic-target/1';
 
 function clone(value, label) {
@@ -95,15 +95,18 @@ function compareSnapshots(inputSelected, inputTarget) {
     proposedEvents: [],
     conflicts: [],
     invalid: [],
+    eligibility: null,
     plan: null,
   };
   const groups = new Map();
+  const mentionedTargetIds = new Set();
   target.files.forEach((item, index) => {
     const key = item && typeof item.fileId === 'string' ? item.fileId : null;
     if (!key) {
       result.invalid.push(invalid(index, item, 'invalid-file-id', 'fileId must be a non-empty string'));
       return;
     }
+    mentionedTargetIds.add(key);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ item, index });
   });
@@ -165,9 +168,7 @@ function compareSnapshots(inputSelected, inputTarget) {
       ...values,
     };
   };
-  const seenTarget = new Set();
   for (const [fileId, entry] of [...usable].sort(([a], [b]) => byUtf8(a, b))) {
-    seenTarget.add(fileId);
     if (colliding.has(fileId)) continue;
     const revisions = heads.get(fileId);
     if (revisions && revisions.length !== 1) {
@@ -216,12 +217,19 @@ function compareSnapshots(inputSelected, inputTarget) {
     }
   }
 
+  const completenessTrusted = result.invalid.length === 0 && result.conflicts.length === 0;
   for (const [fileId, revisions] of [...heads].sort(([a], [b]) => byUtf8(a, b))) {
-    if (seenTarget.has(fileId) || revisions.length !== 1 || revisions[0].deleted) continue;
-    if (target.complete && target.authorizeMissingDeletes) {
+    if (mentionedTargetIds.has(fileId) || revisions.length !== 1 || revisions[0].deleted) continue;
+    if (target.complete && target.authorizeMissingDeletes && completenessTrusted) {
       result.proposedEvents.push(makeEvent('delete', fileId, { parentRevisionId: revisions[0].id }));
     } else {
-      result.unknown.push({ fileId, path: revisions[0].path, reason: 'absence-does-not-imply-delete' });
+      result.unknown.push({
+        fileId,
+        path: revisions[0].path,
+        reason: target.complete && target.authorizeMissingDeletes
+          ? 'invalid-or-ambiguous-target-does-not-authorize-absence-delete'
+          : 'absence-does-not-imply-delete',
+      });
     }
   }
   result.proposedEvents.sort((a, b) => byUtf8(a.fileId, b.fileId));
@@ -247,11 +255,20 @@ function compareSnapshots(inputSelected, inputTarget) {
     });
   }
   if (blockedEventIds.size) {
-    result.proposedEvents = result.proposedEvents.filter((event) => !blockedEventIds.has(event.eventId));
     result.conflicts.sort((a, b) => byUtf8(a.fileId || a.fileIds.join('\0'), b.fileId || b.fileIds.join('\0')));
     result.invalid.sort((a, b) => a.index - b.index);
   }
-  result.plan = planReconciliation(selected.state, result.proposedEvents);
+  if (result.invalid.length || result.conflicts.length) {
+    result.eligibility = {
+      eligible: false,
+      code: 'comparison-not-eligible',
+      invalidCount: result.invalid.length,
+      conflictCount: result.conflicts.length,
+    };
+  } else {
+    result.eligibility = { eligible: true, code: 'comparison-eligible' };
+    result.plan = preliminaryPlan;
+  }
   return result;
 }
 

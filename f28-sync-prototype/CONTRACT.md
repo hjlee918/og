@@ -181,14 +181,22 @@ check across the helper/coordinator boundary, not authentication.
 The pure comparison adapter accepts that verified envelope and an explicit
 synthetic target snapshot. Stable file IDs supplied by the caller are the only
 identity basis. It reports unchanged and unknown items, proposed events,
-conflicts and invalid inputs, then submits only eligible events to the existing
-planner. Absence remains unknown unless the target declares itself complete and
-explicitly authorizes missing-file deletion; a supplied tombstone can request
-deletion directly. Duplicate IDs, invalid paths, NFC/NFD/case-normalized path
-collisions, multi-head identities, implicit restore and a simultaneous rename
-plus content change are refused rather than inferred or merged. Inputs are
-cloned, event identities are deterministic, and the planner retains its source
-snapshot fingerprint precondition.
+conflicts and invalid inputs. It records every explicitly mentioned non-empty
+file ID before validating the entry, so an invalid or duplicated mention can
+never be reinterpreted as absence. Absence remains unknown unless the target
+declares itself complete, explicitly authorizes missing-file deletion, and has
+no invalid or ambiguous comparison input. A valid supplied tombstone can
+request deletion directly.
+
+The corrected result schema is `f28-snapshot-comparison/2`. Proposed events are
+diagnostic when any comparison conflict or invalid input
+exists. Such a result has `eligibility.eligible: false`, code
+`comparison-not-eligible`, and `plan: null`; callers receive no executable plan
+for a partial batch. Only a wholly eligible comparison exposes the existing
+planner plan and its source-snapshot precondition. Duplicate IDs, invalid paths,
+NFC/NFD/case-normalized path collisions, multi-head identities, implicit
+restore and a simultaneous rename plus content change are refused rather than
+inferred or merged. Inputs are cloned and event identities are deterministic.
 
 Neither layer applies a plan, publishes a generation, discovers a graph or
 connects OG. The shared lock coordinates only participating helpers. The final
