@@ -140,3 +140,58 @@ account, profile or service integration.
 The smallest recommended next step is a separate design review of a
 platform-specific anchored directory-handle and atomic compare/apply boundary.
 No filesystem executor or application integration was started.
+
+## Synthetic filesystem application experiment
+
+User approval replaced the blocked Swift helper with a test-only x86_64 C
+helper. Before graph-root access, a `/tmp` capability probe compiled and linked
+`openat`, `renameat`, `flock`, CommonCrypto SHA-256 and `F_FULLFSYNC`, then ran
+successfully. Apple Clang was `16.0.0` (`clang-1600.0.26.6`), targeting
+`x86_64-apple-darwin23.6.0`. The final release helper SHA-256 was
+`e6b12dbf0169267eb4870179901d8fc1f74d078e092e5f4b7bfcf4365113b7fd` at
+test time. The corresponding C source SHA-256 was
+`9b4472ace4d09880cb6764e963902064fb0773e268db4bd31b7cc0284ba8106b`.
+Binaries stayed in `/tmp` and are not committed.
+
+One exact owned run, `f28-fs-c-20260912-9ee8060b4-a1`, contains all case
+directories. The shared root was never listed, no other run was inspected, and
+the generated content remains outside Git. Retained non-passing evidence:
+
+- v1: 0/16. Genesis verification exposed a one-byte `FILECOUNT` parser offset;
+  no event batch applied.
+- v2: 15/16. A projected fingerprint match without matching plan identity was
+  incorrectly classified as an exact retry, bypassing the malformed-path probe.
+- v3 after both corrections: 16/16.
+- Final v7 with bounded-protocol, stable-lock identity and full manifest-agreement
+  regressions: 17/17.
+- Final AddressSanitizer/UndefinedBehaviorSanitizer run (`asan5`): 17/17.
+- Accepted pure core/planner/executor tests: 29/29. Source syntax and strict C
+  warning checks passed.
+
+The final cases cover create/update/rename/delete, exact retry, Korean/English
+bytes, NFC/NFD collision refusal, traversal/symlink/ownership refusal,
+overlapping helper refusal and lock release after owned-process death, stale
+basis and changed source, injected failures during staging/preparation/selector
+publication/synchronization/before acknowledgement, prepared roll-forward,
+published retry recognition, and corrupt/missing selector, manifest, state and
+file contents. Prior-generation hashes remained unchanged in the success path;
+incomplete and corrupt evidence was retained.
+
+The helper validates filesystem-bearing inputs and performs every graph-root
+filesystem operation. Node owns JSON/state semantics and the accepted pure
+planner/executor; the C helper verifies the projected state fingerprint and the
+manifest/state/materialized byte hashes. These hashes are integrity comparisons,
+not authentication. Full-generation copying is a prototype choice.
+
+Selector replacement publishes one complete generation to participating
+readers, not an atomic multi-file write. `flock` coordinates only these helpers.
+Injected exits and syscall-failure points prove control-flow and recovery paths,
+not real power-loss durability. `F_FULLFSYNC` succeeded on the tested host and
+run, but other filesystems/platforms remain untested. Concurrent relocation of
+an already-open ancestor remains outside this controlled single-writer threat
+model. There is no OG integration, existing-graph enrollment, watcher, account,
+network, encryption, attachment, mobile or Roam-import work.
+
+The smallest proposed next step is review of a read-only adapter that compares
+one fresh synthetic replica snapshot with the selected generation. It should
+not write files or connect OG without separate approval.

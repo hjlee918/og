@@ -83,6 +83,39 @@ or solution to the persistence adapter's documented concurrent ancestor race.
 The executor has no filesystem, watcher, network, account, profile or OG
 integration.
 
+## Synthetic filesystem application experiment
+
+The Node coordinator recomputes the accepted plan and in-memory execution,
+rejects any conflict or invalid event, materializes only a single head per
+file, and sends canonical state plus complete target files through a bounded
+fixed-order protocol. The C helper independently limits and validates protocol
+fields, UTF-8, relative Markdown/Org paths, ownership components, fingerprints,
+transaction IDs and selector names. SHA-256 binds retained bytes for comparison;
+it is not authentication.
+
+One helper holds an advisory lock on a stable inode throughout compare, stage,
+publication, verification and acknowledgement. Only helpers following this
+protocol participate. The lock does not block OG, editors, Finder, cloud agents
+or hostile processes. Root, run and case directories are opened component by
+component with `openat` and `O_NOFOLLOW`; later access is directory-relative and
+recorded identities are rechecked. An outside process can still relocate an
+already-open ancestor, so this remains a controlled single-writer experiment,
+not an OS sandbox.
+
+Each accepted batch writes a complete new generation exclusively, flushes each
+file with `F_FULLFSYNC`, syncs directories, writes and verifies state and a
+prepared manifest, then publishes one validated generation name through a
+directory-relative `CURRENT` rename. The rename makes the selector transition
+atomic for participating readers; it does not make preceding multi-file writes
+atomic. Success is acknowledged only after selector and selected-generation
+verification and final directory synchronization.
+
+An exact prepared transaction may roll forward after restart. An exact
+published plan/fingerprint pair is an idempotent retry. Incomplete unprepared or
+inconsistent evidence is preserved and refused; no cleanup, guessing or silent
+rebase occurs. Complete prior generations remain unchanged. Restore continues
+to be a new planned revision and generation.
+
 The adapter caches the device/inode identities of the canonical approved root,
 test run and store directory, then verifies all three at every persistence entry
 point and around file operations. Reads use `O_NOFOLLOW` and match the opened

@@ -50,11 +50,19 @@ implementation must fail closed when a required operation is unsupported.
 
 ## Boundary and participating writers
 
-Use one narrow Swift command helper built with the installed Apple toolchain,
-Foundation JSON support and Darwin system calls. No third-party package is
-needed. The Node coordinator may run the accepted planner/executor, but all
+Use one narrow x86_64 C command helper built with the installed Apple Clang
+toolchain, CommonCrypto and Darwin system calls. No third-party package is
+needed. A bounded, fixed-order, hex-encoded line protocol avoids adding a JSON
+parser to C; duplicate, missing, reordered and oversized fields fail closed.
+The Node coordinator may run the accepted planner/executor, but all
 filesystem operations and the cooperative lock remain in one helper process for
 the complete session.
+
+The originally approved Swift attempt remains under `native/failed-swift/` as
+inactive historical evidence. It never compiled or ran: Swift `6.0.3.1.10`
+rejected SDK modules built with `6.0.3.1.5`. The user approved the C substitution
+after that blocker. No SDK was modified and no compiler safety check was
+bypassed.
 
 At startup the helper must:
 
@@ -172,18 +180,18 @@ part of the first implementation batch.
 
 ## Recommended implementation batch and approvals
 
-After review, implement only the x86_64 Swift helper, its narrow session
+The approved batch implements only the x86_64 C helper, its narrow session
 protocol, a Node test coordinator and failure-injection hooks. Support small
 UTF-8 synthetic Markdown/Org files, complete-generation copying and one writer.
 Do not connect OG or accept an existing graph. Stop if the target volume lacks a
 required syscall/durability behavior; do not fall back to pathname-only writes.
 
-Two approvals are genuinely required before that batch:
+The two approvals required for this batch were granted:
 
-1. Approval to add, compile and execute a test-only native Swift helper using
-   the installed Apple toolchain. This adds a native build artifact and
-   subprocess boundary, though no third-party dependency or administrator
-   privilege.
+1. Approval to add, compile and execute a test-only native helper using the
+   installed Apple toolchain, later changed from blocked Swift to C. This adds a
+   native build artifact and subprocess boundary, though no third-party
+   dependency or administrator privilege.
 2. Approval for that helper's tests to create and mutate one fresh synthetic
    child under the exact `Logseq Test` root. No existing run or graph would be
    opened.
