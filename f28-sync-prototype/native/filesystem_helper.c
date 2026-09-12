@@ -238,7 +238,8 @@ static Request parse(void) {
   const char *allowed_failures[] = {
       "none", "during-staging", "before-prepared", "after-prepared",
       "after-generation-rename", "before-current-rename",
-      "during-synchronization", "after-current-rename", "before-ack"};
+      "pause-before-final-basis", "during-synchronization",
+      "after-current-rename", "before-ack"};
   int known_failure = 0;
   for (size_t i = 0; i < sizeof allowed_failures / sizeof allowed_failures[0]; i++)
     if (!strcmp(r.failure, allowed_failures[i]))
@@ -464,6 +465,17 @@ static char *selector(int meta) {
     die("unsafe CURRENT");
   return (char *)b;
 }
+static void validate_pending_selector(int meta, const char *name,
+                                      const char *transaction) {
+  size_t n;
+  unsigned char *value = readfile(meta, name, 80, &n);
+  if (n != 65 || value[64] != '\n' ||
+      memcmp(value, transaction, 64) || !hex64(transaction)) {
+    free(value);
+    die("pending selector mismatch");
+  }
+  free(value);
+}
 static void verify_gen(int gs, const char *dir, Request *expected) {
   int g = odir(gs, dir);
   size_t sn, mn;
@@ -556,6 +568,13 @@ static void inject(Request *r, const char *p) {
     exit(25);
   }
 }
+static void pause_before_final_basis(Request *r) {
+  if (!strcmp(r->failure, "pause-before-final-basis")) {
+    puts("HOOK pause-before-final-basis");
+    fflush(stdout);
+    sleep(2);
+  }
+}
 int main(void) {
   Request r = parse();
   state_fp(&r);
@@ -591,6 +610,10 @@ int main(void) {
   free(ob);
   int x = 0, meta = mdir(kase, ".f28-sync", &x),
       gs = mdir(meta, "generations", &x);
+  dev_t meta_dev, generations_dev;
+  ino_t meta_ino, generations_ino;
+  identity(meta, &meta_dev, &meta_ino);
+  identity(gs, &generations_dev, &generations_ino);
   int lock =
       openat(meta, "LOCK", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
   if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB))
@@ -629,8 +652,16 @@ int main(void) {
     snprintf(needle, sizeof needle, "\nPROJECTED %s\n", r.projected);
     snprintf(plan_needle, sizeof plan_needle, "\nPLAN %s\n", r.plan);
     if (strstr((char *)md, needle) && strstr((char *)md, plan_needle)) {
-      printf("STATUS already-applied\nGENERATION %s\n", cur);
+      verify_gen(gs, cur, &r);
       syncdir(meta);
+      identity_path(root, r.run, rd, ri);
+      identity_path(run, r.kase, cd, ci);
+      identity_path(kase, ".f28-sync", meta_dev, meta_ino);
+      identity_path(meta, "generations", generations_dev, generations_ino);
+      if (fstatat(meta, "LOCK", &lp, AT_SYMLINK_NOFOLLOW) ||
+          ls.st_ino != lp.st_ino || ls.st_dev != lp.st_dev)
+        die("lock inode changed before retry acknowledgement");
+      printf("STATUS already-applied\nGENERATION %s\n", cur);
       return 0;
     }
     snprintf(needle, sizeof needle, "\nPROJECTED %s\n", r.basis);
@@ -682,10 +713,17 @@ int main(void) {
     inject(&r, "after-generation-rename");
   }
   verify_gen(gs, r.tx, &r);
+  pause_before_final_basis(&r);
   identity_path(root, r.run, rd, ri);
   identity_path(run, r.kase, cd, ci);
+  identity_path(kase, ".f28-sync", meta_dev, meta_ino);
+  identity_path(meta, "generations", generations_dev, generations_ino);
+  if (fstatat(meta, "LOCK", &lp, AT_SYMLINK_NOFOLLOW) ||
+      ls.st_ino != lp.st_ino || ls.st_dev != lp.st_dev)
+    die("lock inode changed before publication");
   char *cur = present(meta, "CURRENT") ? selector(meta) : NULL;
   if (cur) {
+    verify_gen(gs, cur, NULL);
     int cg = odir(gs, cur);
     size_t mn;
     unsigned char *md = readfile(cg, "manifest.txt", 4u * 1024u * 1024u, &mn);
@@ -704,7 +742,8 @@ int main(void) {
     char sel[66];
     snprintf(sel, sizeof sel, "%s\n", r.tx);
     exclusive(meta, pend, sel, 65);
-  }
+  } else
+    validate_pending_selector(meta, pend, r.tx);
   inject(&r, "during-synchronization");
   syncdir(meta);
   if (renameat(meta, pend, meta, "CURRENT"))

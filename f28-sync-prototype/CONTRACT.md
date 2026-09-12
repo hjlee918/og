@@ -116,6 +116,25 @@ inconsistent evidence is preserved and refused; no cleanup, guessing or silent
 rebase occurs. Complete prior generations remain unchanged. Restore continues
 to be a new planned revision and generation.
 
+Before a retained `CURRENT.<transaction>.pending` entry is published, the
+helper opens it relative to the anchored metadata directory with `O_NOFOLLOW`,
+requires a regular file of exactly 65 bytes, and compares all 64 transaction
+hex bytes plus the newline. Wrong content, type, symlink or transaction is
+preserved and refused before `CURRENT` is replaced.
+
+An already-published retry is acknowledged only after the selected generation
+matches the request's exact transaction, plan, basis/projected fingerprints,
+ordered operation IDs, canonical state bytes and complete materialized file
+paths/content. Directory and lock identities and required synchronization are
+then rechecked before success output.
+
+Immediately before publication, the helper reopens and verifies the complete
+selected basis generation: manifest structure, state hash/fingerprint and every
+manifest-listed file. It also rechecks root/run/case/metadata/generations and
+lock identities. These checks detect the controlled between-check changes in
+the focused tests; they do not prevent an arbitrary writer from changing data
+after a check or relocating an already-open ancestor.
+
 The adapter caches the device/inode identities of the canonical approved root,
 test run and store directory, then verifies all three at every persistence entry
 point and around file operations. Reads use `O_NOFOLLOW` and match the opened

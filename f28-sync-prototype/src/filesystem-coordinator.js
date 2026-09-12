@@ -57,7 +57,7 @@ function initialize({ helper, runName, caseName, ownerToken, state }) {
     state: stableStringify(state), projectedFingerprint: snapshotFingerprint(state) });
 }
 
-function applyBatch({ helper, runName, caseName, ownerToken, sourceSnapshot, events, failurePoint }) {
+function prepareBatch({ runName, caseName, ownerToken, sourceSnapshot, events, failurePoint }) {
   const plan = planReconciliation(sourceSnapshot, events);
   const executed = executePlan({ sourceSnapshot, events, plan, destinationSnapshot: sourceSnapshot });
   if (executed.status !== 'applied') throw new Error(`batch refused: ${executed.result.code}`);
@@ -67,7 +67,12 @@ function applyBatch({ helper, runName, caseName, ownerToken, sourceSnapshot, eve
     planId:plan.planId, transactionId, operationIds:plan.actions.map((a)=>a.operation.operationId),
     state:stableStringify(executed.state), files:materialize(executed.state) };
   if (failurePoint) request.failurePoint = failurePoint;
-  return { response:invoke(helper,request), state:executed.state, plan, request };
+  return { state:executed.state, plan, request };
 }
 
-module.exports = { applyBatch, encodeProtocol, initialize, invoke, materialize };
+function applyBatch({ helper, ...options }) {
+  const prepared = prepareBatch(options);
+  return { ...prepared, response: invoke(helper, prepared.request) };
+}
+
+module.exports = { applyBatch, encodeProtocol, initialize, invoke, materialize, prepareBatch };

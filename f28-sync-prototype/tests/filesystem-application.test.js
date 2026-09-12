@@ -7,7 +7,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { createState } = require('../src/core');
 const { snapshotFingerprint } = require('../src/planner');
-const { applyBatch, encodeProtocol, initialize, invoke } = require('../src/filesystem-coordinator');
+const { applyBatch, encodeProtocol, initialize, invoke, prepareBatch } = require('../src/filesystem-coordinator');
 const { APPROVED_TEST_ROOT } = require('../src/persistence');
 
 const helper = process.env.F28_HELPER;
@@ -107,3 +107,69 @@ for (const target of ['CURRENT','manifest.txt','state.json','file']) {
     assert.throws(()=>invoke(helper,{...request('inspect',kase,done.state)}),/unsafe CURRENT|file open refused|materialized file mismatch/);
   });
 }
+
+function oneCreate(kase) {
+  return {runName,caseName:kase,ownerToken,sourceSnapshot:base,
+    events:[event('create','create','file','revision',{path:'pages/guard.md',content:'guarded'})]};
+}
+
+test('wrong existing pending selector is preserved without replacing CURRENT', () => {
+  const kase=cname('pending-wrong'); init(kase); const before=current(kase); const beforeHash=treeHash(generation(kase,before));
+  const prepared=prepareBatch(oneCreate(kase));
+  assert.throws(()=>invoke(helper,{...prepared.request,failurePoint:'after-generation-rename'}),/INJECTED/);
+  const pending=path.join(runRoot,kase,'.f28-sync',`CURRENT.${prepared.request.transactionId}.pending`);
+  fs.writeFileSync(pending,'f'.repeat(64)+'\n'); const targetHash=treeHash(generation(kase,prepared.request.transactionId));
+  assert.throws(()=>invoke(helper,prepared.request),/pending selector mismatch/);
+  assert.equal(current(kase),before); assert.equal(treeHash(generation(kase,before)),beforeHash);
+  assert.equal(treeHash(generation(kase,prepared.request.transactionId)),targetHash); assert.equal(fs.readFileSync(pending,'utf8'),'f'.repeat(64)+'\n');
+});
+
+test('pending selector symlink is preserved without replacing CURRENT', () => {
+  const kase=cname('pending-symlink'); init(kase); const before=current(kase); const beforeHash=treeHash(generation(kase,before));
+  const prepared=prepareBatch(oneCreate(kase)); assert.throws(()=>invoke(helper,{...prepared.request,failurePoint:'after-generation-rename'}),/INJECTED/);
+  const sentinel=path.join(runRoot,`pending-sentinel${suffix}`); fs.writeFileSync(sentinel,prepared.request.transactionId+'\n');
+  const pending=path.join(runRoot,kase,'.f28-sync',`CURRENT.${prepared.request.transactionId}.pending`); fs.symlinkSync(sentinel,pending);
+  assert.throws(()=>invoke(helper,prepared.request),/file open refused/); assert.equal(current(kase),before);
+  assert.equal(treeHash(generation(kase,before)),beforeHash); assert.equal(fs.readFileSync(sentinel,'utf8'),prepared.request.transactionId+'\n'); assert.equal(fs.lstatSync(pending).isSymbolicLink(),true);
+});
+
+test('exact existing pending selector rolls prepared work forward', () => {
+  const kase=cname('pending-valid'); init(kase); const prepared=prepareBatch(oneCreate(kase));
+  assert.throws(()=>invoke(helper,{...prepared.request,failurePoint:'during-synchronization'}),/INJECTED/);
+  const result=invoke(helper,prepared.request); assert.equal(result.status,'acknowledged'); assert.equal(current(kase),prepared.request.transactionId);
+});
+
+test('published retry requires exact transaction, operations, state and files', () => {
+  const kase=cname('retry-exact-fields'); init(kase); const done=applyBatch({helper,...oneCreate(kase)}); const selected=current(kase); const selectedHash=treeHash(generation(kase));
+  const changes=[
+    {...done.request,transactionId:'e'.repeat(64)},
+    {...done.request,operationIds:['op-changed']},
+    {...done.request,files:done.request.files.map((file)=>({...file,content:'changed'}))},
+  ];
+  for(const changed of changes) assert.throws(()=>invoke(helper,changed),/manifest\/request mismatch/);
+  assert.equal(current(kase),selected); assert.equal(treeHash(generation(kase)),selectedHash);
+  assert.equal(invoke(helper,done.request).status,'already-applied');
+});
+
+test('complete basis modification during controlled pause refuses publication', async () => {
+  const kase=cname('basis-final'); init(kase); const before=current(kase); const prepared=prepareBatch(oneCreate(kase));
+  const child=spawn(helper,[],{stdio:['pipe','pipe','pipe']}); child.stdin.end(encodeProtocol({...prepared.request,failurePoint:'pause-before-final-basis'}));
+  await new Promise((resolve,reject)=>{ let out=''; child.stdout.on('data',(chunk)=>{out+=chunk; if(out.includes('HOOK pause-before-final-basis'))resolve();}); child.once('error',reject); });
+  const basisState=path.join(generation(kase,before),'state.json'); fs.writeFileSync(basisState,'controlled-change'); const changedHash=treeHash(generation(kase,before));
+  const stderr=[]; child.stderr.on('data',(chunk)=>stderr.push(chunk)); const code=await new Promise((resolve)=>child.once('exit',resolve));
+  assert.equal(code,23); assert.match(Buffer.concat(stderr).toString(),/state hash mismatch/); assert.equal(current(kase),before);
+  assert.equal(treeHash(generation(kase,before)),changedHash); assert.ok(fs.existsSync(generation(kase,prepared.request.transactionId)));
+});
+
+test('materialized source change during controlled pause refuses publication', async () => {
+  const kase=cname('source-final'); init(kase); const seeded=applyBatch({helper,...oneCreate(kase)}); const before=current(kase);
+  const prepared=prepareBatch({runName,caseName:kase,ownerToken,sourceSnapshot:seeded.state,
+    events:[event('update','update','file','revision-2',{parentRevisionId:'revision',content:'next'})]});
+  const child=spawn(helper,[],{stdio:['pipe','pipe','pipe']}); const stderr=[]; child.stderr.on('data',(chunk)=>stderr.push(chunk));
+  child.stdin.end(encodeProtocol({...prepared.request,failurePoint:'pause-before-final-basis'}));
+  await new Promise((resolve,reject)=>{ let out=''; child.stdout.on('data',(chunk)=>{out+=chunk; if(out.includes('HOOK pause-before-final-basis'))resolve();}); child.once('error',reject); });
+  const source=path.join(generation(kase,before),'pages/guard.md'); fs.writeFileSync(source,'controlled-source-change'); const changedHash=treeHash(generation(kase,before));
+  const code=await new Promise((resolve)=>child.once('exit',resolve)); assert.equal(code,23);
+  assert.match(Buffer.concat(stderr).toString(),/materialized file mismatch/); assert.equal(current(kase),before);
+  assert.equal(treeHash(generation(kase,before)),changedHash); assert.ok(fs.existsSync(generation(kase,prepared.request.transactionId)));
+});

@@ -125,8 +125,12 @@ Under the held lock and open handles:
    or failed durability call is a refusal, with staging preserved.
 4. **Publish.** Revalidate the selected basis, affected source files and the
    recorded root/child identities through the held handles. Exclusively create
-   and flush `CURRENT.<plan-id>.pending`, whose
-   contents name only the prepared generation and manifest hash. Use
+   and flush `CURRENT.<transaction-id>.pending`, whose contents are exactly the
+   prepared generation's 64 hexadecimal bytes plus one newline; the generation
+   manifest is verified separately before and after publication. Use
+   an anchored, non-following open to validate any retained pending entry's
+   regular-file type and exact selector bytes before using it. Refuse and
+   preserve an unexpected entry without changing `CURRENT`. Use
    `renameat()` within the already-open metadata directory to replace `CURRENT`,
    then sync that directory. Reopen `CURRENT`, the generation, manifest, state
    and affected files through anchored handles and verify the projected
@@ -144,9 +148,10 @@ Under the held lock and open handles:
   every hash and complete publication. Missing or unexpected content refuses
   recovery.
 - `CURRENT` names the prepared generation and all manifest/state/file checks
-  pass: treat the operation IDs as an exact already-applied batch, redo required
-  synchronization, and acknowledge the retry without creating another
-  generation.
+  pass: compare the selected manifest and bytes with every request-bound field,
+  including transaction, operations, state and materialized files. Only an
+  exact match may redo required synchronization and acknowledge the retry
+  without creating another generation.
 - `CURRENT` names neither the basis nor that exact projected generation, or any
   selector/generation/hash is missing or inconsistent: fail closed and preserve
   all generations. Do not guess, merge, roll back or delete evidence.

@@ -195,3 +195,43 @@ network, encryption, attachment, mobile or Roam-import work.
 The smallest proposed next step is review of a read-only adapter that compares
 one fresh synthetic replica snapshot with the selected generation. It should
 not write files or connect OG without separate approval.
+
+## Publication and recovery correction
+
+Source review after the original 17/17 checkpoint found three gaps: a retained
+pending selector could be renamed without validation, published retry used only
+plan/projected substrings, and the final basis check did not reverify selected
+state and files. That initial result remains historical and is not evidence for
+the corrected paths.
+
+The helper now validates an existing pending selector through an anchored
+`O_NOFOLLOW` regular-file open and exact 65-byte comparison before rename. An
+already-applied retry must match the complete request-derived manifest and
+selected state/files, followed by synchronization and directory/lock identity
+checks before output. Immediately before publication it fully verifies the
+selected basis generation and root, run, case, metadata, generations and lock
+identities. A controlled pause hook permits an outside synthetic test writer to
+change basis state or file content between initial and final verification.
+
+All correction evidence lives in the single fresh owned run
+`f28-fs-recovery-20260912-9cca9679c-a1`; the shared root and previous runs were
+not enumerated or opened. Final release integration tests passed 23/23, final
+AddressSanitizer/UndefinedBehaviorSanitizer integration tests passed 23/23, and
+the affected pure core/planner/executor tests passed 29/29. Strict C warnings
+and source syntax checks passed. The corrected C source SHA-256 was
+`20dfdb2314f2f00f561241bc6acf0560146fe1cf637417d4db46a5ff52e9a0f7`;
+the tested x86_64 helper SHA-256 was
+`88af6443525db64bb8a79b2d155aa79fb281d6a243636557252c20f62c790318`.
+The binary remains outside Git.
+
+Focused cases cover wrong-content and symlink pending entries, exact valid
+pending recovery, altered retry transaction/files/operation IDs, and selected
+state and materialized-source changes during the final-verification pause.
+Refusals preserved the previous selector, prior and prepared generation bytes,
+and unexpected pending/sentinel evidence. All helper processes exited or were
+test-owned processes explicitly terminated and awaited.
+
+These corrections close the reviewed entry paths in the controlled one-writer
+experiment. They do not make generation preparation a multi-file atomic write,
+make `flock` control unrelated writers, prove power-loss durability, or remove
+the documented race after a check and concurrent-ancestor relocation limit.
