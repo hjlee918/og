@@ -1,9 +1,10 @@
 # Cross-device synchronization and account decision
 
-Status: design only, recorded 2026-09-11. No implementation, hosted service,
-account connection, migration, deployment or release is authorized.
+Status: proposed architecture, not finally adopted. Updated 2026-09-11 after
+the approved limited local prototype. No hosted service, account connection,
+migration, deployment or release is authorized.
 
-## Decision
+## Proposed decision
 
 Use a **project-controlled, application-aware version protocol with an ordinary
 local OG graph on every installed device**. Reuse OG's file serialization,
@@ -98,10 +99,11 @@ combined with a cloud-synced folder
 
 For the initial single-user scale, stored note bytes should be modest; attachment
 history, egress, identity-provider minimums and operational support are the cost
-drivers. A managed metadata/object platform is the smallest hosted pilot, while
-supporting a self-hosted deployment from day one would roughly double deployment,
-upgrade, backup and troubleshooting surfaces. Exact prices should be compared
-only after retention and account-provider choices are approved.
+drivers. A managed metadata/object platform is the smallest hosted pilot.
+Self-hosting would add deployment, upgrade, backup and troubleshooting work, but
+this design does not estimate that effort without a selected stack and operating
+model. Exact prices should be compared only after retention and account-provider
+choices are approved.
 
 ## Proposed protocol behavior
 
@@ -167,23 +169,29 @@ uses the same protocol and filesystem adapter. A later browser client uses the
 same identities, encrypted history and conflict rules with a browser cache and
 export; desktop filesystem access and native plugins are not assumed there.
 
-## First implementation batch after review
+## Implemented limited local prototype
 
-Build only a pure, feature-flagged **local synchronization kernel** and test
-harness. It will create two fresh synthetic replicas and an opaque local relay
-inside one unique, canonically contained test-owned child of the approved
-`Logseq Test` root. No application, account, network or hosted service is used.
+The approved first batch is implemented as the standalone
+[`f28-sync-prototype`](../f28-sync-prototype/README.md) Node module and test
+harness. It is not imported by OG or included in an application package. Its
+pure transition core models whole-file create, update, rename, delete and
+restore using caller-supplied synthetic file/revision/operation IDs. It retains
+stale-parent branches and tombstones, rejects changed operation-ID reuse, and
+records NFC/NFD path collisions. Its local JSON persistence adapter simulates
+two replicas and a relay inside one fresh, canonically contained test-owned run.
 
-The kernel should model create/update/rename/delete, assets, immutable file IDs,
-parent revisions, idempotent operation IDs, UTF-8 exact paths, NFC/NFD collision
-detection, history and explicit conflict records. Tests deterministically
-interleave two simulated devices, including offline edits, edit/delete,
-rename/rename, interrupted chunks, retry, crash/restart and restore. They must
-prove both branches remain recoverable and that no write crosses the approved
-root. The batch should output a proposed reconciliation plan; it should not yet
-wire into OG's live watcher or reuse the legacy hosted endpoints. This replaces
-simultaneous human-operated physical-machine testing for the prototype, while
-later platform acceptance still requires real devices.
+This local simulation demonstrates deterministic state transitions and
+controlled persistence/retry ordering. It is not real-device synchronization,
+an OG watcher integration, a network protocol, a security boundary, or evidence
+of power-loss durability. Accounts, encryption, networking, hosted services,
+attachment transfer, block matching, parser-aware merge, mobile adapters,
+existing-graph enrollment and UI remain deferred. Real platform acceptance will
+still require separate real-device work after architecture review.
+
+The smallest proposed next integration step is a local synthetic reconciliation
+adapter that converts an explicitly supplied set of file events into this
+operation contract and produces a reviewable write plan without changing OG or
+applying the plan. That step is not authorized by this prototype batch.
 
 ## Decisions needed from the user
 
