@@ -1,8 +1,9 @@
 # Synthetic file identity and change-capture design
 
-Status: proposed, documentation only. This design does not enroll an OG graph,
-read a graph, run a watcher, or change note contents. It extends the accepted
-standalone synthetic workflow; it is not OG integration or production sync.
+Status: the bounded pure in-memory batch is implemented. The sidecar,
+filesystem, watcher and OG portions remain proposals. This design does not
+enroll an OG graph, read a graph, run a watcher, or change note contents. It is
+not OG integration or production sync.
 
 ## Recommendation
 
@@ -178,9 +179,9 @@ Implement a standalone pure module beside the existing comparison adapter:
 2. Reduce controlled save-complete, rename-intent/complete, external
    add/change/unlink and stable-read-failure observations into deterministic
    captured events or review items.
-3. Produce the explicit target snapshot and call the existing comparison and
-   preview functions only when capture eligibility is true. Do not call the
-   native publisher.
+3. Produce the explicit target snapshot and call the existing pure comparison
+   function only when capture eligibility is true. Do not call the
+   filesystem-reading `previewComparison`, native helper or publisher.
 4. Test path-independent IDs, replica carry-over, save deduplication, failed and
    completed rename, external delete-plus-create ambiguity, incomplete writes,
    repeated notifications, missing/stale/wrong sidecars, NFC/NFD and case

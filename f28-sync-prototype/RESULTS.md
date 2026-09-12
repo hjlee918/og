@@ -379,3 +379,52 @@ networking, accounts, encryption, attachments and imports remain absent.
 The next meaningful milestone is a design review for explicit synthetic
 identity enrollment and change capture. It should remain separate from OG and
 must not infer identities or deletions; it has not begun.
+
+## Pure identity enrollment and change-capture slice
+
+The standalone `identity-capture.js` module now validates complete versioned
+identity metadata, enrolls only an explicit caller-supplied synthetic file list,
+and initializes a second simulated replica with the same graph/file IDs and
+separate local pending state. Every capture rechecks the metadata revision,
+accepted selected-snapshot fingerprint, accepted revision, exact path and
+content hash. Accepted and proposed metadata are returned separately.
+
+Controlled save, rename, external-change and read observations are combined
+deterministically across calls. Save completion and rename intent are
+insufficient alone. External unlink/add remain separate until an exact
+revision-bound review decision resolves them. Missing, unstable, contradictory,
+invalid or unreviewed observations expose no target. Equivalent notifications
+are idempotent, while changed observation-ID reuse and multiple incompatible
+changes for one file are rejected. Eligible results create a complete synthetic
+target and feed it to `compareSnapshots`; they do not call the filesystem
+preview, publisher or native helper. Observation evidence for a proposed change
+remains in local state because this slice has no apply acknowledgement.
+
+Focused verification used pure in-memory synthetic state only:
+
+- New identity/capture tests: 23/23 passed.
+- Existing core/planner/executor/comparison/response regressions plus the new
+  tests: 69/69 passed.
+- JavaScript syntax checks and `git diff --check` passed.
+
+The first focused run reported 17/21 because two collision tests used paths that
+did not match their accepted snapshots and one test expected a thrown stale
+review error where the contract returns an ineligible diagnostic. The fixtures
+and expectation were corrected; no fail-open behavior was accepted. A later
+mixed-batch review also added retention of valid captured evidence when another
+item invalidates the all-or-nothing batch.
+
+The tests cover complete enrollment, replica identity carry-over, duplicate IDs
+and paths, metadata/snapshot and revision mismatch, save/read ordering across
+pending batches, repeated and contradictory observations, failed and completed
+rename, external delete-plus-create ambiguity, exact review binding, explicit
+create/delete decisions, incomplete reads, NFC/NFD and case collisions,
+deterministic output and unchanged inputs.
+
+All evidence is synthetic and in memory. A supplied `stable` flag proves only
+the pure classification branch. No graph, sidecar, watcher, profile, application
+or filesystem fixture was accessed. Real watcher capture, metadata persistence,
+stable working-tree application, sidecar transport, mobile behavior and
+cross-device synchronization remain unimplemented. The next meaningful
+milestone is a documentation review for the stable working-tree capture/apply
+boundary; it must not begin filesystem enrollment or OG integration implicitly.

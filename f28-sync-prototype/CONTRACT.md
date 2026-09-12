@@ -245,3 +245,49 @@ cooperative, selector publication does not make generation writes multi-file
 atomic, final checks do not control arbitrary writers, and injected failures do
 not prove power-loss durability. There is no graph discovery, identity
 enrollment, OG integration, watcher, account, network, encryption or import.
+
+## Pure identity enrollment and change capture
+
+The standalone identity module implements schemas `f28-file-identities/1`,
+`f28-identity-replica/1`, `f28-identity-enrollment/1` and
+`f28-capture-batch/1` in memory only. Explicit complete enrollment requires
+caller-supplied graph, replica, file, metadata-revision and accepted-revision
+IDs. It checks every supplied Markdown/Org path and content against the complete
+accepted selected snapshot. A second simulated replica retains graph/file IDs
+and receives separate replica-local pending state.
+
+Accepted metadata must be a complete one-head mapping of the accepted snapshot.
+Its graph ID, metadata revision, paths, NFC-and-lowercase keys, content hashes
+and accepted revisions are checked on every capture. Replica state must name the
+same graph, metadata revision and snapshot fingerprint. Content hashes are
+consistency checks, not identity or authentication.
+
+Controlled observations distinguish save completion, rename intent/completion,
+stable-read assertions, external add/change/unlink, failed reads and unstable
+reads. A save needs matching completion and stable-read observations. A rename
+needs matching intent, successful completion, stable new-path bytes and an
+explicit old-path-absent assertion. Intent alone changes nothing. External
+unlink/add remain separate review items and never imply rename. A synthetic
+`stable: true` value exercises this state machine; it does not establish that
+a real filesystem read was stable.
+
+Observation IDs are content-bound. Exact repetition is idempotent; changed ID
+reuse and contradictory changes for one file reject the batch. Review decisions
+must bind the exact current pending-item IDs and metadata revision. They may
+explicitly ignore, create, delete or pair one known unlink with one add as a
+rename. No identity is inferred from text, path or inode.
+
+Any invalid or unresolved item sets `eligibility.eligible` to false and exposes
+no target or comparison plan. Valid observations are retained in replica-local
+pending evidence when the all-or-nothing batch is rejected. A fully eligible
+change produces separate proposed metadata and a complete synthetic target,
+then calls only the existing pure comparison function. The accepted metadata is
+unchanged. Source observations for a proposed graph change remain pending until
+a later caller reinitializes from an actually accepted metadata/snapshot pair;
+target preparation is not application or acknowledgement. A pure no-op or
+ignore-only decision has no graph change to acknowledge.
+
+This module creates no sidecar, reads no filesystem, calls no preview reader,
+native helper or publisher, and is not imported by OG. Real watcher stability,
+metadata persistence, stable-working-tree application, sidecar placement and
+cross-device synchronization remain unimplemented.
