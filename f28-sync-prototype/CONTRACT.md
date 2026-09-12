@@ -22,13 +22,32 @@ an immutable revision whose parent is explicit.
 7. Distinct file IDs that claim the same NFC-and-lowercase path create an
    explicit path-collision conflict. The prototype does not rename or merge
    either file.
-8. The persistence adapter acknowledges only after writing and syncing a
-   temporary state file, atomically renaming it, and syncing its directory. An
-   injected failure before acknowledgement throws instead of reporting success.
+8. The persistence adapter acknowledges only after writing and syncing an
+   exclusively created temporary state file, atomically renaming it, verifying
+   the installed inode, and syncing its directory. An injected failure before
+   acknowledgement throws instead of reporting success.
 
-The adapter rejects absolute paths, traversal, and any symlink in an accessed
-path. Tests create one fresh run beneath the approved `Logseq Test` root and do
-not enumerate that shared root. The persistence injection tests establish the
-ordering and retry behavior of this implementation under controlled in-process
-exceptions. They do not establish storage-hardware or sudden-power-loss
-durability.
+The adapter caches the device/inode identities of the canonical approved root,
+test run and store directory, then verifies all three at every persistence entry
+point and around file operations. Reads use `O_NOFOLLOW` and match the opened
+regular file to the expected state inode. Writes use a new unpredictable name
+with `O_CREAT | O_EXCL | O_NOFOLLOW`, so an existing or substituted pending
+entry is never opened or truncated. Before rename, both directory ownership and
+the pending/destination identities are checked. After rename, the installed
+state is reopened with `O_NOFOLLOW`, matched to the pending inode, and the owned
+directory is synced before acknowledgement. Unexpected pending files are left
+untouched as evidence.
+
+These controls refuse substitutions visible at those checks and ensure that
+leaf symlinks are not followed. Node does not expose the directory-relative
+`openat`/`renameat` primitives needed to make the multi-step path operations
+race-free against a hostile process that concurrently swaps ancestors between
+checks. This standalone single-process simulator therefore fails closed when it
+observes replacement but does not claim an OS sandbox or protection against an
+active local filesystem attacker. Production use would require an anchored
+directory-handle implementation or an equivalent platform-specific boundary.
+
+Tests create one fresh run beneath the approved `Logseq Test` root and do not
+enumerate that shared root. Persistence injection establishes the ordering and
+retry behavior under controlled in-process exceptions. It does not establish
+storage-hardware or sudden-power-loss durability.

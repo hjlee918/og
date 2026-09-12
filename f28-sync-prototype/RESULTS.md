@@ -13,29 +13,41 @@ exact operation retries idempotent, rejects changed operation-ID reuse, restores
 old content as a new revision, and reports NFC/NFD-normalized path collisions
 without renaming or merging either file.
 
-The filesystem adapter persists JSON state for two synthetic replicas and a
-local relay. It validates the approved root and fresh run canonically, rejects
-traversal and symlink escape, syncs a temporary file, atomically renames it and
-syncs its directory before acknowledgement. Generated state remains in its
+The original filesystem adapter had a containment defect: its fixed pending
+path was checked during construction, then later opened with a mode that could
+follow a substituted symlink and truncate its target. It also did not
+re-establish the cached store/run directory identities at persistence entry
+points. The original path-helper test did not exercise that behavior.
+
+The correction pins device/inode identities for the approved root, run and
+store; verifies them throughout initialize, read, commit and rename; reads state
+with `O_NOFOLLOW`; creates unpredictable pending files exclusively with
+`O_CREAT | O_EXCL | O_NOFOLLOW`; and verifies the installed inode after rename
+before directory sync and acknowledgement. It preserves unexpected pending
+entries instead of truncating or deleting them. Generated state remains in its
 fresh test-owned run outside Git; no graph content or runtime state is committed.
 
 ## Tests
 
-- Pure state transitions: 7/7 passed.
-- Filesystem persistence and containment: 4/4 passed.
-- Total focused tests: 11/11 passed.
-- Syntax checks: both prototype source files passed `node --check`.
+- Corrected pure state transitions: 7/7 passed.
+- Corrected filesystem persistence and containment: 8/8 passed.
+- Corrected total focused tests: 15/15 passed.
+- Prototype source and corrected persistence-test syntax: 3/3 passed `node --check`.
 
-An initial sandboxed filesystem invocation was refused before it could create a
-run. The persistence-only suite then passed 4/4, and the final combined suite
-passed 11/11 after bidirectional rename/delete propagation was added. Each
-successful filesystem invocation created one distinct fresh test-owned child;
-both runs remain preserved, and the shared root was never enumerated.
+The previous 11/11 result remains historical evidence for the state behavior
+and earlier persistence scenarios. Its earlier filesystem cases passed, but its
+path-helper-only containment test did not prove safe real persistence entry
+points and is not cited as proof of the corrected containment behavior.
 
-The tests cover bidirectional create/update/rename/delete propagation, offline
-divergent edits, edit/delete and rename/rename conflicts, stable IDs, exact
-Korean/English content, NFC/NFD collisions across two file IDs, exact retry,
-changed operation-ID reuse, restart, restore, traversal and symlink refusal.
+The corrected run covers the original bidirectional state and persistence
+scenarios plus actual pending-file symlink substitution, state-file symlink
+substitution, store-directory replacement after construction, and preservation
+of both pre-existing and interrupted pending files. All attack sentinels are
+synthetic files inside the same fresh test run. Initialize, read and commit fail
+closed where applicable; sentinel contents remain unchanged. A normal commit,
+new store instance and idempotent retry still succeed. The shared approved root
+was not enumerated, and prior test runs remain untouched.
+
 Controlled failures occur after temporary-file sync but before rename, and
 after durable rename but before acknowledgement. The first remains uncommitted;
 the second is found after restart and its retry adds no duplicate revision.
@@ -44,13 +56,15 @@ the second is found after restart and its retry adds no duplicate revision.
 
 The failure injection proves this implementation's control-flow ordering under
 in-process exceptions. It does not prove sudden-power-loss or hardware
-durability. The relay is a local simulator, not encrypted or secure. There is no
-network, account, attachment streaming, block identity, parser-aware merge,
+durability. The identity checks and non-following leaf opens block the tested
+non-concurrent substitutions. Because Node's path APIs do not provide anchored
+directory-relative rename here, the prototype does not claim to eliminate races
+against a hostile process swapping directories between checks. It is not an OS
+sandbox. The relay remains a local simulator, not encrypted or secure. There is
+no network, account, attachment streaming, block identity, parser-aware merge,
 mobile adapter, OG watcher integration, existing-graph enrollment or UI. The
 prototype does not assign IDs to existing notes or rewrite graph formats.
 
-After supervisor and user review, the smallest next batch would build a local
-synthetic reconciliation adapter: accept an explicit list of file events,
-translate them into this operation contract, and emit a reviewable write plan
-without applying it or integrating it into OG. This batch does not begin that
-work and does not establish MVP-A or MVP-B completion.
+The reconciliation adapter remains the smallest proposed next batch after
+supervisor and user review. This correction does not begin it and does not
+establish MVP-A or MVP-B completion.

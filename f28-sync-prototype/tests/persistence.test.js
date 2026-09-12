@@ -29,6 +29,10 @@ function createOp() {
   };
 }
 
+function assertContainmentRefusal(action) {
+  assert.throws(action, (error) => error instanceof ContainmentError);
+}
+
 test('persisted replicas propagate operations in both simulated directions', () => {
   const relay = store('relay');
   const deviceA = store('device-a');
@@ -117,4 +121,82 @@ test('filesystem adapter refuses traversal and symlink escape before target acce
   assert.throws(() => target.resolve('escape/state.json'),
     (error) => error instanceof ContainmentError);
   assert.equal(fs.readdirSync(outsideStore).length, 0);
+});
+
+test('pending-file symlink substitution after construction cannot alter its sentinel', () => {
+  const target = store('pending-symlink-substitution');
+  target.initialize(createState('graph-pending-symlink'));
+  const sentinelPath = path.join(runRoot, 'pending-symlink-sentinel.txt');
+  const sentinel = 'pending sentinel must remain unchanged';
+  fs.writeFileSync(sentinelPath, sentinel, { mode: 0o600 });
+
+  assertContainmentRefusal(() => target.commit(createOp(), {
+    failAt(stage, { pendingPath } = {}) {
+      if (stage === 'before-open') {
+        fs.symlinkSync(path.relative(path.dirname(pendingPath), sentinelPath), pendingPath);
+      }
+    },
+  }));
+  assert.equal(fs.readFileSync(sentinelPath, 'utf8'), sentinel);
+  assert.deepEqual(target.read().revisionOrder, []);
+});
+
+test('state-file symlink substitution makes read and commit fail closed', () => {
+  const target = store('state-symlink-substitution');
+  target.initialize(createState('graph-state-symlink'));
+  const sentinelPath = path.join(runRoot, 'state-symlink-sentinel.txt');
+  const sentinel = 'state sentinel must remain unchanged';
+  fs.writeFileSync(sentinelPath, sentinel, { mode: 0o600 });
+  fs.unlinkSync(target.statePath);
+  fs.symlinkSync(path.relative(target.storeRoot, sentinelPath), target.statePath);
+
+  assertContainmentRefusal(() => target.read());
+  assertContainmentRefusal(() => target.commit(createOp()));
+  assert.equal(fs.readFileSync(sentinelPath, 'utf8'), sentinel);
+});
+
+test('store-directory substitution after construction is rejected by real entry points', () => {
+  const target = store('store-directory-substitution');
+  target.initialize(createState('graph-store-substitution'));
+  const originalStorePath = path.join(runRoot, 'store-directory-original');
+  fs.renameSync(target.storeRoot, originalStorePath);
+  fs.mkdirSync(target.storeRoot, { recursive: false });
+  const sentinelPath = path.join(target.storeRoot, 'sentinel.txt');
+  const sentinel = 'replacement directory sentinel must remain unchanged';
+  fs.writeFileSync(sentinelPath, sentinel, { mode: 0o600 });
+
+  assertContainmentRefusal(() => target.read());
+  assertContainmentRefusal(() => target.initialize(createState('replacement')));
+  assertContainmentRefusal(() => target.commit(createOp()));
+  assert.equal(fs.readFileSync(sentinelPath, 'utf8'), sentinel);
+});
+
+test('existing and interrupted pending evidence is preserved across recovery and restart', () => {
+  const target = store('pending-evidence-recovery');
+  const existingPendingPath = path.join(target.storeRoot, '.state.pending.existing.json');
+  const existingPending = 'pre-existing pending evidence';
+  fs.writeFileSync(existingPendingPath, existingPending, { mode: 0o600 });
+  target.initialize(createState('graph-pending-evidence'));
+
+  let interruptedPendingPath;
+  assert.throws(
+    () => target.commit(createOp(), {
+      failAt(stage, details) {
+        if (stage === 'after-write-before-rename') {
+          interruptedPendingPath = details.pendingPath;
+          throw new Error('controlled interruption');
+        }
+      },
+    }),
+    /controlled interruption/,
+  );
+  const interruptedPending = fs.readFileSync(interruptedPendingPath, 'utf8');
+  assert.deepEqual(target.read().revisionOrder, []);
+
+  assert.equal(target.commit(createOp()).acknowledged, true);
+  const restarted = store('pending-evidence-recovery');
+  assert.equal(restarted.commit(createOp()).replayed, true);
+  assert.deepEqual(restarted.read().revisionOrder, ['rev-1']);
+  assert.equal(fs.readFileSync(existingPendingPath, 'utf8'), existingPending);
+  assert.equal(fs.readFileSync(interruptedPendingPath, 'utf8'), interruptedPending);
 });
