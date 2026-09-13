@@ -1,15 +1,16 @@
 # Stable working-tree capture/application boundary
 
-Status: implementation-ready recommendation, 2026-09-12. Documentation and
-source review only. No working-tree adapter, metadata persistence, watcher hook
-or OG integration is implemented or approved. The accepted pure capture tests
-are 75/75; the comparison plan owns executable revision identities.
+Status: bounded synthetic implementation completed, 2026-09-12. The working
+folder, metadata and watcher simulation remain test-only. No real sidecar
+location, watcher hook, graph enrollment or OG integration is approved. The
+accepted pure capture tests are 75/75; the comparison plan owns executable
+revision identities.
 
 ## Recommendation
 
-Keep OG on its existing stable graph directory and add one **per-file
-compare-and-swap applicator** around the accepted plan. The applicator uses a
-durable transaction journal, exact before/after bytes and paths, and retained
+Keep OG on its existing stable graph directory and add one **preconditioned
+per-file applicator with recovery** around the accepted plan. The applicator uses a
+synchronized transaction journal, exact before/after bytes and paths, and retained
 prior versions. It stages a complete batch, but publishes each working-tree
 file separately. It therefore provides recoverable per-file transitions, not
 whole-graph atomicity.
@@ -106,7 +107,7 @@ references are retained until a separately approved policy permits cleanup.
    Rename requires the old exact file and an absent exact destination. Delete
    uses an anchored move into the transaction recovery area and records a
    tombstone; it is never inferred from absence. Flush the affected file and
-   directory as required, reread the result, then durably advance that action's
+   directory as required, reread the result, then synchronize that action's
    journal marker. Other files may already be visible at this point.
 5. After all actions, reverify every intended working path and byte sequence.
    Derive proposed identity metadata from the exact comparison plan's resulting
@@ -157,14 +158,16 @@ recovery never guesses whether it supersedes the incoming revision. This
 roll-forward policy preserves the old generation, staged bytes, moved deletes
 and journal. It does not make a multi-file batch atomic.
 
-## One bounded next implementation batch
+## Implemented bounded synthetic batch
 
-Implement this contract only for a fresh synthetic working directory and a
-simulated editor. Reuse the accepted pure capture/comparison/planner/executor
-and the narrow anchored C helper; add the versioned journal, per-file
-preconditioned create/update/rename/delete commands, and a deterministic
-watcher-event simulator. Keep `metadataRoot` as an injected synthetic path.
-Do not edit OG source or connect Chokidar.
+The approved batch implements this contract only for a fresh synthetic working
+directory and a simulated editor. It reuses the accepted pure
+capture/comparison/planner/executor and generation publisher. A separate narrow
+x86_64 C command boundary performs anchored working-file and synthetic metadata
+operations. It adds the versioned journal, per-file preconditioned
+create/update/rename/delete commands, and a deterministic watcher-event
+classifier. `metadataRoot` remains an injected synthetic path. OG source and
+Chokidar are unchanged.
 
 Acceptance tests should cover normal operations; an editor write before apply
 and between file actions; partial apply/restart; files-complete/metadata-pending
@@ -189,11 +192,13 @@ race after any verification. Per-file replacement means OG may temporarily see
 a mixed batch; later OG integration needs an explicit reconciliation pause and
 resume protocol, without claiming filesystem exclusion.
 
-The next synthetic batch requires approval to create and mutate one new
-test-owned working directory under the exact approved `Logseq Test` root and to
-compile/execute the extended test-only C helper. It requires no decision about
-the real sidecar location. Two later compatibility decisions require separate
-approval: where exportable identity/journal metadata lives, and whether OG may
-add save/rename completion causes plus one exact incoming-reconciliation seam.
-Those hooks change OG event behavior and must be reviewed before application
-integration.
+Approval to create and mutate one new test-owned working directory under the
+exact approved `Logseq Test` root and compile/execute the test-only x86_64 C
+helper was granted and used for this batch. The implementation does not claim
+an atomic compare-and-swap operation against external writers: the cooperative
+lock and repeated precondition checks still leave check/write races.
+
+Two later compatibility decisions require separate approval: where exportable
+identity/journal metadata lives, and whether OG may add save/rename completion
+causes plus one exact incoming-reconciliation seam. Those hooks change OG event
+behavior and must be reviewed before application integration.

@@ -300,3 +300,50 @@ This module creates no sidecar, reads no filesystem, calls no preview reader,
 native helper or publisher, and is not imported by OG. Real watcher stability,
 metadata persistence, stable-working-tree application, sidecar placement and
 cross-device synchronization remain unimplemented.
+
+## Stable synthetic working-folder experiment
+
+The standalone `stable-working-tree.js` coordinator validates the exact issued
+preview and authoritative comparison plan, executes it in memory, and derives
+projected metadata from that exact revision state. A preflight checks one
+stable synthetic working directory against the preview basis before the
+existing publisher selects the immutable projected generation. The working
+helper then binds its immutable journal to the preview fingerprint, basis and
+target generations, plan, ordered operation IDs, before/after paths and content
+hashes, and complete base/projected metadata bytes.
+
+The x86_64 C working helper opens only an existing owned run and case through
+the approved anchored root. It uses the existing stable cooperative lock inode,
+independently validates the parameterized working and metadata directory
+components, rejects traversal and links at anchored opens, and requires
+`F_FULLFSYNC`/directory synchronization rather than silently downgrading.
+Initialization verifies the selected generation's state and materialized files
+before creating the synthetic stable folder.
+
+Before changing live files, it writes and verifies retained before-images,
+intended new bytes and the immutable transaction journal. Create refuses an
+occupied destination; update requires exact prior bytes; rename requires exact
+source bytes and an unoccupied destination; delete moves the exact source to
+transaction recovery storage. Each action is rechecked immediately before its
+directory-relative mutation, verified afterward and followed by a synchronized
+progress marker. A multi-file interruption can therefore expose a mixed working
+state. No whole-batch filesystem atomicity is claimed.
+
+Restart accepts only exact before or exact after state for every action. A third
+state stops without overwrite or rollback and preserves journal, staging,
+recovery and generations. Metadata is accepted only after all file results
+verify, using the exact comparison plan's revisions. Acknowledgement follows
+metadata, journal and selected-generation verification and synchronization.
+Exact retry creates no duplicate action. Controlled watcher events are echoes
+only when operation, file identity, old/new paths, presence and new-content hash
+all match a reconstructible cause record; path or time alone never suppresses
+an event.
+
+This is preconditioned per-file application with recovery, not an atomic
+compare-and-swap against arbitrary external writers. `flock` coordinates only
+participating helpers. Repeated checks do not remove the race between a check
+and a write, prevent an external editor, provide whole-graph atomicity or prove
+power-loss durability. The selected generation may advance before a later
+working-file refusal; the retained journal/evidence requires recovery or a new
+reviewed preview. Real metadata placement, OG hooks, Chokidar, real graphs,
+accounts, network, encryption, mobile and cross-device sync remain excluded.

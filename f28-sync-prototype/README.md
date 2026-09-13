@@ -37,3 +37,20 @@ The filesystem tests create exactly one fresh test-owned directory under the
 mandatory `Logseq Test` root. It does not list that root, remove older runs, or
 touch an existing graph. Generated state is retained outside Git and must never
 be committed.
+
+Build the separate stable-working-folder helper with the same installed Intel
+toolchain, then run its focused test in new case subdirectories of one fresh
+owned run:
+
+```sh
+f28-sync-prototype/build-working-helper.sh /tmp/f28-working-tree-helper-x86_64
+F28_HELPER=/tmp/f28-filesystem-helper-x86_64 \
+F28_WORKING_HELPER=/tmp/f28-working-tree-helper-x86_64 \
+F28_RUN_NAME=<fresh-owned-run> F28_OWNER_TOKEN=<64-hex-token> \
+F28_CASE_SUFFIX=<new-case-suffix> \
+node --test f28-sync-prototype/tests/stable-working-tree.test.js
+```
+
+The test creates only explicit case names below that run; it never discovers or
+lists the shared root. Set `F28_SANITIZE=1` when building the working helper for
+its AddressSanitizer/UndefinedBehaviorSanitizer pass.

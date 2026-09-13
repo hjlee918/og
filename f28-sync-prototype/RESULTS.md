@@ -460,3 +460,64 @@ unchanged inputs.
 No native helper, filesystem fixture, graph, sidecar, watcher, profile or app
 was accessed. Real watcher capture, metadata persistence, stable working-tree
 application and cross-device synchronization remain unimplemented.
+
+## Stable synthetic working-folder experiment
+
+The approved standalone slice adds `stable-working-tree.js` and a narrow
+`F28WT1` x86_64 C helper beside the accepted publisher. The coordinator checks
+the exact issued preview against the stable synthetic folder before publishing
+the immutable generation. The working helper then applies the authoritative
+plan per file, retains before-images, records an immutable request-bound journal
+and synchronized progress markers, accepts exact projected metadata, and
+acknowledges only after final verification. A deterministic in-memory watcher
+classifier reconstructs exact cause records and separates matching echoes from
+different content, presence, identity, operation or paths.
+
+All filesystem evidence is retained in the one fresh owned run
+`f28-working-tree-20260912-3b0d9af88-a1`; only explicit case names below it were
+used. The shared root, other runs and user graphs were not enumerated or opened.
+The first release cases passed 8/11. Three failures were test expectation
+errors: completed recovery returns `applied` before later retries return
+`already-applied`, and retained pre-journal staging causes a hard refusal rather
+than a result object. The assertions were corrected without weakening the
+helper. The next release passed 11/11. After adding selected-generation
+initialization verification, parameter-directory/link refusal and injected
+synchronization recovery, a later 11/12 run exposed that the test waited for
+the child `exit` event but attempted the next lock acquisition before its stdio
+and cleanup `close` event. Waiting for `close` made owned-process cleanup
+explicit; the refusal and that run remain recorded. The final results were:
+
+- Final warning-as-error x86_64 release integration: 12/12 passed.
+- Final AddressSanitizer/UndefinedBehaviorSanitizer integration: 12/12 passed
+  with `ASAN_OPTIONS=detect_leaks=0`.
+- Relevant pure core/planner/executor/comparison/response/capture regressions:
+  75/75 passed.
+- JavaScript syntax and diff checks passed.
+
+Cases cover create/update/rename/delete, one stable working-directory inode,
+local edits before apply and between actions, explicit intermediate mixed state,
+partial restart, files-complete/metadata-pending recovery, interrupted required
+synchronization, acknowledgement loss, exact retry, matching watcher echoes
+versus different edits, occupied create/rename destinations, contradictory
+delete recovery, Korean NFC/NFD and case collisions, traversal, substituted
+metadata-directory and working-file links, corrupt journal, incomplete staging,
+and unchanged retained before-images/prior generations. Unexpected and
+incomplete evidence remains in the synthetic run.
+
+Apple Clang was 16.0.0 (`clang-1600.0.26.6`), targeting
+`x86_64-apple-darwin23.6.0`. The tested working-helper C source SHA-256 was
+`e93672c5b1c71db36b28f9e6990231aa988bcbe07d68a9a3f0ebe97935c5cf58`;
+the release x86_64 helper SHA-256 was
+`52bcea619aa886c62d4e68635429ba62dc57f7b64e2d1a44d053fdb61e26e444`.
+Binaries and generated working files, metadata, journals and content-bearing
+logs remain outside Git.
+
+The result is preconditioned per-file application with recovery. It is not an
+atomic compare-and-swap against arbitrary writers. The cooperative lock does
+not control OG or editors, repeated checks leave check/write races, and an
+interrupted batch is visibly mixed. Failure injection and successful
+`F_FULLFSYNC` calls do not prove power-loss durability. The existing generation
+can be selected before a later working-tree refusal, so recovery or a new
+reviewed preview remains necessary. No real sidecar location, watcher, OG hook,
+graph enrollment, application integration, account, network, encryption or
+cross-device behavior was implemented.
