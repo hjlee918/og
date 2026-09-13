@@ -701,13 +701,6 @@ function captureChanges(input) {
   invalid.push(...reviewed.invalid);
   const deduped = rejectContradictoryEvents([...causal.captured, ...external.captured, ...reviewed.captured]);
   invalid.push(...deduped.invalid);
-  if (deduped.events.length && request.proposedMetadataRevision === metadata.metadataRevision) {
-    invalid.push({
-      code: 'metadata-revision-not-advanced',
-      reason: 'a proposed identity change requires a new metadata revision',
-    });
-  }
-
   const baseResult = {
     schema: CAPTURE_RESULT_SCHEMA,
     acceptedMetadata: metadata,
@@ -722,6 +715,7 @@ function captureChanges(input) {
     comparison: null,
     nextReplicaState: null,
   };
+  let requiresAcknowledgement = false;
   const blocked = baseResult.pendingObservations.length > 0 || baseResult.invalid.length > 0;
   if (!blocked) {
     const plan = planReconciliation(selected.state, deduped.events);
@@ -742,10 +736,39 @@ function captureChanges(input) {
         baseResult.invalid.push({ code: 'comparison-not-eligible', reason: 'captured target was refused by snapshot comparison' });
         baseResult.comparison = comparison;
       } else {
-        baseResult.target = candidateTarget;
-        baseResult.comparison = comparison;
-        baseResult.proposedMetadata = metadataFromState(execution.state,
-          deduped.events.length ? request.proposedMetadataRevision : metadata.metadataRevision);
+        // compareSnapshots owns the executable event and revision identities.
+        // Re-execute that exact exposed plan and derive metadata from its state;
+        // the earlier capture execution exists only to construct the target.
+        const comparisonExecution = executePlan({
+          sourceSnapshot: selected.state,
+          events: comparison.proposedEvents,
+          plan: comparison.plan,
+          destinationSnapshot: selected.state,
+        });
+        if (!['applied', 'already-applied'].includes(comparisonExecution.status)) {
+          baseResult.invalid.push({
+            code: 'comparison-execution-mismatch',
+            reason: 'the exact exposed comparison plan did not produce a projected state',
+          });
+        } else {
+          requiresAcknowledgement = comparison.plan.actions.length > 0;
+          if (requiresAcknowledgement
+              && request.proposedMetadataRevision === metadata.metadataRevision) {
+            baseResult.invalid.push({
+              code: 'metadata-revision-not-advanced',
+              reason: 'an executable identity change requires a new metadata revision',
+            });
+          } else {
+            baseResult.target = candidateTarget;
+            baseResult.comparison = comparison;
+            baseResult.proposedMetadata = metadataFromState(
+              comparisonExecution.state,
+              requiresAcknowledgement
+                ? request.proposedMetadataRevision
+                : metadata.metadataRevision,
+            );
+          }
+        }
       }
     }
   }
@@ -760,7 +783,7 @@ function captureChanges(input) {
     // evidence for every proposed graph change until a caller later
     // reinitializes from an actually accepted metadata/snapshot pair. A pure
     // no-op or ignore-only decision has nothing to acknowledge.
-    pendingObservations: eligible && deduped.events.length === 0 ? [] : observations,
+    pendingObservations: eligible && !requiresAcknowledgement ? [] : observations,
   };
   return baseResult;
 }

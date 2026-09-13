@@ -160,6 +160,12 @@ schema `f28-snapshot-comparison/2`; conflicts or invalid inputs keep
 bound to the exact preview, selected generation, source snapshot, target and
 plan. Review diagnostics are never sent to the publisher as operations.
 
+The comparison plan, rather than the earlier causal capture event, owns final
+executable revision IDs. Proposed identity metadata must be derived by executing
+that exact plan in memory. Causal revision IDs remain evidence only. This also
+means an unchanged-content save advances neither file revision nor metadata
+revision.
+
 The current filesystem experiment publishes immutable complete generations
 selected through `CURRENT`. OG, however, edits one stable working graph path.
 No accepted component safely materializes a selected generation back into that

@@ -428,3 +428,35 @@ stable working-tree application, sidecar transport, mobile behavior and
 cross-device synchronization remain unimplemented. The next meaningful
 milestone is a documentation review for the stable working-tree capture/apply
 boundary; it must not begin filesystem enrollment or OG integration implicitly.
+
+## Capture-to-comparison revision correction
+
+Supervisor review found that the original eligible capture built proposed
+metadata from its preliminary causal-event execution, then exposed a comparison
+plan with newly generated revision IDs. Executing that plan therefore produced a
+head that `validateMetadata` rejected against the proposed metadata. The prior
+69/69 result remains valid component-test evidence, but it did not exercise this
+metadata handoff.
+
+The comparison plan is now the sole executable revision authority. Capture
+events still retain caller-supplied causal IDs, but after constructing the target
+the module executes the exact exposed comparison plan and derives proposed
+metadata from that state. Accepted metadata remains unchanged. An unchanged-byte
+save produces no comparison action, retains the accepted file and metadata
+revisions, and leaves no acknowledgement-pending graph change.
+
+New end-to-end in-memory tests cover save/update, rename, reviewed create and
+reviewed delete through capture, exact comparison-plan execution, resulting
+snapshot construction, metadata validation and next-replica initialization.
+Each resulting replica performs a second capture. Additional cases cover
+unchanged-byte save, exact deterministic retry, pending/rejected behavior and
+unchanged inputs.
+
+- Corrected identity/capture suite: 29/29 passed.
+- Existing core/planner/executor/comparison/response regressions plus the
+  corrected suite: 75/75 passed.
+- JavaScript syntax and diff checks passed.
+
+No native helper, filesystem fixture, graph, sidecar, watcher, profile or app
+was accessed. Real watcher capture, metadata persistence, stable working-tree
+application and cross-device synchronization remain unimplemented.

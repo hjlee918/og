@@ -287,6 +287,15 @@ a later caller reinitializes from an actually accepted metadata/snapshot pair;
 target preparation is not application or acknowledgement. A pure no-op or
 ignore-only decision has no graph change to acknowledge.
 
+Captured events retain their causal IDs for diagnosis, but they are not the
+executable identity contract. The existing comparison result is authoritative:
+the module executes that exact comparison plan in memory and derives proposed
+metadata from its projected revision state. Consequently every proposed
+`acceptedRevision` is the revision the exposed plan will create. If comparison
+finds unchanged bytes and exposes no action, proposed metadata retains the
+accepted revision and metadata revision; the unused causal revision ID is not
+adopted.
+
 This module creates no sidecar, reads no filesystem, calls no preview reader,
 native helper or publisher, and is not imported by OG. Real watcher stability,
 metadata persistence, stable-working-tree application, sidecar placement and

@@ -12,6 +12,7 @@ const {
   initializeReplica,
   validateMetadata,
 } = require('../src/identity-capture');
+const { executePlan } = require('../src/executor');
 const { snapshotFingerprint } = require('../src/planner');
 
 function apply(state, operation) { return applyOperation(state, operation).state; }
@@ -28,7 +29,7 @@ function seed(files = []) {
   return state;
 }
 
-function selected(state) {
+function selected(state, generation = 'a'.repeat(64)) {
   const files = [];
   for (const file of Object.values(state.files)) {
     assert.equal(file.heads.length, 1);
@@ -37,7 +38,7 @@ function selected(state) {
   }
   files.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)));
   return {
-    schema: 'f28-selected-snapshot/1', generation: 'a'.repeat(64),
+    schema: 'f28-selected-snapshot/1', generation,
     snapshotFingerprint: snapshotFingerprint(state), state, files,
   };
 }
@@ -68,6 +69,35 @@ function capture(context, observations, values = {}) {
     observations,
     reviewDecisions: [],
     ...values,
+  });
+}
+
+function executeExposedComparison(context, result, generationCharacter = 'b') {
+  assert.equal(result.eligibility.eligible, true);
+  const execution = executePlan({
+    sourceSnapshot: context.snapshot.state,
+    events: result.comparison.proposedEvents,
+    plan: result.comparison.plan,
+    destinationSnapshot: context.snapshot.state,
+  });
+  assert.ok(['applied', 'already-applied'].includes(execution.status));
+  return {
+    execution,
+    snapshot: selected(execution.state, generationCharacter.repeat(64)),
+  };
+}
+
+function captureWithAcceptedResult(result, snapshot, replicaId = 'replica-next') {
+  const replica = initializeReplica(result.proposedMetadata, replicaId, snapshot);
+  return captureChanges({
+    schema: CAPTURE_BATCH_SCHEMA,
+    metadata: result.proposedMetadata,
+    replica,
+    acceptedSnapshot: snapshot,
+    expectedMetadataRevision: result.proposedMetadata.metadataRevision,
+    proposedMetadataRevision: 'metadata-3',
+    observations: [],
+    reviewDecisions: [],
   });
 }
 
@@ -169,7 +199,10 @@ test('save completion and stable observation can arrive in either order across b
   assert.equal(completed.target.files[0].content, 'after');
   assert.equal(completed.comparison.eligibility.eligible, true);
   assert.equal(completed.acceptedMetadata.files.f.acceptedRevision, 'seed-rev-0');
-  assert.equal(completed.proposedMetadata.files.f.acceptedRevision, 'update-rev-1');
+  assert.equal(completed.capturedEvents[0].revisionId, 'update-rev-1');
+  assert.equal(completed.proposedMetadata.files.f.acceptedRevision,
+    completed.comparison.plan.actions[0].operation.revisionId);
+  assert.notEqual(completed.proposedMetadata.files.f.acceptedRevision, 'update-rev-1');
   assert.equal(completed.nextReplicaState.pendingObservations.length, 2);
 
   const reverseFirst = capture(context, [stableSave()]);
@@ -358,7 +391,8 @@ test('explicit reviewed deletion produces a tombstone target and proposed metada
   assert.deepEqual(result.target.files, [{ fileId: 'f', deleted: true }]);
   assert.equal(result.comparison.plan.actions[0].operation.kind, 'delete');
   assert.equal(result.acceptedMetadata.files.f.status, 'live');
-  assert.equal(result.proposedMetadata.tombstones.f.acceptedRevision, 'delete-rev');
+  assert.equal(result.proposedMetadata.tombstones.f.acceptedRevision,
+    result.comparison.plan.actions[0].operation.revisionId);
 });
 
 test('explicit reviewed add assigns a caller-supplied identity without guessing', () => {
@@ -376,7 +410,8 @@ test('explicit reviewed add assigns a caller-supplied identity without guessing'
   });
   assert.equal(result.eligibility.eligible, true);
   assert.deepEqual(result.target.files.map((item) => item.fileId), ['f', 'new-file']);
-  assert.equal(result.proposedMetadata.files['new-file'].acceptedRevision, 'new-rev');
+  assert.equal(result.proposedMetadata.files['new-file'].acceptedRevision,
+    result.comparison.plan.actions[0].operation.revisionId);
 });
 
 test('external changes require stable explicit identity and absence preserves files', () => {
@@ -434,4 +469,87 @@ test('Korean NFC/NFD and case collisions prevent target exposure', async (suite)
     assert.equal(result.target, null);
     assert.ok(result.invalid.some((item) => item.code === 'captured-events-not-applicable'));
   });
+});
+
+test('proposed metadata follows the exact exposed plan for update rename create and delete', async (suite) => {
+  const operations = [
+    ['update', (context) => capture(context, [saveComplete(), stableSave()])],
+    ['rename', (context) => capture(context, renameSet())],
+    ['create', (context) => {
+      const pending = capture(context, [{
+        observationId: 'create-add', type: 'external-add',
+        path: 'pages/new.md', content: 'new', stable: true,
+      }]);
+      return capture({ ...context, replica: pending.nextReplicaState }, [], {
+        reviewDecisions: [{
+          decisionId: 'create-review', pendingIds: [pending.reviewItems[0].pendingId],
+          metadataRevision: 'metadata-1', action: 'create',
+          fileId: 'created-file', revisionId: 'causal-create-revision',
+        }],
+      });
+    }],
+    ['delete', (context) => {
+      const pending = capture(context, [{
+        observationId: 'delete-unlink', type: 'external-unlink',
+        fileId: 'f', path: 'pages/test.md',
+      }]);
+      return capture({ ...context, replica: pending.nextReplicaState }, [], {
+        reviewDecisions: [{
+          decisionId: 'delete-review', pendingIds: [pending.reviewItems[0].pendingId],
+          metadataRevision: 'metadata-1', action: 'delete',
+          fileId: 'f', revisionId: 'causal-delete-revision',
+        }],
+      });
+    }],
+  ];
+
+  for (const [index, [name, makeResult]] of operations.entries()) {
+    await suite.test(name, () => {
+      const context = enrolled();
+      const before = JSON.stringify(context);
+      const result = makeResult(context);
+      const applied = executeExposedComparison(context, result,
+        String.fromCharCode('b'.charCodeAt(0) + index));
+      assert.equal(applied.execution.status, 'applied');
+      assert.doesNotThrow(() => validateMetadata(result.proposedMetadata, applied.snapshot));
+      const nextReplica = initializeReplica(result.proposedMetadata,
+        'replica-after-' + name, applied.snapshot);
+      assert.equal(nextReplica.metadataRevision, 'metadata-2');
+      const second = captureWithAcceptedResult(result, applied.snapshot,
+        'replica-second-' + name);
+      assert.equal(second.eligibility.eligible, true);
+      assert.equal(second.comparison.plan.actions.length, 0);
+      assert.equal(second.proposedMetadata.metadataRevision, 'metadata-2');
+      assert.equal(JSON.stringify(context), before);
+    });
+  }
+});
+
+test('unchanged-content save creates no executable revision or metadata advance', () => {
+  const context = enrolled();
+  const observations = [
+    saveComplete({ content: 'before', revisionId: 'causal-noop-revision' }),
+    stableSave({ content: 'before' }),
+  ];
+  const before = JSON.stringify({ context, observations });
+  const first = capture(context, observations, {
+    proposedMetadataRevision: 'metadata-1',
+  });
+  const retry = capture(context, observations, {
+    proposedMetadataRevision: 'metadata-1',
+  });
+  assert.deepEqual(retry, first);
+  assert.equal(first.eligibility.eligible, true);
+  assert.equal(first.capturedEvents.length, 1);
+  assert.equal(first.comparison.plan.actions.length, 0);
+  assert.equal(first.proposedMetadata.metadataRevision, 'metadata-1');
+  assert.equal(first.proposedMetadata.files.f.acceptedRevision, 'seed-rev-0');
+  assert.equal(first.nextReplicaState.pendingObservations.length, 0);
+  const applied = executeExposedComparison(context, first, 'f');
+  assert.equal(applied.execution.status, 'already-applied');
+  assert.doesNotThrow(() => validateMetadata(first.proposedMetadata, applied.snapshot));
+  const second = captureWithAcceptedResult(first, applied.snapshot, 'replica-after-noop');
+  assert.equal(second.eligibility.eligible, true);
+  assert.equal(second.comparison.plan.actions.length, 0);
+  assert.equal(JSON.stringify({ context, observations }), before);
 });
