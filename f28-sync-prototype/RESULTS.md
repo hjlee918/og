@@ -618,3 +618,59 @@ The bridge remains disabled in every package. Receipt ledgers are test ports,
 not real durable storage; recovery remains idempotent/retryable rather than
 exactly once. No graph, sidecar, helper, application, profile, account or network
 integration was accessed or enabled.
+
+## OG bridge asynchronous-overlap coordination correction
+
+The preceding 22-test/105-assertion result remains historical evidence for the
+lifecycle correction, but its bridge still modified the shared ACTIVE slot
+outside any coordination boundary: `start-active!` checked for an existing
+active transaction before its asynchronous binding validation and persistence,
+reconciliation and lifecycle completions captured an ACTIVE snapshot and later
+persisted and installed that stale snapshot across asynchronous gaps, and
+recovery or completion could replace or clear a newer lifecycle installed while
+its ports were pending. The overlap regressions were added first. Against the
+prior behavior, the focused run had 21 failures in 31 tests/158 assertions:
+two incompatible starts could both succeed, reversed reconciliation completions
+lost one progress entry in memory and in the persisted record, reconciliation
+overlapping files-applied progress reverted the phase and dropped the entry,
+recovery could clobber a newer active record with memory/store divergence, a
+delayed finish could clear a newer lifecycle's persisted record, and a
+reentrant injected callback observed mid-flight state. Those failures were
+retained as the gap-demonstration record rather than described as passing.
+
+The corrected bridge adds one process-local coordination boundary, `serialized!`:
+every runtime reserves FIFO coordination turns in call order, turns run one at a
+time, and a rejected turn never stalls later turns. All six ACTIVE-publishing
+operations (`start-active!`, `reconcile-incoming!` publication, `recover-active!`,
+`mark-files-applied!`, `accept-identity!`, `finish-active!`) now claim their turn
+before any asynchronous work and revalidate exact transaction ownership inside
+the turn before each persisted write and in-memory installation. Reconciliations
+reserve the owning transaction before their asynchronous reconciliation call and
+enqueue their publication turn when the progress receipt settles, so reversed
+completions publish in completion order and each merges one entry into the fresh
+ACTIVE record instead of replacing it. Files-applied publication keeps the
+current phase rather than regressing it and is idempotent; a stale finish
+revalidates ownership after its asynchronous clear and cannot clear a newer
+lifecycle; recovery runs as one turn and cannot race a start. A turn that
+reenters the bridge from an injected callback reserves the next turn instead of
+deadlocking. Save/rename hook behavior while disabled is unchanged.
+
+Correction verification:
+
+- Focused production-hook bridge tests: 31/31 tests, 158 assertions.
+- Gap-demonstration run before correction: 31 tests, 158 assertions, 21 expected
+  failures (all eight new overlap tests).
+- Accepted pure core/planner/executor/comparison/response/identity regressions:
+  75/75.
+- Full ClojureScript test-build compilation succeeded; no new bridge warning.
+- Production browser app compilation: 1,381 files, 148 compiled, zero warnings.
+- Changed-file ClojureScript lint (`og_sync_bridge.cljs`,
+  `og_sync_bridge_test.cljs`): zero warnings.
+
+All overlap fixtures used deferred thenables, synthetic in-memory storage and
+durable fake-store deserialization checks in addition to in-memory state and
+returned results. The coordination boundary serializes only this process's
+in-memory runtime state and synthetic persistence ports; it is neither a
+cross-process lock nor crash durability, and no such claim is made. The bridge
+remains disabled in every package. No graph, sidecar, helper, application,
+profile, account or network integration was accessed or enabled.

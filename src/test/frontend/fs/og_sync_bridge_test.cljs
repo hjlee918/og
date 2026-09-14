@@ -87,6 +87,11 @@
    :graph-binding {:root-id "root-1" :graph-id "graph-a"}
    :causes []})
 
+(defn- incoming-cause
+  [cause-id operation-id path]
+  {:cause-id cause-id :operation-id operation-id :graph-id "graph-a"
+   :kind :update :path path :content-hash (str "hash-" cause-id)})
+
 (defn- deferred
   []
   (let [resolve! (atom nil)
@@ -647,3 +652,311 @@
       (is (= :invalid-progress (:code unknown-result)))
       (is (= :tampered-active (:code tampered-result)))
       (is (= :coordination-blocked (:code after-failure))))))
+
+(deftest-async concurrent-incompatible-starts-serialize-active-ownership
+  (let [stored (atom nil)
+        save-count (atom 0)
+        {binding-promise :promise resolve-binding! :resolve!} (deferred)
+        runtime (test-runtime {:stored stored
+                               :validate-binding! (fn [_] binding-promise)
+                               :save-active! (fn [serialized]
+                                               (swap! save-count inc)
+                                               (reset! stored serialized))})
+        first-start (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+        second-start (binding [bridge/*test-runtime* runtime]
+                       (bridge/start-active!
+                        (assoc (active-inputs) :target-generation "generation-3")))]
+    (is (nil? @stored))
+    (resolve-binding! true)
+    (p/let [first-result first-start
+            second-result second-start]
+      (is (= :active (:status first-result)))
+      (is (= :incompatible-active (:code second-result)))
+      (is (= (get-in first-result [:envelope :transaction-id])
+             (get-in @(:state runtime) [:active :transaction-id])))
+      (is (= (get-in first-result [:envelope :transaction-id])
+             (:transaction-id (bridge/deserialize-active @stored))))
+      (is (= 1 @save-count)))))
+
+(deftest-async exact-duplicate-starts-share-one-active-record
+  (let [stored (atom nil)
+        save-count (atom 0)
+        {binding-promise :promise resolve-binding! :resolve!} (deferred)
+        runtime (test-runtime {:stored stored
+                               :validate-binding! (fn [_] binding-promise)
+                               :save-active! (fn [serialized]
+                                               (swap! save-count inc)
+                                               (reset! stored serialized))})
+        first-start (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+        second-start (binding [bridge/*test-runtime* runtime]
+                       (bridge/start-active! (active-inputs)))]
+    (resolve-binding! true)
+    (p/let [first-result first-start
+            second-result second-start]
+      (is (= :active (:status first-result)))
+      (is (= :already-active (:status second-result)))
+      (is (= (get-in first-result [:envelope :transaction-id])
+             (get-in second-result [:envelope :transaction-id])))
+      (is (= 1 @save-count)))))
+
+(deftest-async reversed-reconciliation-completions-preserve-every-progress-entry
+  (let [cause-a (incoming-cause "rev-a" "op-a" "pages/rev-a.md")
+        cause-b (incoming-cause "rev-b" "op-b" "pages/rev-b.md")
+        completes {"pages/rev-a.md" {:graph-id "graph-a" :new-path "pages/rev-a.md"
+                                    :new-present true :new-content-hash "hash-rev-a"}
+                   "pages/rev-b.md" {:graph-id "graph-a" :new-path "pages/rev-b.md"
+                                     :new-present true :new-content-hash "hash-rev-b"}}
+        reconcile-handles (atom {})
+        receipt-handles (atom {})
+        deferred-for (fn [store cause-id]
+                       (let [{:keys [promise resolve!]} (deferred)]
+                         (swap! store assoc cause-id {:promise promise :resolve! resolve!})
+                         promise))
+        runtime (test-runtime
+                 {:complete-state! (fn [observation] (get completes (:path observation)))
+                  :reconcile! (fn [cause & _] (deferred-for reconcile-handles (:cause-id cause)))
+                  :record-reconciliation-progress!
+                  (fn [_active cause _result]
+                    (deferred-for receipt-handles (:cause-id cause)))})]
+    (p/let [_started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active!
+                       (-> (active-inputs)
+                           (assoc :operation-ids ["op-a" "op-b"])
+                           (assoc :causes [cause-a cause-b]))))]
+      (let [observation-a (binding [bridge/*test-runtime* runtime]
+                            (bridge/observe-watcher! "change" "/synthetic"
+                                                     "pages/rev-a.md" "incoming" {} false))
+            observation-b (binding [bridge/*test-runtime* runtime]
+                            (bridge/observe-watcher! "change" "/synthetic"
+                                                     "pages/rev-b.md" "incoming" {} false))]
+        (p/let [_ (is (= :reconciliation-pending (:status observation-a)))
+                _ (is (= :reconciliation-pending (:status observation-b)))
+                ;; The distinct reconciliations complete in reversed order.
+                _ ((:resolve! (get @reconcile-handles "rev-b")) :ok)
+                _ (p/resolved nil)
+                _ ((:resolve! (get @reconcile-handles "rev-a")) :ok)
+                _ (p/resolved nil)
+                ;; Both receipts settle after both completions captured the
+                ;; shared ACTIVE record.
+                _ (p/let [a (get @receipt-handles "rev-a")
+                          b (get @receipt-handles "rev-b")]
+                    ((:resolve! a) {:ledger :a})
+                    ((:resolve! b) {:ledger :b}))
+                settled-a (:settled observation-a)
+                settled-b (:settled observation-b)]
+          (is (= :reconciled (:status settled-a)))
+          (is (= :reconciled (:status settled-b)))
+          (is (= #{"rev-a" "rev-b"}
+                 (set (keys (get-in @(:state runtime) [:active :progress :reconciled])))))
+          (is (= :active (get-in @(:state runtime) [:active :phase])))
+          (let [recovered (bridge/deserialize-active @(:stored runtime))]
+            (is (= #{"rev-a" "rev-b"}
+                   (set (keys (get-in recovered [:progress :reconciled])))))
+            (is (= :active (:phase recovered)))))))))
+
+(deftest-async reconciliation-overlapping-files-applied-progress-preserves-both
+  (let [cause-a (incoming-cause "overlap-a" "op-1" "pages/overlap.md")
+        complete {:graph-id "graph-a" :new-path "pages/overlap.md"
+                  :new-present true :new-content-hash "hash-overlap-a"}
+        {reconcile-promise :promise resolve-reconcile! :resolve!} (deferred)
+        {receipt-promise :promise resolve-receipt! :resolve!} (deferred)
+        runtime (test-runtime {:complete-state! (constantly complete)
+                               :reconcile! (fn [& _] reconcile-promise)
+                               :record-reconciliation-progress! (fn [& _] receipt-promise)})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active!
+                       (assoc (active-inputs) :causes [cause-a])))
+            transaction-id (get-in started [:envelope :transaction-id])
+            observation (binding [bridge/*test-runtime* runtime]
+                          (bridge/observe-watcher! "change" "/synthetic"
+                                                   "pages/overlap.md" "incoming" {} false))
+            _ (is (= :reconciliation-pending (:status observation)))
+            _ (resolve-reconcile! :ok)
+            ;; One microtask hop lets the reconciliation capture its ACTIVE
+            ;; snapshot before files-applied progress is recorded.
+            _ (p/resolved nil)
+            marked (binding [bridge/*test-runtime* runtime]
+                     (bridge/mark-files-applied! transaction-id))
+            _ (is (= :files-applied (:status marked)))
+            _ (resolve-receipt! {:ledger :overlap})
+            settled (:settled observation)]
+      (is (= :reconciled (:status settled)))
+      (is (= :files-applied (get-in @(:state runtime) [:active :phase])))
+      (is (some? (get-in @(:state runtime) [:active :progress :files-applied])))
+      (is (= #{"overlap-a"} (set (keys (get-in @(:state runtime)
+                                               [:active :progress :reconciled])))))
+      (let [recovered (bridge/deserialize-active @(:stored runtime))]
+        (is (= :files-applied (:phase recovered)))
+        (is (some? (get-in recovered [:progress :files-applied])))
+        (is (= #{"overlap-a"} (set (keys (get-in recovered [:progress :reconciled])))))))))
+
+(deftest-async recovery-before-an-overlapping-start-keeps-the-recovered-active
+  (let [stored (atom nil)
+        seed (test-runtime {:stored stored})
+        {binding-promise :promise resolve-binding! :resolve!} (deferred)
+        binding-calls (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :validate-binding!
+                  (fn [binding]
+                    (if (= 1 (swap! binding-calls inc))
+                      binding-promise
+                      (= {:root-id "root-1" :graph-id "graph-a"} binding)))})]
+    (p/let [_ (binding [bridge/*test-runtime* seed]
+                (bridge/start-active! (active-inputs)))]
+      (let [recovery (binding [bridge/*test-runtime* runtime] (bridge/recover-active!))
+            overlapping (binding [bridge/*test-runtime* runtime]
+                          (bridge/start-active!
+                           (assoc (active-inputs) :target-generation "generation-3")))]
+        (is (nil? (:active @(:state runtime))))
+        (resolve-binding! true)
+        (p/let [recovery-result recovery
+                start-result overlapping]
+          (is (= :recovery-pending (:status recovery-result)))
+          (is (= :incompatible-active (:code start-result)))
+          (is (= (get-in recovery-result [:envelope :transaction-id])
+                 (get-in @(:state runtime) [:active :transaction-id])))
+          (is (= (get-in recovery-result [:envelope :transaction-id])
+                 (:transaction-id (bridge/deserialize-active @stored)))))))))
+
+(deftest-async start-before-an-overlapping-recovery-recovers-the-persisted-record
+  (let [stored (atom nil)
+        seed (test-runtime {:stored stored})
+        {binding-promise :promise resolve-binding! :resolve!} (deferred)
+        binding-calls (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :validate-binding!
+                  (fn [binding]
+                    (if (= 1 (swap! binding-calls inc))
+                      binding-promise
+                      (= {:root-id "root-1" :graph-id "graph-a"} binding)))})]
+    (p/let [_ (binding [bridge/*test-runtime* seed]
+                (bridge/start-active! (active-inputs)))]
+      (let [overlapping (binding [bridge/*test-runtime* runtime]
+                          (bridge/start-active!
+                           (assoc (active-inputs) :target-generation "generation-3")))
+            recovery (binding [bridge/*test-runtime* runtime] (bridge/recover-active!))]
+        (resolve-binding! true)
+        (p/let [start-result overlapping
+                recovery-result recovery]
+          (is (= :active (:status start-result)))
+          (is (= :recovery-pending (:status recovery-result)))
+          (is (= (get-in start-result [:envelope :transaction-id])
+                 (get-in recovery-result [:envelope :transaction-id])))
+          (is (= (get-in start-result [:envelope :transaction-id])
+                 (get-in @(:state runtime) [:active :transaction-id])))
+          (is (= (get-in start-result [:envelope :transaction-id])
+                 (:transaction-id (bridge/deserialize-active @stored)))))))))
+
+(deftest-async delayed-finish-cannot-clear-a-newer-active-lifecycle
+  (let [stored (atom nil)
+        replacement (test-runtime {:stored stored})
+        {recover-binding-promise :promise resolve-recover-binding! :resolve!} (deferred)
+        {clear-promise :promise resolve-clear! :resolve!} (deferred)
+        clear-calls (atom 0)
+        deferred-phase? (atom false)
+        binding-calls (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :clear-active! (fn [_]
+                                   (swap! clear-calls inc)
+                                   (reset! stored nil)
+                                   clear-promise)
+                  :validate-binding!
+                  (fn [binding]
+                    (if (and @deferred-phase? (= 1 (swap! binding-calls inc)))
+                      recover-binding-promise
+                      (= {:root-id "root-1" :graph-id "graph-a"} binding)))})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/mark-files-applied! transaction-id))
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/accept-identity!
+                 transaction-id
+                 {:files-match true :identity-bytes-match true
+                  :checkpoint-match true :binding-match true}))
+            ;; A second lifecycle replaces the persisted record.
+            replacement-started (binding [bridge/*test-runtime* replacement]
+                                 (bridge/start-active!
+                                  (assoc (active-inputs)
+                                         :target-generation "generation-3")))
+            replacement-id (get-in replacement-started [:envelope :transaction-id])]
+      ;; Recovery of that record and a delayed finish of the completed
+      ;; lifecycle are both reserved before either settles.
+      (reset! deferred-phase? true)
+      (let [recovery (binding [bridge/*test-runtime* runtime] (bridge/recover-active!))
+            delayed-finish (binding [bridge/*test-runtime* runtime]
+                             (bridge/finish-active! transaction-id))]
+        (resolve-recover-binding! true)
+        (resolve-clear! :cleared)
+        (p/let [recovery-result recovery
+                finish-result delayed-finish]
+          (is (= :recovery-pending (:status recovery-result)))
+          (is (= :acceptance-pending (:code finish-result)))
+          (is (= replacement-id (get-in @(:state runtime) [:active :transaction-id])))
+          (let [recovered (when @stored (bridge/deserialize-active @stored))]
+            (is (= replacement-id (:transaction-id recovered))))
+          (is (zero? @clear-calls)))))))
+
+(deftest-async files-applied-persistence-rejection-preserves-active-and-evidence
+  (let [stored (atom nil)
+        save-count (atom 0)
+        rejected-save (p/rejected (js/Error. "files-applied store failed"))
+        _handled (.catch rejected-save (fn [_] nil))
+        runtime (test-runtime
+                 {:stored stored
+                  :save-active! (fn [serialized]
+                                  (case (swap! save-count inc)
+                                    1 (reset! stored serialized)
+                                    2 rejected-save
+                                    (reset! stored serialized)))})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            refused (binding [bridge/*test-runtime* runtime]
+                      (bridge/mark-files-applied! transaction-id))]
+      (is (= :progress-recording-failed (:code refused)))
+      (is (= :active (get-in @(:state runtime) [:active :phase])))
+      (is (nil? (get-in @(:state runtime) [:active :progress :files-applied])))
+      (is (seq @(:files-evidence runtime)))
+      (p/let [retried (binding [bridge/*test-runtime* runtime]
+                        (bridge/mark-files-applied! transaction-id))]
+        (is (= :files-applied (:status retried)))
+        (is (= :files-applied (get-in @(:state runtime) [:active :phase])))
+        (is (some? (get-in @(:state runtime) [:active :progress :files-applied])))
+        (is (= :files-applied (:phase (bridge/deserialize-active @stored))))))))
+
+(deftest-async reentrant-acceptance-from-a-coordination-callback-settles-without-deadlock
+  (let [stored (atom nil)
+        reentered (atom nil)
+        base (test-runtime {:stored stored})
+        ;; The port is created after the runtime exists, so the closure holds a
+        ;; bound runtime value rather than capturing its own let binding.
+        runtime (assoc base
+                       :record-files-applied!
+                       (fn [active]
+                         ;; Reenter the bridge synchronously from inside the
+                         ;; port that mark-files-applied! awaits.
+                         (reset! reentered
+                                 (binding [bridge/*test-runtime* base]
+                                   (bridge/accept-identity!
+                                    (:transaction-id active)
+                                    {:files-match true :identity-bytes-match true
+                                     :checkpoint-match true :binding-match true})))
+                         (let [receipt {:transaction-id (:transaction-id active)}]
+                           (swap! (:files-evidence base) conj receipt)
+                           receipt)))]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            marked (binding [bridge/*test-runtime* runtime]
+                     (bridge/mark-files-applied! transaction-id))
+            reentered-result @reentered]
+      (is (= :files-applied (:status marked)))
+      (is (= :identity-accepted (:status reentered-result)))
+      (is (= :identity-accepted (get-in @(:state runtime) [:active :phase]))))))

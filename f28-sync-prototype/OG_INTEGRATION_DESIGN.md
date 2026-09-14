@@ -243,11 +243,23 @@ The original checkpoint passed 15 tests with 60 assertions, but those tests used
 synchronous reconciliation, omitted pending-rename conflict coverage and did
 not challenge forged restart progress. The lifecycle correction first produced
 15 expected failures in 20 tests/89 assertions against the old behavior, then
-passed 22 tests/105 assertions after the fixes. The accepted pure
+passed 22 tests/105 assertions after the fixes. The overlap coordination
+correction then added deferred-thenable regressions for concurrent
+incompatible starts, exact duplicate starts, reversed reconciliation
+completions, reconciliation overlapping files-applied progress, recovery
+racing a start, stale completion against a newer lifecycle, persistence
+rejection and reentrant callbacks; those produced 21 expected failures in 31
+tests/158 assertions against the prior behavior, then passed 31/31 after every
+ACTIVE publication was moved inside a serialized process-local coordination
+turn with ownership reservation before asynchronous work and exact-transaction
+revalidation before each persisted write and in-memory installation. The
+accepted pure
 core/planner/executor/comparison/response/identity regressions passed 75/75. The
 production browser target compiled with zero warnings. It was
 not launched or packaged. No native or filesystem-backed working-tree test was
-run because this batch authorized no graph-data access at all.
+run because this batch authorized no graph-data access at all. The coordination
+turn queue serializes only this process's in-memory runtime state and synthetic
+persistence ports; it is neither a cross-process lock nor crash durability.
 
 ## Limits and approval decisions
 

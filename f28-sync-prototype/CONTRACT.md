@@ -397,6 +397,25 @@ recovery remains. Identity acceptance requires complete injected
 file/identity/checkpoint/binding evidence; a snapshot checkpoint alone cannot
 clear ACTIVE.
 
+Every ACTIVE publication is serialized through one process-local coordination
+boundary. Each runtime owns a first-in/first-out chain of coordination turns
+reserved in call order: `start-active!`, reconciliation publication,
+`recover-active!`, `mark-files-applied!`, `accept-identity!` and `finish-active!`
+each claim their turn before any asynchronous port is invoked, so overlapping
+starts are refused deterministically in call order, recovery cannot race a
+start, and a rejected turn never stalls later turns. A turn that reenters the
+bridge from an injected callback reserves the next turn rather than deadlocking.
+Inside a turn each operation revalidates that the exact owning transaction still
+holds the active slot before its persisted write and in-memory installation.
+Reconciliation reserves that owning transaction before its asynchronous
+reconciliation call and merges one transaction-bound entry into the fresh ACTIVE
+record when its progress receipt settles, so out-of-order completions preserve
+every progress entry and never regress a later phase; files-applied publication
+is idempotent and phase-preserving; a stale finish cannot clear a newer
+lifecycle. This boundary coordinates only this process's in-memory runtime state
+and synthetic persistence ports. It is neither a cross-process lock nor crash
+durability, and no such claim is made.
+
 This contract implements only tested infrastructure. It creates no sidecar,
 chooses no copied-graph policy, enrolls no graph, invokes no native helper,
 persists no real metadata, launches no application and performs no network
