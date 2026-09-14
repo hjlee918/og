@@ -17,25 +17,58 @@
   ([overrides]
    (let [events (atom [])
          stored (or (:stored overrides) (atom nil))
+         progress-evidence (or (:progress-evidence overrides) (atom #{}))
+         files-evidence (or (:files-evidence overrides) (atom #{}))
+         acceptance-evidence (or (:acceptance-evidence overrides) (atom #{}))
          counter (atom 0)
          runtime {:state (atom {:causes {} :writes {}})
                   :events events
                   :stored stored
+                  :progress-evidence progress-evidence
+                  :files-evidence files-evidence
+                  :acceptance-evidence acceptance-evidence
                   :adapter! #(swap! events conj %)
                   :next-id! (fn [kind] (str (name kind) "-" (swap! counter inc)))
                   :rename-content-hash! (fn [_graph _path] "hash:rename")
                   :complete-state! (constantly nil)
                   :reconcile! (fn [& _] :reconciled)
+                  :record-reconciliation-progress!
+                  (fn [active cause _result]
+                    (let [receipt {:transaction-id (:transaction-id active)
+                                   :cause-id (:cause-id cause)
+                                   :operation-id (:operation-id cause)}]
+                      (swap! progress-evidence conj receipt)
+                      receipt))
+                  :validate-reconciliation-progress!
+                  (fn [_active _cause entry]
+                    (contains? @progress-evidence (:receipt entry)))
                   :save-active! #(reset! stored %)
                   :load-active! #(deref stored)
                   :clear-active! #(reset! stored nil)
+                  :record-files-applied!
+                  (fn [active]
+                    (let [receipt {:transaction-id (:transaction-id active)}]
+                      (swap! files-evidence conj receipt)
+                      receipt))
+                  :validate-files-applied-progress!
+                  (fn [_active entry]
+                    (contains? @files-evidence (:receipt entry)))
                   :revalidate-plan! :authoritative-plan
                   :validate-binding! #(= {:root-id "root-1" :graph-id "graph-a"} %)
                   :validate-acceptance!
                   (fn [_active evidence]
                     (= #{:files-match :identity-bytes-match :checkpoint-match :binding-match}
-                       (set (keep (fn [[key value]] (when value key)) evidence))))}]
-     (merge runtime (dissoc overrides :stored)))))
+                       (set (keep (fn [[key value]] (when value key)) evidence))))
+                  :record-identity-acceptance!
+                  (fn [active _evidence]
+                    (let [receipt {:transaction-id (:transaction-id active)}]
+                      (swap! acceptance-evidence conj receipt)
+                      receipt))
+                  :validate-identity-acceptance-progress!
+                  (fn [_active entry]
+                    (contains? @acceptance-evidence (:receipt entry)))}]
+     (merge runtime (dissoc overrides :stored :progress-evidence :files-evidence
+                                    :acceptance-evidence)))))
 
 (defn- active-inputs
   []
@@ -53,6 +86,15 @@
    :working-journal-identity {:journal-id "journal-1"}
    :graph-binding {:root-id "root-1" :graph-id "graph-a"}
    :causes []})
+
+(defn- deferred
+  []
+  (let [resolve! (atom nil)
+        reject! (atom nil)
+        promise (js/Promise. (fn [resolve reject]
+                               (reset! resolve! resolve)
+                               (reset! reject! reject)))]
+    {:promise promise :resolve! @resolve! :reject! @reject!}))
 
 (deftest disabled-bridge-allocates-and-calls-nothing
   (is (false? (bridge/enabled?)))
@@ -247,7 +289,7 @@
           (bridge/save-failed! failed (js/Error. "rejected"))
           (is (= :failed (get-in @(:state runtime) [:writes (:cause-id failed) :status]))))))))
 
-(deftest watcher-matching-local-incoming-ambiguous-and-different-edits
+(deftest-async watcher-matching-local-incoming-ambiguous-and-different-edits
   (let [complete (atom nil)
         reconcile-count (atom 0)
         runtime (test-runtime {:complete-state! (fn [_] @complete)
@@ -271,24 +313,33 @@
         :kind :update :path "pages/in.md" :content-hash "incoming-hash"})
       (reset! complete {:graph-id "graph-a" :new-path "pages/in.md" :new-present true
                         :new-content-hash "incoming-hash"})
-      (is (= :reconciled (:status (bridge/observe-watcher! "change" "/synthetic"
-                                                           "pages/in.md" "incoming" {} false))))
-      (is (= :echo (:status (bridge/observe-watcher! "change" "/synthetic"
-                                                     "pages/in.md" "incoming" {} false))))
-      (is (= 1 @reconcile-count))
-      (bridge/register-incoming-cause!
-       {:cause-id "incoming-b" :operation-id "op-b" :graph-id "graph-a"
-        :kind :update :path "pages/ambiguous.md" :content-hash "same"})
-      (bridge/register-incoming-cause!
-       {:cause-id "incoming-c" :operation-id "op-c" :graph-id "graph-a"
-        :kind :update :path "pages/ambiguous.md" :content-hash "same"})
-      (reset! complete {:graph-id "graph-a" :new-path "pages/ambiguous.md"
-                        :new-present true :new-content-hash "same"})
-      (is (= {:status :ordinary :match-count 2}
-             (bridge/observe-watcher! "change" "/synthetic" "pages/ambiguous.md"
-                                      "same" {} false))))))
+      (let [pending (bridge/observe-watcher! "change" "/synthetic"
+                                             "pages/in.md" "incoming" {} false)]
+        (is (= :reconciliation-pending (:status pending)))
+        (-> (:settled pending)
+            (p/then
+             (fn [settled]
+               (is (= :reconciled (:status settled)))
+               (is (= :echo
+                      (:status (binding [bridge/*test-runtime* runtime]
+                                 (bridge/observe-watcher! "change" "/synthetic"
+                                                          "pages/in.md" "incoming" {} false)))))
+               (is (= 1 @reconcile-count))
+               (binding [bridge/*test-runtime* runtime]
+                 (bridge/register-incoming-cause!
+                  {:cause-id "incoming-b" :operation-id "op-b" :graph-id "graph-a"
+                   :kind :update :path "pages/ambiguous.md" :content-hash "same"})
+                 (bridge/register-incoming-cause!
+                  {:cause-id "incoming-c" :operation-id "op-c" :graph-id "graph-a"
+                   :kind :update :path "pages/ambiguous.md" :content-hash "same"}))
+               (reset! complete {:graph-id "graph-a" :new-path "pages/ambiguous.md"
+                                 :new-present true :new-content-hash "same"})
+               (let [ambiguous (binding [bridge/*test-runtime* runtime]
+                                 (bridge/observe-watcher! "change" "/synthetic"
+                                                          "pages/ambiguous.md" "same" {} false))]
+                 (is (= {:status :ordinary :match-count 2} ambiguous))))))))))
 
-(deftest reconciliation-failure-is-retryable-before-echo-deduplication
+(deftest-async reconciliation-failure-is-retryable-before-echo-deduplication
   (let [attempts (atom 0)
         complete {:graph-id "graph-a" :old-path "pages/a.md" :old-present false
                   :new-path "pages/b.md" :new-present true :new-content-hash "renamed"}
@@ -302,82 +353,297 @@
        {:cause-id "incoming-rename" :operation-id "op-rename" :graph-id "graph-a"
         :kind :rename :old-path "pages/a.md" :new-path "pages/b.md"
         :content-hash "renamed"})
-      (is (= :reconciliation-failed
-             (:status (bridge/observe-watcher! "add" "/synthetic" "pages/b.md"
-                                               "renamed" {} false))))
-      (is (= :reconcile-pending
-             (get-in @(:state runtime) [:causes "incoming-rename" :status])))
-      (is (= :reconciled
-             (:status (bridge/observe-watcher! "add" "/synthetic" "pages/b.md"
-                                               "renamed" {} false))))
-      (is (= :echo
-             (:status (bridge/observe-watcher! "add" "/synthetic" "pages/b.md"
-                                               "renamed" {} false))))
-      (is (= 2 @attempts)))))
+      (let [first-result (bridge/observe-watcher! "add" "/synthetic" "pages/b.md"
+                                                  "renamed" {} false)]
+        (is (= :reconciliation-pending (:status first-result)))
+        (p/let [failure (:settled first-result)
+                _ (is (= :reconciliation-failed (:status failure)))
+                _ (is (= :reconcile-pending
+                         (get-in @(:state runtime) [:causes "incoming-rename" :status])))
+                retry (binding [bridge/*test-runtime* runtime]
+                        (bridge/observe-watcher! "add" "/synthetic" "pages/b.md"
+                                                 "renamed" {} false))
+                success (:settled retry)]
+          (is (= :reconciled (:status success)))
+          (is (= :echo
+                 (:status (binding [bridge/*test-runtime* runtime]
+                            (bridge/observe-watcher! "add" "/synthetic"
+                                                     "pages/b.md" "renamed" {} false)))))
+          (is (= 2 @attempts)))))))
 
-(deftest serialized-active-restart-revalidates-and-blocks-incompatible-batches
-  (let [runtime (test-runtime)
-        started (binding [bridge/*test-runtime* runtime]
-                  (bridge/start-active! (active-inputs)))
-        transaction-id (get-in started [:envelope :transaction-id])
-        restarted (test-runtime {:stored (:stored runtime)})]
-    (is (= :active (:status started)))
-    (binding [bridge/*test-runtime* restarted]
-      (is (= :recovery-pending (:status (bridge/recover-active!))))
-      (is (= :incompatible-active
-             (:code (bridge/start-active! (assoc (active-inputs)
-                                                 :target-generation "generation-3")))))
-      (is (= :files-applied (:status (bridge/mark-files-applied! transaction-id))))
-      (is (= :identity-evidence-incomplete
-             (:code (bridge/accept-identity! transaction-id {:checkpoint-match true}))))
-      (is (= :identity-accepted
-             (:status (bridge/accept-identity!
-                       transaction-id
-                       {:files-match true :identity-bytes-match true
-                        :checkpoint-match true :binding-match true}))))
-      (is (= :complete (:status (bridge/finish-active! transaction-id))))
+(deftest-async serialized-active-restart-revalidates-and-blocks-incompatible-batches
+  (let [runtime (test-runtime)]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            restarted (test-runtime {:stored (:stored runtime)})
+            recovery (binding [bridge/*test-runtime* restarted]
+                       (bridge/recover-active!))
+            incompatible (binding [bridge/*test-runtime* restarted]
+                           (bridge/start-active! (assoc (active-inputs)
+                                                       :target-generation "generation-3")))
+            files-applied (binding [bridge/*test-runtime* restarted]
+                            (bridge/mark-files-applied! transaction-id))
+            incomplete (binding [bridge/*test-runtime* restarted]
+                         (bridge/accept-identity! transaction-id {:checkpoint-match true}))
+            accepted (binding [bridge/*test-runtime* restarted]
+                       (bridge/accept-identity!
+                        transaction-id
+                        {:files-match true :identity-bytes-match true
+                         :checkpoint-match true :binding-match true}))
+            finished (binding [bridge/*test-runtime* restarted]
+                       (bridge/finish-active! transaction-id))]
+      (is (= :active (:status started)))
+      (is (= :recovery-pending (:status recovery)))
+      (is (= :incompatible-active (:code incompatible)))
+      (is (= :files-applied (:status files-applied)))
+      (is (= :identity-evidence-incomplete (:code incomplete)))
+      (is (= :identity-accepted (:status accepted)))
+      (is (= :complete (:status finished)))
       (is (nil? @(:stored restarted))))))
 
-(deftest persisted-reconciliation-result-survives-simulated-restart
+(deftest-async persisted-reconciliation-result-survives-simulated-restart
   (let [complete {:graph-id "graph-a" :new-path "pages/in.md" :new-present true
                   :new-content-hash "incoming-hash"}
         cause {:cause-id "incoming-active" :operation-id "op-1" :graph-id "graph-a"
                :kind :update :path "pages/in.md" :content-hash "incoming-hash"}
         attempts (atom 0)
         runtime (test-runtime {:complete-state! (constantly complete)
-                               :reconcile! (fn [& _] (swap! attempts inc) :ok)})
-        started (binding [bridge/*test-runtime* runtime]
-                  (bridge/start-active! (assoc (active-inputs) :causes [cause])))]
-    (binding [bridge/*test-runtime* runtime]
+                               :reconcile! (fn [& _] (swap! attempts inc) :ok)})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (assoc (active-inputs) :causes [cause])))
+            observation (binding [bridge/*test-runtime* runtime]
+                          (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
+                                                   "incoming" {} false))
+            settled (:settled observation)
+            restart-attempts (atom 0)
+            restarted (test-runtime {:stored (:stored runtime)
+                                     :progress-evidence (:progress-evidence runtime)
+                                     :complete-state! (constantly complete)
+                                     :reconcile! (fn [& _] (swap! restart-attempts inc) :ok)})
+            recovery (binding [bridge/*test-runtime* restarted]
+                       (bridge/recover-active!))]
+      (is (= :active (:status started)))
+      (is (= :reconciled (:status settled)))
+      (is (= :recovery-pending (:status recovery)))
+      (is (= :echo
+             (:status (binding [bridge/*test-runtime* restarted]
+                        (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
+                                                 "incoming" {} false)))))
       (is (= :reconciled
-             (:status (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
-                                               "incoming" {} false)))))
-    (let [restart-attempts (atom 0)
-          restarted (test-runtime {:stored (:stored runtime)
-                                   :complete-state! (constantly complete)
-                                   :reconcile! (fn [& _] (swap! restart-attempts inc) :ok)})]
-      (binding [bridge/*test-runtime* restarted]
-        (is (= :recovery-pending (:status (bridge/recover-active!))))
-        (is (= :echo
-               (:status (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
-                                                 "incoming" {} false))))
-        (is (= :reconciled
-               (get-in @(:state restarted) [:causes "incoming-active" :status]))))
+             (get-in @(:state restarted) [:causes "incoming-active" :status])))
       (is (= 1 @attempts))
       (is (zero? @restart-attempts))
       (is (= (get-in started [:envelope :transaction-id])
              (get-in @(:state restarted) [:active :transaction-id]))))))
 
-(deftest restart-refuses-tampered-inputs-and-nonauthoritative-plan
-  (let [runtime (test-runtime)
-        _ (binding [bridge/*test-runtime* runtime]
-            (bridge/start-active! (active-inputs)))
-        parsed (bridge/deserialize-active @(:stored runtime))
-        tampered (assoc-in parsed [:inputs :target :files 0 :content] "tampered")
-        tampered-runtime (test-runtime {:stored (atom (bridge/serialize-active tampered))})]
-    (binding [bridge/*test-runtime* tampered-runtime]
-      (is (= :tampered-active (:code (bridge/recover-active!)))))
-    (let [wrong-plan-runtime (test-runtime {:stored (:stored runtime)
-                                            :revalidate-plan! (constantly {:plan-id "other"})})]
-      (binding [bridge/*test-runtime* wrong-plan-runtime]
-        (is (= :plan-mismatch (:code (bridge/recover-active!))))))))
+(deftest-async restart-refuses-tampered-inputs-and-nonauthoritative-plan
+  (let [runtime (test-runtime)]
+    (p/let [_ (binding [bridge/*test-runtime* runtime]
+                (bridge/start-active! (active-inputs)))
+            parsed (bridge/deserialize-active @(:stored runtime))
+            tampered (assoc-in parsed [:inputs :target :files 0 :content] "tampered")
+            tampered-runtime (test-runtime {:stored (atom (bridge/serialize-active tampered))})
+            tampered-result (binding [bridge/*test-runtime* tampered-runtime]
+                              (bridge/recover-active!))
+            wrong-plan-runtime (test-runtime {:stored (:stored runtime)
+                                              :revalidate-plan! (constantly {:plan-id "other"})})
+            wrong-plan-result (binding [bridge/*test-runtime* wrong-plan-runtime]
+                                (bridge/recover-active!))]
+      (is (= :tampered-active (:code tampered-result)))
+      (is (= :plan-mismatch (:code wrong-plan-result))))))
+
+(deftest-async pending-reconciliation-settlement-controls-echo-and-deduplicates-in-flight-work
+  (let [{:keys [promise resolve!]} (deferred)
+        attempts (atom 0)
+        complete {:graph-id "graph-a" :new-path "pages/in.md" :new-present true
+                  :new-content-hash "incoming-hash"}
+        runtime (test-runtime {:complete-state! (constantly complete)
+                               :reconcile! (fn [& _] (swap! attempts inc) promise)})]
+    (binding [bridge/*test-runtime* runtime]
+      (bridge/register-incoming-cause!
+       {:cause-id "async-incoming" :operation-id "op-async" :graph-id "graph-a"
+        :kind :update :path "pages/in.md" :content-hash "incoming-hash"})
+      (let [first-result (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
+                                                  "incoming" {} false)
+            duplicate-result (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
+                                                      "incoming" {} false)]
+        (is (= :reconciliation-pending (:status first-result)))
+        (is (= :reconciliation-pending (:status duplicate-result)))
+        (is (= 1 @attempts))
+        (is (= :reconciling
+               (get-in @(:state runtime) [:causes "async-incoming" :status])))
+        (resolve! :ok)
+        (-> (or (:settled first-result) promise)
+            (p/then (fn [_]
+                      (is (= :reconciled
+                             (get-in @(:state runtime) [:causes "async-incoming" :status])))
+                      (is (= :echo
+                             (:status (binding [bridge/*test-runtime* runtime]
+                                        (bridge/observe-watcher! "change" "/synthetic"
+                                                                 "pages/in.md" "incoming" {} false)))))
+                      (is (= 1 @attempts)))))))))
+
+(deftest-async rejected-reconciliation-promise-preserves-retryable-evidence
+  (let [{:keys [promise reject!]} (deferred)
+        _handled (.catch promise (fn [_] nil))
+        complete {:graph-id "graph-a" :new-path "pages/in.md" :new-present true
+                  :new-content-hash "incoming-hash"}
+        runtime (test-runtime {:complete-state! (constantly complete)
+                               :reconcile! (fn [& _] promise)})]
+    (binding [bridge/*test-runtime* runtime]
+      (bridge/register-incoming-cause!
+       {:cause-id "rejected-incoming" :operation-id "op-rejected" :graph-id "graph-a"
+        :kind :update :path "pages/in.md" :content-hash "incoming-hash"})
+      (let [result (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
+                                            "incoming" {} false)]
+        (is (= :reconciliation-pending (:status result)))
+        (reject! (js/Error. "async reconciliation rejected"))
+        (-> (or (:settled result) (.catch promise identity))
+            (p/then (fn [_]
+                      (is (= :reconcile-pending
+                             (get-in @(:state runtime) [:causes "rejected-incoming" :status])))
+                      (is (not= :echo
+                                (:status (binding [bridge/*test-runtime* runtime]
+                                           (bridge/observe-watcher! "change" "/synthetic"
+                                                                    "pages/in.md" "incoming" {} false))))))))))))
+
+(deftest pending-rename-blocks-both-paths-but-not-unrelated-work
+  (doseq [[blocked-path close!] [["pages/a.md" bridge/rename-completed!]
+                                 ["pages/b.md" bridge/rename-failed!]]]
+    (let [runtime (test-runtime)]
+      (binding [bridge/*test-runtime* runtime]
+        (let [rename (bridge/rename-intent! "graph-a" "pages/a.md" "pages/b.md")]
+          (is (= :unfinished-local-write
+                 (:code (bridge/register-incoming-cause!
+                         {:cause-id (str "blocked-" blocked-path) :graph-id "graph-a"
+                          :kind :update :path blocked-path :content-hash "incoming"}))))
+          (is (= :pending
+                 (:status (bridge/register-incoming-cause!
+                           {:cause-id (str "unrelated-" blocked-path) :graph-id "graph-a"
+                            :kind :update :path "pages/c.md" :content-hash "incoming"}))))
+          (is (= :pending
+                 (:status (bridge/register-incoming-cause!
+                           {:cause-id (str "other-graph-" blocked-path) :graph-id "graph-b"
+                            :kind :update :path blocked-path :content-hash "incoming"}))))
+          (close! rename :closed)
+          (is (= :pending
+                 (:status (bridge/register-incoming-cause!
+                           {:cause-id (str "after-close-" blocked-path) :graph-id "graph-a"
+                            :kind :update :path blocked-path :content-hash "incoming"})))))))))
+
+(deftest-async progress-recording-failure-does-not-enable-echo-and-can-retry
+  (let [stored (atom nil)
+        save-count (atom 0)
+        rejected-save (p/rejected (js/Error. "progress store failed"))
+        _handled (.catch rejected-save (fn [_] nil))
+        complete {:graph-id "graph-a" :new-path "pages/in.md" :new-present true
+                  :new-content-hash "incoming-hash"}
+        cause {:cause-id "progress-cause" :operation-id "op-1" :graph-id "graph-a"
+               :kind :update :path "pages/in.md" :content-hash "incoming-hash"}
+        runtime (test-runtime {:stored stored
+                               :complete-state! (constantly complete)
+                               :save-active! (fn [serialized]
+                                               (case (swap! save-count inc)
+                                                 1 (reset! stored serialized)
+                                                 2 rejected-save
+                                                 (reset! stored serialized)))})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (assoc (active-inputs) :causes [cause])))
+            first-result (binding [bridge/*test-runtime* runtime]
+                           (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
+                                                    "incoming" {} false))
+            first-settlement (:settled first-result)]
+      (is (= :active (:status started)))
+      (is (= :reconciliation-pending (:status first-result)))
+      (is (= :reconciliation-failed (:status first-settlement)))
+      (is (= :reconcile-pending
+             (get-in @(:state runtime) [:causes "progress-cause" :status])))
+      (let [retry (binding [bridge/*test-runtime* runtime]
+                    (bridge/observe-watcher! "change" "/synthetic" "pages/in.md"
+                                             "incoming" {} false))]
+        (p/let [retry-settlement (:settled retry)]
+          (is (= :reconciled (:status retry-settlement)))
+          (is (= :echo
+                 (:status (binding [bridge/*test-runtime* runtime]
+                            (bridge/observe-watcher! "change" "/synthetic"
+                                                     "pages/in.md" "incoming" {} false))))))))))
+
+(deftest-async asynchronous-active-storage-settles-before-runtime-commit
+  (let [{save-promise :promise resolve-save! :resolve!} (deferred)
+        pending-runtime (test-runtime {:save-active! (fn [_] save-promise)})
+        pending-start (binding [bridge/*test-runtime* pending-runtime]
+                        (bridge/start-active! (active-inputs)))
+        {reject-promise :promise reject-save! :reject!} (deferred)
+        rejected-runtime (test-runtime {:save-active! (fn [_] reject-promise)})
+        rejected-start (binding [bridge/*test-runtime* rejected-runtime]
+                         (bridge/start-active! (active-inputs)))]
+    (is (nil? (:active @(:state pending-runtime))))
+    (is (nil? (:active @(:state rejected-runtime))))
+    (resolve-save! :stored)
+    (reject-save! (js/Error. "synthetic ACTIVE store rejected"))
+    (p/let [started pending-start
+            refused rejected-start]
+      (is (= :active (:status started)))
+      (is (some? (:active @(:state pending-runtime))))
+      (is (= :active-refused (:code refused)))
+      (is (nil? (:active @(:state rejected-runtime)))))))
+
+(deftest synchronous-watcher-port-rejects-thenables
+  (let [runtime (test-runtime {:complete-state! (fn [_] (p/resolved nil))})]
+    (binding [bridge/*test-runtime* runtime]
+      (is (= :ordinary
+             (:status (bridge/observe-watcher! "change" "/synthetic"
+                                                "pages/a.md" "A" {} false))))
+      (is (= :coordination-blocked
+             (:code (bridge/observe-watcher! "change" "/synthetic"
+                                              "pages/a.md" "A" {} false))))
+      (is (= :watcher-complete-state
+             (get-in @(:state runtime) [:blocked :phase]))))))
+
+(deftest-async restart-does-not-trust-phase-or-forged-progress-and-failed-recovery-blocks-new-work
+  (let [cause {:cause-id "restart-cause" :operation-id "op-1" :graph-id "graph-a"
+               :kind :update :path "pages/in.md" :content-hash "incoming-hash"}
+        runtime (test-runtime)]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (assoc (active-inputs) :causes [cause])))
+            base (bridge/deserialize-active @(:stored runtime))
+            forged-phase (assoc base :phase :identity-accepted)
+            forged-runtime (test-runtime {:stored (atom (bridge/serialize-active forged-phase))})
+            forged-recovery (binding [bridge/*test-runtime* forged-runtime]
+                              (bridge/recover-active!))
+            forged-finish (binding [bridge/*test-runtime* forged-runtime]
+                            (bridge/finish-active! (:transaction-id base)))
+            forged-entry {:transaction-id (:transaction-id base)
+                          :cause-id "restart-cause"
+                          :operation-id "op-1"
+                          :receipt {:forged true}}
+            forged-progress (assoc-in base [:progress :reconciled "restart-cause"]
+                                      forged-entry)
+            forged-progress-runtime
+            (test-runtime {:stored (atom (bridge/serialize-active forged-progress))})
+            forged-progress-result
+            (binding [bridge/*test-runtime* forged-progress-runtime]
+              (bridge/recover-active!))
+            unknown-progress (assoc-in base [:progress :reconciled "unknown-cause"] true)
+            unknown-runtime (test-runtime {:stored (atom (bridge/serialize-active unknown-progress))})
+            unknown-result (binding [bridge/*test-runtime* unknown-runtime]
+                             (bridge/recover-active!))
+            tampered (assoc-in base [:inputs :target :files 0 :content] "tampered")
+            blocked-runtime (test-runtime {:stored (atom (bridge/serialize-active tampered))})
+            tampered-result (binding [bridge/*test-runtime* blocked-runtime]
+                              (bridge/recover-active!))
+            after-failure (binding [bridge/*test-runtime* blocked-runtime]
+                            (bridge/start-active! (active-inputs)))]
+      (is (= :active (:status started)))
+      (is (= :recovery-pending (:status forged-recovery)))
+      (is (= :reconcile-pending
+             (get-in @(:state forged-runtime) [:causes "restart-cause" :status])))
+      (is (= :acceptance-pending (:code forged-finish)))
+      (is (= :recovery-pending (:status forged-progress-result)))
+      (is (= :reconcile-pending
+             (get-in @(:state forged-progress-runtime)
+                     [:causes "restart-cause" :status])))
+      (is (= :invalid-progress (:code unknown-result)))
+      (is (= :tampered-active (:code tampered-result)))
+      (is (= :coordination-blocked (:code after-failure))))))

@@ -8,7 +8,8 @@
   (:require [cljs.reader :as reader]
             [clojure.set :as set]
             [goog.crypt :as crypt]
-            [goog.crypt.Sha256]))
+            [goog.crypt.Sha256]
+            [promesa.core :as p]))
 
 (goog-define ENABLE-OG-SYNC-BRIDGE false)
 
@@ -16,7 +17,7 @@
 (defonce ^:private enabled-runtime*
   (when ENABLE-OG-SYNC-BRIDGE (atom nil)))
 
-(def active-schema "frontend.fs.og-sync-bridge.active/1")
+(def active-schema "frontend.fs.og-sync-bridge.active/2")
 
 (def ^:private active-input-keys
   #{:graph-id :replica-id :source-snapshot :issued-preview :target
@@ -82,22 +83,43 @@
          {:phase phase :error (str error)})
   nil)
 
-(defn- invoke-port
+(defn- thenable?
+  [value]
+  (and (some? value) (fn? (.-then value))))
+
+(defn- invoke-sync-port
   [runtime port phase & args]
   (when-not (blocked? runtime)
     (try
       (when-let [f (get runtime port)]
-        (apply f args))
+        (let [result (apply f args)]
+          (when (thenable? result)
+            ;; Attach both handlers before refusing the contract so even a
+            ;; rejected thenable cannot surface as an unhandled rejection.
+            (.then result (fn [_] nil) (fn [_] nil))
+            (throw (ex-info "synchronous bridge port returned a thenable"
+                            {:code :asynchronous-sync-port :port port})))
+          result))
       (catch :default error
         (block-runtime! runtime phase error)))))
 
+(defn- invoke-async-port
+  [runtime port & args]
+  (try
+    (if-let [f (get runtime port)]
+      (p/resolved (apply f args))
+      (p/rejected (ex-info "required asynchronous bridge port is missing"
+                           {:code :missing-port :port port})))
+    (catch :default error
+      (p/rejected error))))
+
 (defn- emit!
   [runtime event]
-  (invoke-port runtime :adapter! (:event event) event))
+  (invoke-sync-port runtime :adapter! (:event event) event))
 
 (defn- next-id!
   [runtime kind]
-  (or (invoke-port runtime :next-id! :allocate-cause-id kind)
+  (or (invoke-sync-port runtime :next-id! :allocate-cause-id kind)
       (when-not (blocked? runtime)
         (str (name kind) "-" (inc (count (:causes @(runtime-state runtime))))))))
 
@@ -154,8 +176,8 @@
     (let [runtime (current-runtime)]
       (when-not (blocked? runtime)
         (when-let [cause-id (next-id! runtime :rename)]
-          (let [content-hash (invoke-port runtime :rename-content-hash!
-                                          :rename-content-hash graph-id old-path)
+          (let [content-hash (invoke-sync-port runtime :rename-content-hash!
+                                               :rename-content-hash graph-id old-path)
                 cause {:runtime runtime :cause-id cause-id :origin :local
                        :kind :rename :graph-id graph-id :old-path old-path
                        :new-path new-path :content-hash content-hash
@@ -190,11 +212,13 @@
   [runtime graph-id paths]
   (let [paths (set paths)]
     (boolean
-     (some (fn [[_ cause]]
+     (some (fn [cause]
              (and (= :pending (:status cause))
+                  (= :local (:origin cause))
+                  (contains? #{:save :rename} (:kind cause))
                   (= graph-id (:graph-id cause))
                   (seq (set/intersection paths (cause-paths cause)))))
-           (:writes @(runtime-state runtime))))))
+           (vals (:causes @(runtime-state runtime)))))))
 
 (defn register-incoming-cause!
   "Register one complete synthetic incoming cause, unless an unfinished local
@@ -242,27 +266,57 @@
                   :cause cause :observation observation :complete-state complete})
   (if (blocked? runtime)
     {:status :ordinary :code :coordination-blocked}
-    (try
-      (let [result ((:reconcile! runtime) cause observation complete)
-            reconciled (assoc cause :status :reconciled)
-            active (:active @(runtime-state runtime))
-            updated-active (when active
-                             (assoc-in active [:progress :reconciled (:cause-id cause)] true))]
-        ;; The retained success is written before this observation can become an
-        ;; echo. Only later exact observations are eligible for deduplication.
-        (when updated-active
-          ((:save-active! runtime) (serialize-active updated-active)))
-        (swap! (runtime-state runtime)
-               (fn [state]
-                 (cond-> (assoc-in state [:causes (:cause-id cause)] reconciled)
-                   updated-active (assoc :active updated-active))))
-        (emit! runtime {:event :incoming-reconciliation-result
-                        :cause reconciled :status :success :result result})
-        {:status :reconciled :cause reconciled :result result})
-      (catch :default error
-        (emit! runtime {:event :incoming-reconciliation-result
-                        :cause cause :status :failure :error (str error)})
-        {:status :reconciliation-failed :cause cause :error error}))))
+    (let [reconciling (assoc cause :status :reconciling)
+          _ (swap! (runtime-state runtime) assoc-in
+                   [:causes (:cause-id cause)] reconciling)
+          settled
+          (-> (invoke-async-port runtime :reconcile! cause observation complete)
+              (p/then
+               (fn [result]
+                 (let [active (:active @(runtime-state runtime))]
+                   (p/let [receipt (invoke-async-port
+                                    runtime :record-reconciliation-progress!
+                                    active cause result)
+                           _ (when (nil? receipt)
+                               (throw (ex-info "reconciliation progress receipt is missing"
+                                               {:code :missing-progress-receipt})))]
+                     (if active
+                       (p/let [entry {:transaction-id (:transaction-id active)
+                                    :cause-id (:cause-id cause)
+                                    :operation-id (:operation-id cause)
+                                    :receipt (canonical receipt)}
+                             updated-active (assoc-in active
+                                                      [:progress :reconciled (:cause-id cause)]
+                                                      entry)
+                             _ (invoke-async-port runtime :save-active!
+                                                  (serialize-active updated-active))]
+                       ;; Persist the transaction-bound progress before changing
+                       ;; the runtime cause to reconciled. Only a later watcher
+                       ;; observation can then be classified as an echo.
+                       (let [reconciled (assoc cause :status :reconciled)]
+                         (swap! (runtime-state runtime)
+                                (fn [state]
+                                  (-> state
+                                      (assoc-in [:causes (:cause-id cause)] reconciled)
+                                      (assoc :active updated-active))))
+                         (emit! runtime {:event :incoming-reconciliation-result
+                                         :cause reconciled :status :success :result result})
+                         {:status :reconciled :cause reconciled :result result}))
+                       (let [reconciled (assoc cause :status :reconciled)]
+                         (swap! (runtime-state runtime) assoc-in
+                                [:causes (:cause-id cause)] reconciled)
+                         (emit! runtime {:event :incoming-reconciliation-result
+                                         :cause reconciled :status :success :result result})
+                         {:status :reconciled :cause reconciled :result result}))))))
+              (p/catch
+               (fn [error]
+                 (let [pending (assoc cause :status :reconcile-pending)]
+                   (swap! (runtime-state runtime) assoc-in
+                          [:causes (:cause-id cause)] pending)
+                   (emit! runtime {:event :incoming-reconciliation-result
+                                   :cause pending :status :failure :error (str error)})
+                   {:status :reconciliation-failed :cause pending :error error}))))]
+      {:status :reconciliation-pending :cause reconciling :settled settled})))
 
 (defn observe-watcher!
   "Record a raw watcher event and match it only against a unique complete
@@ -275,12 +329,13 @@
       (emit! runtime {:event :raw-watcher-observation :observation observation})
       (if (blocked? runtime)
         {:status :ordinary :code :coordination-blocked}
-        (let [complete (invoke-port runtime :complete-state!
-                                    :watcher-complete-state observation)
+        (let [complete (invoke-sync-port runtime :complete-state!
+                                         :watcher-complete-state observation)
               matches (when complete
                         (->> (:causes @(runtime-state runtime))
                              vals
-                             (filter #(contains? #{:completed :reconcile-pending :reconciled}
+                             (filter #(contains? #{:completed :reconcile-pending
+                                                  :reconciling :reconciled}
                                                  (:status %)))
                              (filter #(complete-state-matches? % complete))
                              vec))]
@@ -293,6 +348,9 @@
 
             (= :reconciled (:status (first matches)))
             {:status :echo :cause (first matches)}
+
+            (= :reconciling (:status (first matches)))
+            {:status :reconciliation-pending :cause (first matches)}
 
             :else
             (reconcile-incoming! runtime (first matches) observation complete)))))))
@@ -328,7 +386,8 @@
   [inputs]
   (let [body {:schema active-schema :inputs (canonical inputs)}]
     (assoc body :transaction-id (sha256 (canonical-string body))
-           :phase :active :progress {:reconciled {}})))
+           :phase :active
+           :progress {:files-applied nil :reconciled {} :identity-acceptance nil})))
 
 (defn serialize-active
   [envelope]
@@ -341,6 +400,45 @@
       (throw (ex-info "ACTIVE envelope is not a map" {:code :invalid-active})))
     value))
 
+(defn- validate-progress-structure!
+  [envelope]
+  (let [progress (:progress envelope)
+        causes (get-in envelope [:inputs :causes])
+        causes-by-id (into {} (map (juxt :cause-id identity)) causes)
+        reconciled (:reconciled progress)]
+    (when-not (and (map? progress)
+                   (= #{:files-applied :reconciled :identity-acceptance}
+                      (set (keys progress)))
+                   (map? reconciled)
+                   (or (nil? (:files-applied progress))
+                       (and (map? (:files-applied progress))
+                            (= #{:transaction-id :receipt}
+                               (set (keys (:files-applied progress))))
+                            (= (:transaction-id envelope)
+                               (get-in progress [:files-applied :transaction-id]))
+                            (some? (get-in progress [:files-applied :receipt]))))
+                   (or (nil? (:identity-acceptance progress))
+                       (and (map? (:identity-acceptance progress))
+                            (= #{:transaction-id :receipt}
+                               (set (keys (:identity-acceptance progress))))
+                            (= (:transaction-id envelope)
+                               (get-in progress [:identity-acceptance :transaction-id]))
+                            (some? (get-in progress [:identity-acceptance :receipt])))))
+      (throw (ex-info "ACTIVE progress structure is invalid" {:code :invalid-progress})))
+    (doseq [[cause-id entry] reconciled]
+      (let [cause (get causes-by-id cause-id)]
+        (when-not (and cause
+                       (map? entry)
+                       (= #{:transaction-id :cause-id :operation-id :receipt}
+                          (set (keys entry)))
+                       (= (:transaction-id envelope) (:transaction-id entry))
+                       (= cause-id (:cause-id entry))
+                       (= (:operation-id cause) (:operation-id entry))
+                       (some? (:receipt entry)))
+          (throw (ex-info "ACTIVE reconciliation progress is not transaction-bound"
+                          {:code :invalid-progress :cause-id cause-id})))))
+    envelope))
+
 (defn- validate-envelope!
   [runtime envelope]
   (when-not (= #{:schema :transaction-id :phase :progress :inputs} (set (keys envelope)))
@@ -352,82 +450,181 @@
   (let [expected (envelope-from-inputs (:inputs envelope))]
     (when-not (= (:transaction-id expected) (:transaction-id envelope))
       (throw (ex-info "ACTIVE transaction inputs were altered" {:code :tampered-active}))))
-  (let [revalidated (invoke-port runtime :revalidate-plan! :revalidate-plan (:inputs envelope))]
+  (validate-progress-structure! envelope)
+  (let [revalidated (invoke-sync-port runtime :revalidate-plan! :revalidate-plan
+                                      (:inputs envelope))]
     (when (blocked? runtime)
       (throw (ex-info "authoritative plan revalidation failed" {:code :coordination-blocked})))
     (when-not (= (canonical revalidated)
                  (canonical (get-in envelope [:inputs :authoritative-plan])))
       (throw (ex-info "serialized preview/plan is not authoritative" {:code :plan-mismatch}))))
-  (when-not (true? (invoke-port runtime :validate-binding! :validate-binding
-                                (get-in envelope [:inputs :graph-binding])))
-    (throw (ex-info "ACTIVE graph binding is not accepted" {:code :binding-mismatch})))
   envelope)
+
+(defn- blocked-result
+  [code error]
+  {:status :blocked :code code :error error})
+
+(defn- verify-reconciliation-progress
+  [runtime envelope]
+  (let [causes-by-id (into {} (map (juxt :cause-id identity))
+                           (get-in envelope [:inputs :causes]))]
+    (reduce
+     (fn [verified-promise [cause-id entry]]
+       (p/let [verified verified-promise
+               accepted? (invoke-async-port runtime :validate-reconciliation-progress!
+                                            envelope (get causes-by-id cause-id) entry)]
+         (cond-> verified (true? accepted?) (conj cause-id))))
+     (p/resolved #{})
+     (get-in envelope [:progress :reconciled]))))
+
+(defn- recovered-envelope
+  [runtime envelope]
+  (p/let [binding-valid? (invoke-async-port runtime :validate-binding!
+                                            (get-in envelope [:inputs :graph-binding]))
+          _ (when-not (true? binding-valid?)
+              (throw (ex-info "ACTIVE graph binding is not accepted"
+                              {:code :binding-mismatch})))
+          verified-causes (verify-reconciliation-progress runtime envelope)
+          files-progress (get-in envelope [:progress :files-applied])
+          files-valid? (if files-progress
+                         (invoke-async-port runtime :validate-files-applied-progress!
+                                            envelope files-progress)
+                         false)
+          acceptance-progress (get-in envelope [:progress :identity-acceptance])
+          acceptance-valid? (if acceptance-progress
+                              (invoke-async-port runtime
+                                                 :validate-identity-acceptance-progress!
+                                                 envelope acceptance-progress)
+                              false)
+          all-cause-ids (set (map :cause-id (get-in envelope [:inputs :causes])))
+          all-reconciled? (= all-cause-ids verified-causes)
+          identity-accepted? (and (= :identity-accepted (:phase envelope))
+                                  (true? files-valid?)
+                                  all-reconciled?
+                                  (true? acceptance-valid?))
+          safe-phase (cond
+                       identity-accepted? :identity-accepted
+                       (and (contains? #{:files-applied :identity-accepted} (:phase envelope))
+                            (true? files-valid?))
+                       :files-applied
+                       :else :active)
+          safe-reconciled (select-keys (get-in envelope [:progress :reconciled])
+                                       verified-causes)]
+    (assoc envelope
+           :phase safe-phase
+           :progress {:files-applied (when (true? files-valid?) files-progress)
+                      :reconciled safe-reconciled
+                      :identity-acceptance (when identity-accepted?
+                                             acceptance-progress)})))
 
 (defn start-active!
   [inputs]
   (when (enabled?)
     (let [runtime (current-runtime)]
-      (try
-        (when-not (exact-active-input? inputs)
-          (throw (ex-info "ACTIVE inputs are incomplete" {:code :invalid-active-inputs})))
-        (let [envelope (validate-envelope! runtime (envelope-from-inputs inputs))
-              prior (:active @(runtime-state runtime))]
-          (when (and prior (not= (:transaction-id prior) (:transaction-id envelope)))
-            (throw (ex-info "an incompatible ACTIVE batch is pending"
-                            {:code :incompatible-active})))
-          (when-not prior
-            ((:save-active! runtime) (serialize-active envelope))
-            (swap! (runtime-state runtime)
-                   (fn [state]
-                     (reduce (fn [result cause]
-                               (assoc-in result [:causes (:cause-id cause)]
-                                         (assoc cause :origin :incoming
-                                                :status :reconcile-pending)))
-                             (assoc state :active envelope)
-                             (:causes inputs)))))
-          {:status (if prior :already-active :active) :envelope (or prior envelope)})
-        (catch :default error
-          {:status :blocked :code (or (:code (ex-data error)) :active-refused)
-           :error error})))))
+      (if (blocked? runtime)
+        (p/resolved (blocked-result :coordination-blocked nil))
+        (try
+          (when-not (exact-active-input? inputs)
+            (throw (ex-info "ACTIVE inputs are incomplete" {:code :invalid-active-inputs})))
+          (let [envelope (validate-envelope! runtime (envelope-from-inputs inputs))
+                prior (:active @(runtime-state runtime))]
+            (cond
+              (and prior (not= (:transaction-id prior) (:transaction-id envelope)))
+              (p/resolved (blocked-result :incompatible-active nil))
+
+              prior
+              (p/resolved {:status :already-active :envelope prior})
+
+              :else
+              (-> (p/let [binding-valid? (invoke-async-port
+                                          runtime :validate-binding! (:graph-binding inputs))
+                           _ (when-not (true? binding-valid?)
+                               (throw (ex-info "ACTIVE graph binding is not accepted"
+                                               {:code :binding-mismatch})))
+                           _ (invoke-async-port runtime :save-active!
+                                                (serialize-active envelope))]
+                    (swap! (runtime-state runtime)
+                           (fn [state]
+                             (reduce (fn [result cause]
+                                       (assoc-in result [:causes (:cause-id cause)]
+                                                 (assoc cause :origin :incoming
+                                                        :status :reconcile-pending)))
+                                     (assoc state :active envelope)
+                                     (:causes inputs))))
+                    {:status :active :envelope envelope})
+                  (p/catch (fn [error]
+                             (blocked-result (or (:code (ex-data error))
+                                                 :active-refused)
+                                             error))))))
+          (catch :default error
+            (p/resolved (blocked-result (or (:code (ex-data error)) :active-refused)
+                                        error))))))))
 
 (defn recover-active!
   "Recover only the exact serialized envelope, then recompute its authoritative
   plan and validate the current graph binding through injected ports."
   []
   (when (enabled?)
-    (let [runtime (current-runtime)]
-      (try
-        (if-let [serialized ((:load-active! runtime))]
-          (let [envelope (validate-envelope! runtime (deserialize-active serialized))]
-            (swap! (runtime-state runtime)
-                   (fn [state]
-                     (reduce (fn [result cause]
-                               (assoc-in result [:causes (:cause-id cause)]
-                                         (assoc cause :origin :incoming
-                                                :status (if (or (= :identity-accepted (:phase envelope))
-                                                                (get-in envelope [:progress :reconciled
-                                                                                  (:cause-id cause)]))
-                                                          :reconciled
-                                                          :reconcile-pending))))
-                             (assoc state :active envelope)
-                             (get-in envelope [:inputs :causes]))))
-            {:status :recovery-pending :envelope envelope})
-          {:status :none})
-        (catch :default error
-          {:status :blocked :code (or (:code (ex-data error)) :recovery-refused)
-           :error error})))))
+    (let [runtime (current-runtime)
+          serialized* (atom nil)
+          envelope* (atom nil)]
+      (if (blocked? runtime)
+        (p/resolved (blocked-result :coordination-blocked nil))
+        (-> (p/let [serialized (invoke-async-port runtime :load-active!)]
+              (reset! serialized* serialized)
+              (if-not serialized
+                {:status :none}
+                (let [envelope (validate-envelope! runtime (deserialize-active serialized))]
+                  (reset! envelope* envelope)
+                  (p/let [safe-envelope (recovered-envelope runtime envelope)]
+                    (swap! (runtime-state runtime)
+                           (fn [state]
+                             (reduce (fn [result cause]
+                                       (let [reconciled? (contains?
+                                                          (set (keys (get-in safe-envelope
+                                                                             [:progress :reconciled])))
+                                                          (:cause-id cause))]
+                                         (assoc-in result [:causes (:cause-id cause)]
+                                                   (assoc cause :origin :incoming
+                                                          :status (if reconciled?
+                                                                    :reconciled
+                                                                    :reconcile-pending)))))
+                                     (assoc state :active safe-envelope
+                                                  :recovery-envelope envelope)
+                                     (get-in envelope [:inputs :causes]))))
+                    {:status :recovery-pending :envelope safe-envelope}))))
+            (p/catch
+             (fn [error]
+               (swap! (runtime-state runtime) assoc :recovery-evidence
+                      {:serialized @serialized* :envelope @envelope*})
+               (block-runtime! runtime :recover-active error)
+               (blocked-result (or (:code (ex-data error)) :recovery-refused)
+                               error))))))))
 
 (defn mark-files-applied!
   [transaction-id]
   (when (enabled?)
     (let [runtime (current-runtime)
           active (:active @(runtime-state runtime))]
-      (if (= transaction-id (:transaction-id active))
-        (let [updated (assoc active :phase :files-applied)]
-          ((:save-active! runtime) (serialize-active updated))
-          (swap! (runtime-state runtime) assoc :active updated)
-          {:status :files-applied})
-        {:status :blocked :code :transaction-mismatch}))))
+      (cond
+        (blocked? runtime) (p/resolved (blocked-result :coordination-blocked nil))
+        (not= transaction-id (:transaction-id active))
+        (p/resolved (blocked-result :transaction-mismatch nil))
+        :else
+        (-> (p/let [receipt (invoke-async-port runtime :record-files-applied! active)
+                     _ (when (nil? receipt)
+                         (throw (ex-info "files-applied receipt is missing"
+                                         {:code :missing-files-receipt})))
+                     updated (-> active
+                                 (assoc :phase :files-applied)
+                                 (assoc-in [:progress :files-applied]
+                                           {:transaction-id (:transaction-id active)
+                                            :receipt (canonical receipt)}))
+                     _ (invoke-async-port runtime :save-active!
+                                          (serialize-active updated))]
+                (swap! (runtime-state runtime) assoc :active updated)
+                {:status :files-applied})
+            (p/catch #(blocked-result :progress-recording-failed %)))))))
 
 (defn accept-identity!
   "Synthetic identity acceptance requires the injected validator to check the
@@ -440,30 +637,48 @@
           active-cause-ids (set (map :cause-id (get-in active [:inputs :causes])))
           incoming (keep #(get-in @(runtime-state runtime) [:causes %]) active-cause-ids)]
       (cond
+        (blocked? runtime)
+        (p/resolved (blocked-result :coordination-blocked nil))
         (not= transaction-id (:transaction-id active))
-        {:status :blocked :code :transaction-mismatch}
+        (p/resolved (blocked-result :transaction-mismatch nil))
         (not= :files-applied (:phase active))
-        {:status :blocked :code :files-not-applied}
+        (p/resolved (blocked-result :files-not-applied nil))
         (some #(not= :reconciled (:status %)) incoming)
-        {:status :blocked :code :reconciliation-pending}
-        (not (true? (invoke-port runtime :validate-acceptance!
-                                 :validate-acceptance active evidence)))
-        {:status :blocked :code :identity-evidence-incomplete}
+        (p/resolved (blocked-result :reconciliation-pending nil))
         :else
-        (let [accepted (assoc active :phase :identity-accepted)]
-          ((:save-active! runtime) (serialize-active accepted))
-          (swap! (runtime-state runtime) assoc :active accepted)
-          {:status :identity-accepted})))))
+        (-> (p/let [accepted? (invoke-async-port runtime :validate-acceptance!
+                                                 active evidence)]
+              (if-not (true? accepted?)
+                (blocked-result :identity-evidence-incomplete nil)
+                (p/let [receipt (invoke-async-port runtime
+                                                   :record-identity-acceptance!
+                                                   active evidence)
+                        _ (when (nil? receipt)
+                            (throw (ex-info "identity acceptance receipt is missing"
+                                            {:code :missing-acceptance-receipt})))
+                        accepted (-> active
+                                     (assoc :phase :identity-accepted)
+                                     (assoc-in [:progress :identity-acceptance]
+                                               {:transaction-id (:transaction-id active)
+                                                :receipt (canonical receipt)}))
+                        _ (invoke-async-port runtime :save-active!
+                                             (serialize-active accepted))]
+                    (swap! (runtime-state runtime) assoc :active accepted)
+                    {:status :identity-accepted})))
+            (p/catch #(blocked-result :acceptance-recording-failed %)))))))
 
 (defn finish-active!
   [transaction-id]
   (when (enabled?)
     (let [runtime (current-runtime)
           active (:active @(runtime-state runtime))]
-      (if (and (= transaction-id (:transaction-id active))
-               (= :identity-accepted (:phase active)))
-        (do
-          ((:clear-active! runtime))
-          (swap! (runtime-state runtime) dissoc :active)
-          {:status :complete})
-        {:status :blocked :code :acceptance-pending}))))
+      (cond
+        (blocked? runtime) (p/resolved (blocked-result :coordination-blocked nil))
+        (not (and (= transaction-id (:transaction-id active))
+                  (= :identity-accepted (:phase active))))
+        (p/resolved (blocked-result :acceptance-pending nil))
+        :else
+        (-> (p/let [_ (invoke-async-port runtime :clear-active!)]
+              (swap! (runtime-state runtime) dissoc :active)
+              {:status :complete})
+            (p/catch #(blocked-result :clear-active-failed %)))))))

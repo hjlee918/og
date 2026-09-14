@@ -365,22 +365,35 @@ paths, while completion follows `fs/rename!` and the existing success callback;
 the existing catch remains the failure settlement. Opaque cause tokens, rather
 than current global graph state, bind later results. Adapter exceptions block
 experimental coordination without changing a successful OG operation or
-hiding its original error.
+hiding its original error. Pending local mutations include both saves and
+renames: an unfinished rename blocks an incoming cause touching either its
+source or destination in that graph, but does not block unrelated paths or
+graphs.
 
 Raw watcher events have no operation ID. The injected complete-state reader
 compares full path/presence/content evidence with retained causes. A unique
 completed local cause is classified separately from incoming work. Zero or
 ambiguous matches and different content remain ordinary observations. A unique
-incoming match calls the injected reconciliation boundary; successful state is
-stored before a later equal event is an echo, while failure remains pending for
-an idempotent retry. This is not a crash-proof exactly-once guarantee.
+incoming match calls the injected asynchronous reconciliation boundary. Its
+cause remains in flight, so duplicate observations do not start duplicate work.
+Only successful settlement followed by successful transaction-bound progress
+storage permits a later equal event to be an echo. Either rejection leaves
+retryable evidence and is handled without an unhandled rejection. This is not a
+crash-proof exactly-once guarantee. Synchronous-only hook ports fail closed if
+they return a thenable; declared asynchronous ports are awaited.
 
 The versioned synthetic ACTIVE envelope contains the exact graph, replica,
 snapshot, preview, target, authoritative plan, projected snapshot, proposed
 identity bytes, generation, ordered operation, working-journal, graph-binding
 and cause inputs. Simulated restart verifies its transaction digest, recomputes
-the authoritative plan and revalidates the binding. An incompatible batch is
-refused while ACTIVE remains. Identity acceptance requires complete injected
+the authoritative plan and revalidates the binding. Serialized phase and
+progress fields are not proof: files-applied, reconciliation and identity
+acceptance are restored only from exact transaction/cause/operation-bound
+receipts validated by injected synthetic authoritative ledgers. Unknown or
+malformed entries fail recovery; unverified but well-formed claims are
+downgraded to pending. Failed recovery retains the envelope/evidence and latches
+the runtime blocked. An incompatible batch is refused while ACTIVE or failed
+recovery remains. Identity acceptance requires complete injected
 file/identity/checkpoint/binding evidence; a snapshot checkpoint alone cannot
 clear ACTIVE.
 

@@ -570,3 +570,51 @@ reconciliation callback must be idempotent because a crash before its progress
 record can cause a retry. No power-loss durability, real watcher stability,
 sidecar placement, copied-graph decision, enrollment, native application,
 account, network or cross-device behavior is established.
+
+## OG bridge lifecycle correction
+
+The preceding 15-test/60-assertion result remains historical evidence for the
+initial default-off seam, but it did not exercise asynchronous reconciliation
+settlement, pending rename conflicts, or authoritative validation of serialized
+progress. The correction regressions were added first. Against the prior
+behavior, the focused run had 15 failures in 20 tests/89 assertions: pending and
+rejected promises were accepted prematurely, duplicate observations could be
+misclassified, progress-store rejection did not prevent success, pending rename
+paths did not block incoming work, and forged restart phase/progress could be
+trusted. Those failures were retained as the gap-demonstration record rather
+than described as passing.
+
+The corrected bridge awaits reconciliation and ACTIVE/evidence storage ports.
+An incoming cause is `reconciling` until reconciliation and its progress record
+both settle successfully; duplicate exact observations do not start another
+call, while either rejection returns the cause to `reconcile-pending`. Save and
+rename cause identity remains bound to the originating graph and operation, and
+both paths of a pending rename now participate in local-mutation conflict
+checks. Synchronous hook ports reject thenables instead of silently treating
+them as completed.
+
+ACTIVE schema version 2 carries structured files-applied, reconciliation and
+identity-acceptance receipt entries. On simulated restart, injected synthetic
+authoritative ledgers validate those exact transaction/cause/operation bindings.
+Serialized phase or a well-formed forged receipt is downgraded; unknown or
+malformed entries are refused. A failed recovery retains evidence and blocks
+later batches in that runtime.
+
+Correction verification:
+
+- Focused production-hook bridge tests: 22/22 tests, 105 assertions.
+- Gap-demonstration run before correction: 20 tests, 89 assertions, 15 expected
+  failures.
+- Accepted pure core/planner/executor/comparison/response/identity regressions:
+  75/75.
+- Full ClojureScript test-build compilation: 707 files, 88 compiled, 25
+  pre-existing inference/redefinition warnings and no new bridge warning.
+- Production browser app compilation: 1,381 files, 148 compiled, zero warnings.
+- Changed-file ClojureScript lint: zero warnings; relevant JavaScript syntax
+  checks and `git diff --check`: passed.
+
+All tests used synthetic in-memory storage, filesystem observations and events.
+The bridge remains disabled in every package. Receipt ledgers are test ports,
+not real durable storage; recovery remains idempotent/retryable rather than
+exactly once. No graph, sidecar, helper, application, profile, account or network
+integration was accessed or enabled.

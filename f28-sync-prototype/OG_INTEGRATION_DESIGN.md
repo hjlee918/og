@@ -97,7 +97,9 @@ abandons the transaction through a later reviewed recovery design.
 4. Publish/retain the immutable generation, then use preconditioned per-file
    application and recovery at the unchanged graph path. Partial visibility is
    explicit.
-5. Verify all working paths/bytes and reconcile them into OG exactly once. If
+5. Verify all working paths/bytes and reconcile them into OG with idempotent
+   recovery semantics. Do not classify an echo until the asynchronous OG call
+   and transaction-bound progress recording both settle successfully. If
    reconciliation fails or a different watcher observation arrives, retain
    `FILES_APPLIED/RECONCILE_PENDING`, block new batches and keep the old sidecar.
 6. Write and verify the proposed graph-local sidecar, then persist the matching
@@ -155,10 +157,13 @@ absence and new-path bytes; delete requires exact old-path absence after its
 retained recovery move. Only one unique full match inherits that cause's
 operation ID. Zero or multiple matches remain ordinary/pending observations.
 
-The first exact incoming observation triggers OG reconciliation once. Only
-after reconciliation success may repeated exact observations be classified as
-echoes. Any different content, presence, path, identity or operation phase is a
-new edit and enters capture/review, even inside a time window. This differs from
+The first exact incoming observation starts OG reconciliation. While that
+asynchronous call or its progress record is pending, repeated exact observations
+reuse the retained in-flight cause and do not start another call. Only after both
+steps settle successfully may repeated exact observations be classified as
+echoes. Rejection restores retryable evidence. Any different content, presence,
+path, identity or operation phase is a new edit and enters capture/review, even
+inside a time window. This differs from
 the synthetic classifier, whose controlled event already carries the operation
 ID and complete tuple.
 
@@ -213,23 +218,34 @@ The synthetic runtime retains completed local causes separately from incoming
 causes. Complete-state matching uses the fake filesystem port and never expects
 operation IDs on watcher events. Zero or multiple matches remain ordinary; a
 different local edit remains on OG's ordinary watcher path. A unique incoming
-match records a successful fake reconciliation before later identical events
-can be classified as echoes. Failure remains retryable. Persisted success can
-survive the simulated restart, but a failure between an idempotent callback and
-its synthetic store record may repeat the callback; this is deliberately not an
-exactly-once or power-loss claim.
+match awaits the fake asynchronous reconciliation boundary and its progress
+write before later identical events can be classified as echoes. Duplicate
+observations share pending work, and rejection or progress failure restores
+retryable evidence. Persisted success can survive the simulated restart, but a
+failure between an idempotent callback and its synthetic store record may repeat
+the callback; this is deliberately not an exactly-once or power-loss claim.
+Ports used in synchronous hook paths reject thenables; ACTIVE storage,
+reconciliation and recovery-evidence ports explicitly await them.
 
 The versioned synthetic `ACTIVE` envelope binds graph/replica, source snapshot,
 issued preview, target, authoritative plan, projected snapshot, proposed
 identity bytes, generations, ordered operation IDs, journal identity, graph
 binding and complete causes. Restart recomputes the transaction identity,
-revalidates the plan and binding through injected ports, and blocks incompatible
-batches. Acceptance additionally requires injected complete file, identity,
+revalidates the plan and binding through injected ports, and reconstructs
+files-applied, reconciled and identity-accepted progress only when separate
+synthetic authoritative ledgers validate transaction/cause/operation-bound
+receipts. Serialized phase and progress claims alone are downgraded. Failed
+recovery latches the runtime blocked so a later batch cannot bypass the retained
+evidence. Acceptance additionally requires injected complete file, identity,
 checkpoint and binding evidence; snapshot data alone is refused.
 
-Focused ClojureScript verification passed 15 tests with 60 assertions, and the
-accepted pure core/planner/executor/comparison/response/identity regressions
-passed 75/75. The production browser target compiled with zero warnings. It was
+The original checkpoint passed 15 tests with 60 assertions, but those tests used
+synchronous reconciliation, omitted pending-rename conflict coverage and did
+not challenge forged restart progress. The lifecycle correction first produced
+15 expected failures in 20 tests/89 assertions against the old behavior, then
+passed 22 tests/105 assertions after the fixes. The accepted pure
+core/planner/executor/comparison/response/identity regressions passed 75/75. The
+production browser target compiled with zero warnings. It was
 not launched or packaged. No native or filesystem-backed working-tree test was
 run because this batch authorized no graph-data access at all.
 
