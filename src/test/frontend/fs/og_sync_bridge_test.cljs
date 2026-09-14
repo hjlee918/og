@@ -591,8 +591,11 @@
             refused rejected-start]
       (is (= :active (:status started)))
       (is (some? (:active @(:state pending-runtime))))
-      (is (= :active-refused (:code refused)))
-      (is (nil? (:active @(:state rejected-runtime)))))))
+      (is (= :active-save-uncertain (:code refused)))
+      (is (nil? (:active @(:state rejected-runtime))))
+      ;; The unproven rejection reserves the exact attempted transaction as
+      ;; recovery-required evidence; nothing was proven about the store.
+      (is (some? (:uncertain-active @(:state rejected-runtime)))))))
 
 (deftest synchronous-watcher-port-rejects-thenables
   (let [runtime (test-runtime {:complete-state! (fn [_] (p/resolved nil))})]
@@ -931,7 +934,15 @@
         (is (some? (get-in @(:state runtime) [:active :progress :files-applied])))
         (is (= :files-applied (:phase (bridge/deserialize-active @stored))))))))
 
-(deftest-async reentrant-acceptance-from-a-coordination-callback-settles-without-deadlock
+(deftest-async reentrant-non-awaiting-callback-queues-nested-work-and-settles
+  ;; The supported reentrancy contract: a callback invoked from inside a
+  ;; running coordination turn may reenter the bridge and reserve further
+  ;; turns, but it must return its own value without awaiting the nested
+  ;; turn's result. Awaiting it would wait on a turn that cannot run until
+  ;; the callback's own turn settles. The FIFO boundary does not detect or
+  ;; refuse that pattern, the port contract forbids it, and this test covers
+  ;; only the non-awaiting shape — it does not prove general deadlock
+  ;; freedom.
   (let [stored (atom nil)
         reentered (atom nil)
         base (test-runtime {:stored stored})
@@ -960,3 +971,263 @@
       (is (= :files-applied (:status marked)))
       (is (= :identity-accepted (:status reentered-result)))
       (is (= :identity-accepted (get-in @(:state runtime) [:active :phase]))))))
+
+(deftest-async failed-recovery-refuses-an-already-queued-incompatible-start
+  ;; Recovery reserves its turn and awaits a deferred load while the runtime
+  ;; is still unblocked; an incompatible start queues behind it; recovery
+  ;; then fails and latches the runtime blocked. The queued start must
+  ;; refuse without performing any operational work.
+  (let [stored (atom nil)
+        seed (test-runtime {:stored stored})
+        {load-promise :promise resolve-load! :resolve!} (deferred)
+        save-count (atom 0)
+        runtime (test-runtime {:stored stored
+                               :load-active! (fn [] load-promise)
+                               :save-active! (fn [serialized]
+                                               (swap! save-count inc)
+                                               (reset! stored serialized))})]
+    (-> (binding [bridge/*test-runtime* seed]
+           (bridge/start-active! (active-inputs)))
+        (p/then
+         (fn [_]
+           (let [base (bridge/deserialize-active @stored)
+                 tampered (assoc-in base [:inputs :target :files 0 :content] "tampered")
+                 recovery (binding [bridge/*test-runtime* runtime]
+                            (bridge/recover-active!))
+                 queued-start (binding [bridge/*test-runtime* runtime]
+                                (bridge/start-active!
+                                 (assoc (active-inputs)
+                                        :target-generation "generation-3")))]
+             ;; The load resolves only after both turns are queued, so the
+             ;; start was reserved while the runtime was still unblocked.
+             (resolve-load! (bridge/serialize-active tampered))
+             (p/let [recovery-result recovery
+                     start-result queued-start]
+               (is (= :tampered-active (:code recovery-result)))
+               (is (some? (:recovery-evidence @(:state runtime))))
+               (is (= :recover-active (get-in @(:state runtime) [:blocked :phase])))
+               (is (= :coordination-blocked (:code start-result)))
+               (is (zero? @save-count))
+               (is (nil? (:active @(:state runtime))))
+               (is (= (:transaction-id base)
+                      (:transaction-id (bridge/deserialize-active @stored)))))))))))
+
+(deftest-async safety-stop-while-a-start-turn-awaits-its-binding-validation
+  ;; A callback reenters the hook path from inside the awaited binding port
+  ;; and its failing adapter latches the runtime blocked. The suspended
+  ;; start turn must refuse before its next publication instead of saving
+  ;; and installing an ACTIVE record.
+  (let [stored (atom nil)
+        save-count (atom 0)
+        base (test-runtime
+              {:stored stored
+               :adapter! (fn [event]
+                           (when (= :save-pending (:event event))
+                             (throw (js/Error. "adapter failed inside the awaited port"))))})
+        runtime (assoc base
+                       :validate-binding!
+                       (fn [graph-binding]
+                         ;; The parameter must not be named `binding`: a local
+                         ;; with that name shadows the binding macro and the
+                         ;; dynamic rebinding silently never happens.
+                         (binding [bridge/*test-runtime* base]
+                           (bridge/save-pending! "graph-a" "pages/a.md" "local"))
+                         (= {:root-id "root-1" :graph-id "graph-a"} graph-binding))
+                       :save-active! (fn [serialized]
+                                       (swap! save-count inc)
+                                       (reset! stored serialized)))
+        started (binding [bridge/*test-runtime* runtime]
+                  (bridge/start-active! (active-inputs)))]
+    (p/let [result started]
+      (is (= :coordination-blocked (:code result)))
+      (is (= :save-pending (get-in @(:state base) [:blocked :phase])))
+      (is (zero? @save-count))
+      (is (nil? @stored))
+      (is (nil? (:active @(:state base))))
+      (is (nil? (:uncertain-active @(:state base)))))))
+
+(deftest-async uncertain-save-rejection-reserves-the-transaction-against-a-queued-start
+  ;; The save port writes the record and then rejects. Rejection does not
+  ;; prove nothing persisted, so the exact attempted envelope is reserved and
+  ;; a queued incompatible start may not overwrite the stored record.
+  (let [stored (atom nil)
+        save-count (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :save-active! (fn [serialized]
+                                  (swap! save-count inc)
+                                  (reset! stored serialized)
+                                  (p/rejected (js/Error. "acknowledge lost after write")))})
+        first-start (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+        competing-start (binding [bridge/*test-runtime* runtime]
+                          (bridge/start-active!
+                           (assoc (active-inputs) :target-generation "generation-3")))]
+    (p/let [first-result first-start
+            competing-result competing-start]
+      (is (= :active-save-uncertain (:code first-result)))
+      (is (nil? (:active @(:state runtime))))
+      (let [reservation (:uncertain-active @(:state runtime))]
+        (is (some? reservation))
+        (is (= (:transaction-id reservation)
+               (:transaction-id (bridge/deserialize-active
+                                (:serialized reservation)))))
+        (is (= (:transaction-id reservation)
+               (:transaction-id (bridge/deserialize-active @stored)))))
+      (is (= :uncertain-active (:code competing-result)))
+      (is (= 1 @save-count)))))
+
+(deftest-async uncertain-clear-rejection-is-resolved-by-validated-recovery
+  ;; The clear port removes the record and then rejects. Ownership stays
+  ;; installed after the uncertain clear, and validated recovery — the
+  ;; authoritative durable store — reconciles the orphaned in-memory owner
+  ;; so later work proceeds consistently.
+  (let [stored (atom nil)
+        clear-count (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :clear-active! (fn [_]
+                                   (swap! clear-count inc)
+                                   (reset! stored nil)
+                                   (p/rejected (js/Error. "acknowledge lost after clear")))})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/mark-files-applied! transaction-id))
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/accept-identity!
+                 transaction-id
+                 {:files-match true :identity-bytes-match true
+                  :checkpoint-match true :binding-match true}))
+            refused (binding [bridge/*test-runtime* runtime]
+                     (bridge/finish-active! transaction-id))
+            _ (is (= :clear-active-failed (:code refused)))
+            _ (is (= :identity-accepted (get-in @(:state runtime) [:active :phase])))
+            recovery (binding [bridge/*test-runtime* runtime]
+                       (bridge/recover-active!))
+            _ (is (= :none (:status recovery)))
+            _ (is (nil? (:active @(:state runtime))))
+            restarted (binding [bridge/*test-runtime* runtime]
+                        (bridge/start-active!
+                         (assoc (active-inputs) :target-generation "generation-3")))]
+      (is (= 1 @clear-count))
+      (is (= :active (:status restarted)))
+      (is (= (get-in restarted [:envelope :transaction-id])
+             (:transaction-id (bridge/deserialize-active @stored)))))))
+
+(deftest-async proven-no-write-failure-differs-from-an-uncertain-save-outcome
+  ;; Only a missing port (the write function was never invoked) or a port
+  ;; that declares :proven-no-write proves nothing persisted. Those failures
+  ;; leave no reservation, so unrelated work proceeds; an unproven rejection
+  ;; reserves recovery-required state and refuses incompatible work.
+  (let [proven-stored (atom nil)
+        proven-base (test-runtime
+                     {:stored proven-stored
+                      :save-active! (fn [_]
+                                      (throw (ex-info "refused before any write"
+                                                      {:proven-no-write true})))})
+        missing-port-runtime (dissoc (test-runtime {:stored (atom nil)})
+                                     :save-active!)
+        uncertain-runtime (test-runtime
+                           {:stored (atom nil)
+                            :save-active! #(p/rejected (js/Error. "plain rejection"))})]
+    (p/let [proven-result (binding [bridge/*test-runtime* proven-base]
+                            (bridge/start-active! (active-inputs)))
+            missing-result (binding [bridge/*test-runtime* missing-port-runtime]
+                             (bridge/start-active! (active-inputs)))
+            uncertain-result (binding [bridge/*test-runtime* uncertain-runtime]
+                               (bridge/start-active! (active-inputs)))
+            _ (is (= :active-refused (:code proven-result)))
+            _ (is (nil? (:uncertain-active @(:state proven-base))))
+            _ (is (= :missing-port (:code missing-result)))
+            _ (is (nil? (:uncertain-active @(:state missing-port-runtime))))
+            _ (is (= :active-save-uncertain (:code uncertain-result)))
+            _ (is (some? (:uncertain-active @(:state uncertain-runtime))))
+            proven-next (binding [bridge/*test-runtime*
+                                  (assoc proven-base :save-active!
+                                          #(reset! proven-stored %))]
+                          (bridge/start-active!
+                           (assoc (active-inputs) :target-generation "generation-3")))
+            missing-next (binding [bridge/*test-runtime*
+                                   (assoc missing-port-runtime :save-active!
+                                          #(reset! (:stored missing-port-runtime) %))]
+                           (bridge/start-active!
+                            (assoc (active-inputs) :target-generation "generation-3")))
+            uncertain-next (binding [bridge/*test-runtime* uncertain-runtime]
+                             (bridge/start-active!
+                              (assoc (active-inputs) :target-generation "generation-3")))]
+      (is (= :active (:status proven-next)))
+      (is (= :active (:status missing-next)))
+      (is (= :uncertain-active (:code uncertain-next))))))
+
+(deftest-async validated-recovery-resolves-an-uncertain-save-and-preserves-exact-evidence
+  ;; The uncertain write actually landed. Validated recovery installs the
+  ;; exact persisted record, clears the reservation, and leaves the exact
+  ;; retry and incompatible paths settled without hanging.
+  (let [stored (atom nil)
+        save-count (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :save-active! (fn [serialized]
+                                  (swap! save-count inc)
+                                  (reset! stored serialized)
+                                  (p/rejected (js/Error. "acknowledge lost after write")))})
+        started (binding [bridge/*test-runtime* runtime]
+                  (bridge/start-active! (active-inputs)))]
+    (p/let [refused started
+            _ (is (= :active-save-uncertain (:code refused)))
+            reservation (:uncertain-active @(:state runtime))
+            _ (is (= (:transaction-id reservation)
+                     (:transaction-id (bridge/deserialize-active
+                                      (:serialized reservation)))))
+            recovery (binding [bridge/*test-runtime* runtime]
+                       (bridge/recover-active!))
+            _ (is (= :recovery-pending (:status recovery)))
+            _ (is (nil? (:uncertain-active @(:state runtime))))
+            _ (is (= (:transaction-id reservation)
+                     (get-in recovery [:envelope :transaction-id])))
+            retried (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            incompatible (binding [bridge/*test-runtime* runtime]
+                           (bridge/start-active!
+                            (assoc (active-inputs) :target-generation "generation-3")))]
+      (is (= :already-active (:status retried)))
+      (is (= :incompatible-active (:code incompatible)))
+      (is (= 1 @save-count))
+      (is (= (:transaction-id reservation)
+             (:transaction-id (bridge/deserialize-active @stored)))))))
+
+(deftest-async exact-retry-after-an-uncertain-save-restores-the-active-lifecycle
+  ;; An exact retry re-attempts only the same reserved transaction; a fresh
+  ;; working port resolves the reservation without validated recovery, so
+  ;; the uncertain outcome creates no permanent dead end.
+  (let [stored (atom nil)
+        save-count (atom 0)
+        base (test-runtime
+              {:stored stored
+               :save-active! (fn [serialized]
+                                (swap! save-count inc)
+                                (reset! stored serialized)
+                                (p/rejected (js/Error. "acknowledge lost after write")))})
+        refused (binding [bridge/*test-runtime* base]
+                  (bridge/start-active! (active-inputs)))]
+    (p/let [refused-result refused
+            _ (is (= :active-save-uncertain (:code refused-result)))
+            _ (is (some? (:uncertain-active @(:state base))))
+            reservation-id (get-in @(:state base) [:uncertain-active :transaction-id])
+            retry (binding [bridge/*test-runtime*
+                            (assoc base :save-active!
+                                    (fn [serialized]
+                                      (swap! save-count inc)
+                                      (reset! stored serialized)))]
+                    (bridge/start-active! (active-inputs)))
+            _ (is (= :active (:status retry)))
+            _ (is (nil? (:uncertain-active @(:state base))))
+            _ (is (= reservation-id (get-in @(:state base) [:active :transaction-id])))
+            incompatible (binding [bridge/*test-runtime* base]
+                           (bridge/start-active!
+                            (assoc (active-inputs) :target-generation "generation-3")))]
+      (is (= :incompatible-active (:code incompatible)))
+      (is (= 2 @save-count))
+      (is (= reservation-id (:transaction-id (bridge/deserialize-active @stored)))))))

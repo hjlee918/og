@@ -253,13 +253,28 @@ tests/158 assertions against the prior behavior, then passed 31/31 after every
 ACTIVE publication was moved inside a serialized process-local coordination
 turn with ownership reservation before asynchronous work and exact-transaction
 revalidation before each persisted write and in-memory installation. The
-accepted pure
+failure-path correction then added regressions for a queued start executing
+after a failed recovery latched the runtime blocked, a safety stop inside an
+awaited port, unproven save rejections, an uncertain clear resolved by
+validated recovery, proven no-write versus unknown outcomes, and
+reservation/evidence preservation through validated recovery and the exact
+retry; those produced 29 expected failures and 3 errors in 38 tests/212
+assertions against the prior behavior, then passed 38/38 after every turn
+rechecked the blocked latch at section start and after every awaited port, and
+after unproven save failures reserved the exact attempted envelope as
+recovery-required evidence that only the exact transaction retry or validated
+recovery may resolve. The reentrancy claim is qualified to the supported
+non-awaiting callback contract: the boundary does not detect or refuse a
+callback that awaits the nested turn, and no general deadlock-freedom claim is
+made. The accepted pure
 core/planner/executor/comparison/response/identity regressions passed 75/75. The
 production browser target compiled with zero warnings. It was
 not launched or packaged. No native or filesystem-backed working-tree test was
 run because this batch authorized no graph-data access at all. The coordination
 turn queue serializes only this process's in-memory runtime state and synthetic
-persistence ports; it is neither a cross-process lock nor crash durability.
+persistence ports; it is neither a cross-process lock nor crash durability, and
+the uncertain-save reservation is in-memory runtime evidence, not a
+power-loss guarantee.
 
 ## Limits and approval decisions
 

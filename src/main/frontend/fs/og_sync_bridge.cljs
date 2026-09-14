@@ -263,13 +263,20 @@
 (defn- serialized!
   "Run (section) as the next coordination turn of this runtime. Turns are
   reserved in call order, run one at a time, and a rejected turn never stalls
-  later turns; a turn reentering the bridge from an injected callback reserves
-  the next turn instead of deadlocking. Every ACTIVE publication — persisted
-  write and in-memory installation — happens inside a turn, so overlapping
-  starts, reconciliations, recovery and lifecycle completions cannot replace or
-  clear one another's state. This boundary coordinates only this process's
-  in-memory runtime state and synthetic persistence ports; it is neither a
-  cross-process lock nor crash durability."
+  later turns. A turn reentering the bridge from an injected callback reserves
+  the next turn instead of deadlocking, provided the callback returns its own
+  value without awaiting the nested turn's result: awaiting it would wait on a
+  turn that cannot run until the callback's own turn settles. That awaiting
+  shape is forbidden by the port contract and is neither detected nor refused
+  here. Every ACTIVE publication — persisted write and in-memory installation
+  — happens inside a turn, so overlapping starts, reconciliations, recovery and
+  lifecycle completions cannot replace or clear one another's state. A turn
+  reserved while the runtime was unblocked rechecks the blocked latch at
+  section start and after every awaited port, so it still refuses to publish
+  once a prior turn or an intervening callback latched the runtime blocked.
+  This boundary coordinates only this process's in-memory runtime state and
+  synthetic persistence ports; it is neither a cross-process lock nor crash
+  durability."
   [runtime section]
   (let [state* (runtime-state runtime)
         prior (:coordination-tail @state*)
@@ -277,6 +284,50 @@
         tail (p/catch started (fn [_] nil))]
     (swap! state* assoc :coordination-tail tail)
     started))
+
+(defn- refuse-when-blocked!
+  "A turn reserved while the runtime was unblocked can await a port during
+  which another callback latched the runtime blocked. Refuse before the next
+  publication instead of saving or installing through a blocked runtime."
+  [runtime]
+  (when (blocked? runtime)
+    (throw (ex-info "runtime latched blocked before this publication"
+                    {:code :coordination-blocked :already-blocked true})))
+  nil)
+
+(defn- reconcile-blocked-settlement!
+  "Settle an in-flight reconciliation as retryable evidence when the runtime
+  latched blocked at a publication boundary. The cause returns to
+  reconcile-pending and nothing is installed or emitted; durable progress the
+  save may already have written is revalidated by recovery. Emission is
+  omitted because a blocked runtime suppresses adapter events anyway."
+  [runtime cause error]
+  (let [pending (assoc cause :status :reconcile-pending)]
+    (swap! (runtime-state runtime) assoc-in [:causes (:cause-id cause)] pending)
+    {:status :reconciliation-failed :cause pending
+     :code :coordination-blocked :error error}))
+
+(defn- proven-no-write?
+  "True only when a save failure proves nothing was persisted: the write
+  function was never invoked (missing port) or explicitly declares
+  :proven-no-write. Any other rejection leaves the durable outcome unknown."
+  [error]
+  (let [data (ex-data error)]
+    (or (= :missing-port (:code data))
+        (true? (:proven-no-write data)))))
+
+(defn- reserve-uncertain-active!
+  "Preserve the exact attempted envelope after a save outcome that proved
+  nothing. The reservation blocks every incompatible start until the exact
+  transaction retries or validated recovery resolves it."
+  [runtime envelope error]
+  (swap! (runtime-state runtime)
+         assoc :uncertain-active
+         {:transaction-id (:transaction-id envelope)
+          :serialized (serialize-active envelope)
+          :envelope envelope
+          :error (str error)})
+  nil)
 
 (defn- active-transaction-id
   "The transaction that currently owns the active slot, or nil."
@@ -300,75 +351,108 @@
           (-> (invoke-async-port runtime :reconcile! cause observation complete)
               (p/then
                (fn [result]
-                 (p/let [receipt (invoke-async-port
-                                  runtime :record-reconciliation-progress!
-                                  owner-active cause result)
-                         _ (when (nil? receipt)
-                             (throw (ex-info "reconciliation progress receipt is missing"
-                                             {:code :missing-progress-receipt})))
-                         ;; Publication turn: revalidate that the exact reserved
-                         ;; transaction still owns the active slot, then persist
-                         ;; and install one merged entry. Serialized turns keep
-                         ;; concurrent reconciliations from losing each other's
-                         ;; progress or regressing a later phase.
-                         settled-result
-                         (serialized! runtime
-                           (fn []
-                             (let [current (:active @(runtime-state runtime))]
-                               (if (and owner current
-                                        (= owner (:transaction-id current)))
-                                 (let [entry {:transaction-id owner
-                                              :cause-id (:cause-id cause)
-                                              :operation-id (:operation-id cause)
-                                              :receipt (canonical receipt)}
-                                       updated (assoc-in current
-                                                        [:progress :reconciled (:cause-id cause)]
-                                                        entry)]
-                                   (-> (invoke-async-port runtime :save-active!
-                                                          (serialize-active updated))
-                                       ;; Persist the transaction-bound progress
-                                       ;; before changing the runtime cause to
-                                       ;; reconciled. Only a later watcher
-                                       ;; observation can then be an echo.
-                                       (p/then
-                                        (fn [_]
-                                          (let [reconciled (assoc cause :status :reconciled)]
-                                            (swap! (runtime-state runtime)
-                                                   (fn [state]
-                                                     (-> state
-                                                         (assoc-in [:causes (:cause-id cause)]
-                                                                   reconciled)
-                                                         (assoc :active updated))))
-                                            (emit! runtime
-                                                   {:event :incoming-reconciliation-result
-                                                    :cause reconciled :status :success
-                                                    :result result})
-                                            {:status :reconciled :cause reconciled
-                                             :result result})))
-                                       (p/catch
-                                        (fn [error]
-                                          (let [pending (assoc cause :status :reconcile-pending)]
-                                            (swap! (runtime-state runtime) assoc-in
-                                                   [:causes (:cause-id cause)] pending)
-                                            (emit! runtime
-                                                   {:event :incoming-reconciliation-result
-                                                    :cause pending :status :failure
-                                                    :error (str error)})
-                                            {:status :reconciliation-failed :cause pending
-                                             :error error})))))
-                                 ;; The reserved transaction no longer owns the
-                                 ;; active slot. Settle in memory only and never
-                                 ;; publish into a record this reconciliation
-                                 ;; does not own.
-                                 (let [reconciled (assoc cause :status :reconciled)]
-                                   (swap! (runtime-state runtime) assoc-in
-                                          [:causes (:cause-id cause)] reconciled)
-                                   (emit! runtime {:event :incoming-reconciliation-result
-                                                   :cause reconciled :status :success
-                                                   :result result})
-                                   {:status :reconciled :cause reconciled
-                                    :result result})))))]
-                   settled-result)))
+                 ;; Recheck after the awaited reconciliation port: another
+                 ;; callback may have latched the runtime blocked while this
+                 ;; reconciliation was in flight.
+                 (if (blocked? runtime)
+                   (reconcile-blocked-settlement!
+                    runtime cause
+                    (ex-info "runtime latched blocked before progress recording"
+                             {:code :coordination-blocked}))
+                   (p/let [receipt (invoke-async-port
+                                    runtime :record-reconciliation-progress!
+                                    owner-active cause result)
+                           _ (when (nil? receipt)
+                               (throw (ex-info "reconciliation progress receipt is missing"
+                                               {:code :missing-progress-receipt})))
+                           settled-result
+                           (if (blocked? runtime)
+                             ;; Same recheck after the awaited progress port,
+                             ;; before reserving the publication turn.
+                             (reconcile-blocked-settlement!
+                              runtime cause
+                              (ex-info "runtime latched blocked before progress recording"
+                                       {:code :coordination-blocked}))
+                             ;; Publication turn: revalidate that the exact reserved
+                             ;; transaction still owns the active slot, then persist
+                             ;; and install one merged entry. Serialized turns keep
+                             ;; concurrent reconciliations from losing each other's
+                             ;; progress or regressing a later phase.
+                             (serialized! runtime
+                               (fn []
+                                 ;; Recheck at section start: this turn was
+                                 ;; reserved while the runtime was unblocked, but
+                                 ;; an intervening callback may have latched it.
+                                 (if (blocked? runtime)
+                                   (reconcile-blocked-settlement!
+                                    runtime cause
+                                    (ex-info "runtime latched blocked before this publication"
+                                             {:code :coordination-blocked}))
+                                   (let [current (:active @(runtime-state runtime))]
+                                     (if (and owner current
+                                              (= owner (:transaction-id current)))
+                                       (let [entry {:transaction-id owner
+                                                    :cause-id (:cause-id cause)
+                                                    :operation-id (:operation-id cause)
+                                                    :receipt (canonical receipt)}
+                                             updated (assoc-in current
+                                                              [:progress :reconciled (:cause-id cause)]
+                                                              entry)]
+                                         (-> (invoke-async-port runtime :save-active!
+                                                                (serialize-active updated))
+                                             ;; Persist the transaction-bound progress
+                                             ;; before changing the runtime cause to
+                                             ;; reconciled. Only a later watcher
+                                             ;; observation can then be an echo.
+                                             (p/then
+                                              (fn [_]
+                                                (if (blocked? runtime)
+                                                  ;; Blocked after a successful save:
+                                                  ;; the durable store holds the
+                                                  ;; record and recovery revalidates
+                                                  ;; it; install nothing here.
+                                                  (reconcile-blocked-settlement!
+                                                   runtime cause
+                                                   (ex-info
+                                                    "runtime latched blocked after the progress write"
+                                                    {:code :coordination-blocked}))
+                                                  (let [reconciled (assoc cause :status :reconciled)]
+                                                    (swap! (runtime-state runtime)
+                                                           (fn [state]
+                                                             (-> state
+                                                                 (assoc-in [:causes (:cause-id cause)]
+                                                                           reconciled)
+                                                                 (assoc :active updated))))
+                                                    (emit! runtime
+                                                           {:event :incoming-reconciliation-result
+                                                            :cause reconciled :status :success
+                                                            :result result})
+                                                    {:status :reconciled :cause reconciled
+                                                     :result result}))))
+                                             (p/catch
+                                              (fn [error]
+                                                (let [pending (assoc cause :status :reconcile-pending)]
+                                                  (swap! (runtime-state runtime) assoc-in
+                                                         [:causes (:cause-id cause)] pending)
+                                                  (emit! runtime
+                                                         {:event :incoming-reconciliation-result
+                                                          :cause pending :status :failure
+                                                          :error (str error)})
+                                                  {:status :reconciliation-failed :cause pending
+                                                   :error error})))))
+                                       ;; The reserved transaction no longer owns the
+                                       ;; active slot. Settle in memory only and never
+                                       ;; publish into a record this reconciliation
+                                       ;; does not own.
+                                       (let [reconciled (assoc cause :status :reconciled)]
+                                         (swap! (runtime-state runtime) assoc-in
+                                                [:causes (:cause-id cause)] reconciled)
+                                         (emit! runtime {:event :incoming-reconciliation-result
+                                                         :cause reconciled :status :success
+                                                         :result result})
+                                         {:status :reconciled :cause reconciled
+                                          :result result})))))))]
+                     settled-result))))
               (p/catch
                (fn [error]
                  (let [pending (assoc cause :status :reconcile-pending)]
@@ -595,43 +679,86 @@
           (let [envelope (validate-envelope! runtime (envelope-from-inputs inputs))]
             (serialized! runtime
               (fn []
-                (let [prior (:active @(runtime-state runtime))]
-                  (cond
-                    (and prior (not= (:transaction-id prior) (:transaction-id envelope)))
-                    (p/resolved (blocked-result :incompatible-active nil))
+                ;; Recheck at section start: this turn was reserved while the
+                ;; runtime was unblocked, but a prior turn may since have
+                ;; latched the runtime blocked.
+                (if (blocked? runtime)
+                  (blocked-result :coordination-blocked nil)
+                  (let [prior (:active @(runtime-state runtime))
+                        uncertain (:uncertain-active @(runtime-state runtime))]
+                    (cond
+                      (and prior (not= (:transaction-id prior) (:transaction-id envelope)))
+                      (blocked-result :incompatible-active nil)
 
-                    prior
-                    (p/resolved {:status :already-active :envelope prior})
+                      prior
+                      {:status :already-active :envelope prior}
 
-                    :else
-                    (-> (p/let [binding-valid? (invoke-async-port
-                                                runtime :validate-binding! (:graph-binding inputs))
-                                _ (when-not (true? binding-valid?)
-                                    (throw (ex-info "ACTIVE graph binding is not accepted"
-                                                    {:code :binding-mismatch})))
-                                _ (invoke-async-port runtime :save-active!
-                                                     (serialize-active envelope))
-                                ;; Ownership is reserved by this turn; the
-                                ;; post-save check is documented defense against
-                                ;; a future path that installs an active slot
-                                ;; outside the coordination boundary.
-                                _ (when (some? (active-transaction-id runtime))
-                                    (throw (ex-info
-                                            "active slot was claimed by another transaction"
-                                            {:code :incompatible-active})))]
-                          (swap! (runtime-state runtime)
-                                 (fn [state]
-                                   (reduce (fn [result cause]
-                                             (assoc-in result [:causes (:cause-id cause)]
-                                                       (assoc cause :origin :incoming
-                                                              :status :reconcile-pending)))
-                                           (assoc state :active envelope)
-                                           (:causes inputs))))
-                          {:status :active :envelope envelope})
+                      ;; An unproven save outcome reserved its exact attempted
+                      ;; transaction: only that exact transaction may retry while
+                      ;; the reservation stands, and validated recovery resolves
+                      ;; it. Nothing else may overwrite the possibly persisted
+                      ;; record.
+                      (and uncertain
+                           (not= (:transaction-id uncertain) (:transaction-id envelope)))
+                      (blocked-result :uncertain-active nil)
+
+                      :else
+                      (-> (p/let [binding-valid? (invoke-async-port
+                                                  runtime :validate-binding! (:graph-binding inputs))
+                                  _ (when-not (true? binding-valid?)
+                                      (throw (ex-info "ACTIVE graph binding is not accepted"
+                                                      {:code :binding-mismatch})))
+                                  ;; Recheck after the awaited binding port: a
+                                  ;; callback reentering from the port may have
+                                  ;; latched the runtime blocked.
+                                  _ (refuse-when-blocked! runtime)
+                                  _ (-> (invoke-async-port runtime :save-active!
+                                                            (serialize-active envelope))
+                                        (p/catch
+                                         (fn [error]
+                                           ;; A rejection proves nothing about the
+                                           ;; durable store. Only a missing port
+                                           ;; (never invoked) or a port declaring
+                                           ;; :proven-no-write is a clean refusal;
+                                           ;; any other failure reserves the exact
+                                           ;; attempted envelope as
+                                           ;; recovery-required evidence.
+                                           (if (proven-no-write? error)
+                                             (throw error)
+                                             (do (reserve-uncertain-active! runtime envelope error)
+                                                 (throw (ex-info
+                                                         "ACTIVE save outcome is unknown after failure"
+                                                         {:code :active-save-uncertain
+                                                          :error (str error)})))))))
+                                  ;; Recheck after the awaited save port with the
+                                  ;; same rule, before claiming ownership.
+                                  _ (refuse-when-blocked! runtime)
+                                  ;; Ownership is reserved by this turn; the
+                                  ;; post-save check is documented defense against
+                                  ;; a future path that installs an active slot
+                                  ;; outside the coordination boundary.
+                                  _ (when (some? (active-transaction-id runtime))
+                                      (throw (ex-info
+                                              "active slot was claimed by another transaction"
+                                              {:code :incompatible-active})))]
+                            (swap! (runtime-state runtime)
+                                   (fn [state]
+                                     (-> (reduce (fn [result cause]
+                                                   (assoc-in result [:causes (:cause-id cause)]
+                                                             (assoc cause :origin :incoming
+                                                                    :status :reconcile-pending)))
+                                                 state
+                                                 (:causes inputs))
+                                         (assoc :active envelope)
+                                         ;; A successful publication of this exact
+                                         ;; transaction supersedes its own
+                                         ;; outstanding uncertain-save reservation.
+                                         (dissoc :uncertain-active))))
+                            {:status :active :envelope envelope})
                         (p/catch (fn [error]
                                    (blocked-result (or (:code (ex-data error))
                                                        :active-refused)
-                                                   error)))))))))
+                                                   error))))))))))
           (catch :default error
             (p/resolved (blocked-result (or (:code (ex-data error)) :active-refused)
                                         error))))))))
@@ -640,7 +767,10 @@
   "Recover only the exact serialized envelope, then recompute its authoritative
   plan and validate the current graph binding through injected ports. The whole
   recovery runs as one coordination turn, so it cannot race a start or install a
-  recovered record over a newer active lifecycle."
+  recovered record over a newer active lifecycle. A validated load is direct
+  evidence of the durable store's current record: it resolves an outstanding
+  uncertain-save reservation, and an empty store reconciles an in-memory owner
+  orphaned by an uncertain clear instead of keeping it installed."
   []
   (when (enabled?)
     (let [runtime (current-runtime)
@@ -650,36 +780,59 @@
         (p/resolved (blocked-result :coordination-blocked nil))
         (serialized! runtime
           (fn []
-            (-> (p/let [serialized (invoke-async-port runtime :load-active!)]
-                 (reset! serialized* serialized)
-                 (if-not serialized
-                   {:status :none}
-                   (let [envelope (validate-envelope! runtime (deserialize-active serialized))]
-                     (reset! envelope* envelope)
-                     (p/let [safe-envelope (recovered-envelope runtime envelope)]
-                       (swap! (runtime-state runtime)
-                              (fn [state]
-                                (reduce (fn [result cause]
-                                          (let [reconciled? (contains?
-                                                             (set (keys (get-in safe-envelope
-                                                                                [:progress :reconciled])))
-                                                             (:cause-id cause))]
-                                            (assoc-in result [:causes (:cause-id cause)]
-                                                      (assoc cause :origin :incoming
-                                                             :status (if reconciled?
-                                                                       :reconciled
-                                                                       :reconcile-pending)))))
-                                        (assoc state :active safe-envelope
-                                                     :recovery-envelope envelope)
-                                        (get-in envelope [:inputs :causes]))))
-                       {:status :recovery-pending :envelope safe-envelope}))))
-               (p/catch
-                (fn [error]
-                  (swap! (runtime-state runtime) assoc :recovery-evidence
-                         {:serialized @serialized* :envelope @envelope*})
-                  (block-runtime! runtime :recover-active error)
-                  (blocked-result (or (:code (ex-data error)) :recovery-refused)
-                                  error))))))))))
+            ;; Recheck at section start: this turn was reserved while the
+            ;; runtime was unblocked, but a prior turn may since have latched
+            ;; the runtime blocked.
+            (if (blocked? runtime)
+              (blocked-result :coordination-blocked nil)
+              (-> (p/let [serialized (invoke-async-port runtime :load-active!)]
+                   (reset! serialized* serialized)
+                   (if-not serialized
+                     ;; Nothing is persisted: the durable store is
+                     ;; authoritative for lifecycle ownership, so a leftover
+                     ;; in-memory active record and any stale reservation are
+                     ;; reconciled here rather than kept installed.
+                     (do (swap! (runtime-state runtime)
+                                #(dissoc % :active :uncertain-active))
+                         {:status :none})
+                     (let [envelope (validate-envelope! runtime (deserialize-active serialized))]
+                       (reset! envelope* envelope)
+                       (p/let [safe-envelope (recovered-envelope runtime envelope)]
+                         ;; Recheck after the awaited validation ports before
+                         ;; publishing the recovered record.
+                         (refuse-when-blocked! runtime)
+                         (swap! (runtime-state runtime)
+                                (fn [state]
+                                  (-> (reduce (fn [result cause]
+                                                (let [reconciled? (contains?
+                                                                   (set (keys (get-in safe-envelope
+                                                                                      [:progress :reconciled])))
+                                                                   (:cause-id cause))]
+                                                  (assoc-in result [:causes (:cause-id cause)]
+                                                            (assoc cause :origin :incoming
+                                                                   :status (if reconciled?
+                                                                             :reconciled
+                                                                             :reconcile-pending)))))
+                                              state
+                                              (get-in envelope [:inputs :causes]))
+                                      (assoc :active safe-envelope
+                                             :recovery-envelope envelope)
+                                      ;; The validated record proves the
+                                      ;; store's actual content, resolving any
+                                      ;; outstanding uncertain-save reservation.
+                                      (dissoc :uncertain-active))))
+                         {:status :recovery-pending :envelope safe-envelope}))))
+                 (p/catch
+                  (fn [error]
+                    ;; Preserve the first latch: a blocked recheck that already
+                    ;; recorded why the runtime stopped must not be overwritten
+                    ;; by a generic recovery failure.
+                    (when-not (:already-blocked (ex-data error))
+                      (swap! (runtime-state runtime) assoc :recovery-evidence
+                             {:serialized @serialized* :envelope @envelope*})
+                      (block-runtime! runtime :recover-active error))
+                    (blocked-result (or (:code (ex-data error)) :recovery-refused)
+                                    error)))))))))))
 
 (defn mark-files-applied!
   [transaction-id]
@@ -689,45 +842,62 @@
         (p/resolved (blocked-result :coordination-blocked nil))
         (serialized! runtime
           (fn []
-            (let [active (:active @(runtime-state runtime))]
-              (cond
-                (not= transaction-id (:transaction-id active))
-                (p/resolved (blocked-result :transaction-mismatch nil))
+            ;; Recheck at section start: this turn was reserved while the
+            ;; runtime was unblocked, but a prior turn may since have latched
+            ;; the runtime blocked.
+            (if (blocked? runtime)
+              (blocked-result :coordination-blocked nil)
+              (let [active (:active @(runtime-state runtime))]
+                (cond
+                  (not= transaction-id (:transaction-id active))
+                  (blocked-result :transaction-mismatch nil)
 
-                ;; Idempotent: a recorded receipt never regresses the phase or
-                ;; duplicates persistence for a repeated call.
-                (get-in active [:progress :files-applied])
-                (p/resolved {:status :files-applied})
+                  ;; Idempotent: a recorded receipt never regresses the phase or
+                  ;; duplicates persistence for a repeated call.
+                  (get-in active [:progress :files-applied])
+                  {:status :files-applied}
 
-                :else
-                (-> (p/let [receipt (invoke-async-port runtime :record-files-applied! active)
-                            _ (when (nil? receipt)
-                                (throw (ex-info "files-applied receipt is missing"
-                                                {:code :missing-files-receipt})))
-                            ;; A reconciliation may have advanced the record
-                            ;; while this turn awaited its receipt; publish the
-                            ;; current phase, never an older one.
-                            phase (if (contains? #{:files-applied :identity-accepted}
-                                                 (:phase active))
-                                    (:phase active)
-                                    :files-applied)
-                            updated (-> active
-                                        (assoc :phase phase)
-                                        (assoc-in [:progress :files-applied]
-                                                  {:transaction-id (:transaction-id active)
-                                                   :receipt (canonical receipt)}))
-                            ;; Ownership is reserved by this turn; the pre-save
-                            ;; check is documented defense against a future path
-                            ;; that installs an active slot outside the boundary.
-                            _ (when (not= transaction-id (active-transaction-id runtime))
-                                (throw (ex-info
-                                        "active slot no longer belongs to this transaction"
-                                        {:code :transaction-mismatch})))
-                            _ (invoke-async-port runtime :save-active!
-                                                 (serialize-active updated))]
-                      (swap! (runtime-state runtime) assoc :active updated)
-                      {:status :files-applied})
-                    (p/catch #(blocked-result :progress-recording-failed %)))))))))))
+                  :else
+                  (-> (p/let [receipt (invoke-async-port runtime :record-files-applied! active)
+                              _ (when (nil? receipt)
+                                  (throw (ex-info "files-applied receipt is missing"
+                                                  {:code :missing-files-receipt})))
+                              ;; Recheck after the awaited receipt port: a
+                              ;; callback reentering from the port may have
+                              ;; latched the runtime blocked.
+                              _ (refuse-when-blocked! runtime)
+                              ;; A reconciliation may have advanced the record
+                              ;; while this turn awaited its receipt; publish the
+                              ;; current phase, never an older one.
+                              phase (if (contains? #{:files-applied :identity-accepted}
+                                                   (:phase active))
+                                      (:phase active)
+                                      :files-applied)
+                              updated (-> active
+                                          (assoc :phase phase)
+                                          (assoc-in [:progress :files-applied]
+                                                    {:transaction-id (:transaction-id active)
+                                                     :receipt (canonical receipt)}))
+                              ;; Ownership is reserved by this turn; the pre-save
+                              ;; check is documented defense against a future path
+                              ;; that installs an active slot outside the boundary.
+                              _ (when (not= transaction-id (active-transaction-id runtime))
+                                  (throw (ex-info
+                                          "active slot no longer belongs to this transaction"
+                                          {:code :transaction-mismatch})))
+                              _ (invoke-async-port runtime :save-active!
+                                                   (serialize-active updated))]
+                        ;; Recheck after the awaited save port before the
+                        ;; in-memory publication. A throw here rejects the
+                        ;; turn's promise and settles through the catch below
+                        ;; with the typed coordination-blocked code.
+                        (refuse-when-blocked! runtime)
+                        (swap! (runtime-state runtime) assoc :active updated)
+                        {:status :files-applied})
+                    (p/catch (fn [error]
+                               (blocked-result (or (:code (ex-data error))
+                                                   :progress-recording-failed)
+                                               error)))))))))))))
 
 (defn accept-identity!
   "Synthetic identity acceptance requires the injected validator to check the
@@ -740,46 +910,66 @@
         (p/resolved (blocked-result :coordination-blocked nil))
         (serialized! runtime
           (fn []
-            (let [active (:active @(runtime-state runtime))
-                  active-cause-ids (set (map :cause-id (get-in active [:inputs :causes])))
-                  incoming (keep #(get-in @(runtime-state runtime) [:causes %])
-                                 active-cause-ids)]
-              (cond
-                (not= transaction-id (:transaction-id active))
-                (p/resolved (blocked-result :transaction-mismatch nil))
-                (not= :files-applied (:phase active))
-                (p/resolved (blocked-result :files-not-applied nil))
-                (some #(not= :reconciled (:status %)) incoming)
-                (p/resolved (blocked-result :reconciliation-pending nil))
-                :else
-                (-> (p/let [accepted? (invoke-async-port runtime :validate-acceptance!
-                                                        active evidence)]
-                      (if-not (true? accepted?)
-                        (blocked-result :identity-evidence-incomplete nil)
-                        (p/let [receipt (invoke-async-port runtime
-                                                           :record-identity-acceptance!
-                                                           active evidence)
-                                _ (when (nil? receipt)
-                                    (throw (ex-info "identity acceptance receipt is missing"
-                                                    {:code :missing-acceptance-receipt})))
-                                accepted (-> active
-                                             (assoc :phase :identity-accepted)
-                                             (assoc-in [:progress :identity-acceptance]
-                                                       {:transaction-id (:transaction-id active)
-                                                        :receipt (canonical receipt)}))
-                                ;; Ownership is reserved by this turn; the
-                                ;; pre-save check is documented defense against
-                                ;; a future path that installs an active slot
-                                ;; outside the coordination boundary.
-                                _ (when (not= transaction-id (active-transaction-id runtime))
-                                    (throw (ex-info
-                                            "active slot no longer belongs to this transaction"
-                                            {:code :transaction-mismatch})))
-                                _ (invoke-async-port runtime :save-active!
-                                                     (serialize-active accepted))]
-                          (swap! (runtime-state runtime) assoc :active accepted)
-                          {:status :identity-accepted})))
-                  (p/catch #(blocked-result :acceptance-recording-failed %)))))))))))
+            ;; Recheck at section start: this turn was reserved while the
+            ;; runtime was unblocked, but a prior turn may since have latched
+            ;; the runtime blocked.
+            (if (blocked? runtime)
+              (blocked-result :coordination-blocked nil)
+              (let [active (:active @(runtime-state runtime))
+                    active-cause-ids (set (map :cause-id (get-in active [:inputs :causes])))
+                    incoming (keep #(get-in @(runtime-state runtime) [:causes %])
+                                   active-cause-ids)]
+                (cond
+                  (not= transaction-id (:transaction-id active))
+                  (blocked-result :transaction-mismatch nil)
+                  (not= :files-applied (:phase active))
+                  (blocked-result :files-not-applied nil)
+                  (some #(not= :reconciled (:status %)) incoming)
+                  (blocked-result :reconciliation-pending nil)
+                  :else
+                  (-> (p/let [accepted? (invoke-async-port runtime :validate-acceptance!
+                                                          active evidence)]
+                        ;; Recheck after the awaited acceptance port: a
+                        ;; callback reentering from the port may have latched
+                        ;; the runtime blocked.
+                        (refuse-when-blocked! runtime)
+                        (if-not (true? accepted?)
+                          (blocked-result :identity-evidence-incomplete nil)
+                          (p/let [receipt (invoke-async-port runtime
+                                                             :record-identity-acceptance!
+                                                             active evidence)
+                                  _ (when (nil? receipt)
+                                      (throw (ex-info "identity acceptance receipt is missing"
+                                                      {:code :missing-acceptance-receipt})))
+                                  ;; Recheck after the awaited receipt port
+                                  ;; with the same rule.
+                                  _ (refuse-when-blocked! runtime)
+                                  accepted (-> active
+                                               (assoc :phase :identity-accepted)
+                                               (assoc-in [:progress :identity-acceptance]
+                                                         {:transaction-id (:transaction-id active)
+                                                          :receipt (canonical receipt)}))
+                                  ;; Ownership is reserved by this turn; the
+                                  ;; pre-save check is documented defense against
+                                  ;; a future path that installs an active slot
+                                  ;; outside the coordination boundary.
+                                  _ (when (not= transaction-id (active-transaction-id runtime))
+                                      (throw (ex-info
+                                              "active slot no longer belongs to this transaction"
+                                              {:code :transaction-mismatch})))
+                                  _ (invoke-async-port runtime :save-active!
+                                                       (serialize-active accepted))]
+                            ;; Recheck after the awaited save port before the
+                            ;; in-memory publication. A throw here rejects the
+                            ;; turn's promise and settles through the catch
+                            ;; below with the typed coordination-blocked code.
+                            (refuse-when-blocked! runtime)
+                            (swap! (runtime-state runtime) assoc :active accepted)
+                            {:status :identity-accepted})))
+                    (p/catch (fn [error]
+                               (blocked-result (or (:code (ex-data error))
+                                                   :acceptance-recording-failed)
+                                               error)))))))))))))
 
 (defn finish-active!
   [transaction-id]
@@ -789,16 +979,30 @@
         (p/resolved (blocked-result :coordination-blocked nil))
         (serialized! runtime
           (fn []
-            (let [active (:active @(runtime-state runtime))]
-              (if-not (and (= transaction-id (:transaction-id active))
-                           (= :identity-accepted (:phase active)))
-                (p/resolved (blocked-result :acceptance-pending nil))
-                (-> (p/let [_ (invoke-async-port runtime :clear-active!)]
-                      ;; Revalidation after the asynchronous clear: a stale
-                      ;; completion must never clear an active slot that a
-                      ;; newer lifecycle now owns.
-                      (if-not (= transaction-id (active-transaction-id runtime))
-                        (blocked-result :acceptance-pending nil)
-                        (do (swap! (runtime-state runtime) dissoc :active)
-                            {:status :complete})))
-                    (p/catch #(blocked-result :clear-active-failed %)))))))))))
+            ;; Recheck at section start: this turn was reserved while the
+            ;; runtime was unblocked, but a prior turn may since have latched
+            ;; the runtime blocked.
+            (if (blocked? runtime)
+              (blocked-result :coordination-blocked nil)
+              (let [active (:active @(runtime-state runtime))]
+                (if-not (and (= transaction-id (:transaction-id active))
+                             (= :identity-accepted (:phase active)))
+                  (blocked-result :acceptance-pending nil)
+                  (-> (p/let [_ (invoke-async-port runtime :clear-active!)]
+                        ;; Recheck after the awaited clear port: a callback
+                        ;; reentering from the port may have latched the runtime
+                        ;; blocked; a blocked runtime never clears or installs
+                        ;; ownership. A throw here settles through the catch
+                        ;; below with the typed coordination-blocked code.
+                        (refuse-when-blocked! runtime)
+                        ;; Revalidation after the asynchronous clear: a stale
+                        ;; completion must never clear an active slot that a
+                        ;; newer lifecycle now owns.
+                        (if-not (= transaction-id (active-transaction-id runtime))
+                          (blocked-result :acceptance-pending nil)
+                          (do (swap! (runtime-state runtime) dissoc :active)
+                              {:status :complete})))
+                      (p/catch (fn [error]
+                                 (blocked-result (or (:code (ex-data error))
+                                                     :clear-active-failed)
+                                                 error)))))))))))))

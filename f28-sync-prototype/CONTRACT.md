@@ -404,17 +404,48 @@ reserved in call order: `start-active!`, reconciliation publication,
 each claim their turn before any asynchronous port is invoked, so overlapping
 starts are refused deterministically in call order, recovery cannot race a
 start, and a rejected turn never stalls later turns. A turn that reenters the
-bridge from an injected callback reserves the next turn rather than deadlocking.
-Inside a turn each operation revalidates that the exact owning transaction still
-holds the active slot before its persisted write and in-memory installation.
-Reconciliation reserves that owning transaction before its asynchronous
-reconciliation call and merges one transaction-bound entry into the fresh ACTIVE
-record when its progress receipt settles, so out-of-order completions preserve
-every progress entry and never regress a later phase; files-applied publication
-is idempotent and phase-preserving; a stale finish cannot clear a newer
-lifecycle. This boundary coordinates only this process's in-memory runtime state
-and synthetic persistence ports. It is neither a cross-process lock nor crash
-durability, and no such claim is made.
+bridge from an injected callback reserves the next turn rather than deadlocking,
+provided the callback returns its own value without awaiting the nested turn's
+result: awaiting a queued turn from inside a running turn would wait on a turn
+that cannot run until the callback's own turn settles. That awaiting shape is
+forbidden by the port contract; the FIFO boundary neither detects nor refuses
+it, and no general deadlock-freedom claim is made for it. Inside a turn each
+operation revalidates that the exact owning transaction still holds the active
+slot before its persisted write and in-memory installation, and every turn
+rechecks the runtime's blocked latch at section start and after every awaited
+port: a turn reserved while the runtime was unblocked still refuses to publish
+once a prior turn, a failed recovery, or a callback reentering from an awaited
+port latched the runtime blocked. Reconciliation reserves that owning
+transaction before its asynchronous reconciliation call and merges one
+transaction-bound entry into the fresh ACTIVE record when its progress receipt
+settles, so out-of-order completions preserve every progress entry and never
+regress a later phase; files-applied publication is idempotent and
+phase-preserving; a stale finish cannot clear a newer lifecycle. This boundary
+coordinates only this process's in-memory runtime state and synthetic
+persistence ports. It is neither a cross-process lock nor crash durability, and
+no such claim is made.
+
+A persistence failure does not prove that nothing was persisted. Only two save
+outcomes are clean refusals: the write port was never invoked (missing port), or
+the port explicitly declares `:proven-no-write`. Any other save rejection or
+throw leaves the durable outcome unknown, so `start-active!` reserves the exact
+attempted envelope — transaction ID, serialized bytes and the failure — as
+recovery-required evidence and refuses every incompatible start with
+`:uncertain-active`. Only the exact same transaction may retry through the
+reservation, and a successful republication of that transaction or validated
+recovery clears it; there is no permanent dead end. An uncertain clear
+rejection retains the installed identity-accepted owner so incompatible work
+is still refused, and validated recovery reconciles the orphan: a validated
+load is direct evidence of the durable store's current record — it resolves an
+outstanding reservation, and an empty store clears a leftover in-memory owner.
+Progress-save rejections in `mark-files-applied!`, `accept-identity!` and
+reconciliation publication need no reservation of their own: the installed
+owning ACTIVE record already refuses incompatible work and an exact retry
+converges, so their typed failure results (`:progress-recording-failed`,
+`:acceptance-recording-failed`, `:reconciliation-failed`,
+`:clear-active-failed`) preserve the exact installed record and receipt
+evidence for retry. Failed recovery retains the envelope/evidence and latches
+the runtime blocked before any queued turn can perform operational work.
 
 This contract implements only tested infrastructure. It creates no sidecar,
 chooses no copied-graph policy, enrolls no graph, invokes no native helper,

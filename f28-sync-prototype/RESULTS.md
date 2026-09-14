@@ -674,3 +674,77 @@ in-memory runtime state and synthetic persistence ports; it is neither a
 cross-process lock nor crash durability, and no such claim is made. The bridge
 remains disabled in every package. No graph, sidecar, helper, application,
 profile, account or network integration was accessed or enabled.
+
+## OG bridge blocked-recheck and uncertain-persistence correction
+
+The preceding 31-test/158-assertion result remains historical evidence for the
+overlap correction, but its serialized turns did not recheck the blocked latch
+once a turn actually started, and `start-active!` treated a save rejection as
+proof that nothing was persisted. Two failure cases motivated this correction.
+First, a public call checks `blocked?` only before enqueueing its turn: recovery
+could queue and await a deferred load, an incompatible start could queue behind
+it while the runtime was still unblocked, and after recovery failed and latched
+the runtime blocked the queued start still executed its body — performing its
+binding validation, persistence and installation through a blocked runtime.
+Second, a save rejection after the record was written returned
+`:active-refused` and left no reservation, so a queued incompatible start could
+overwrite the possibly persisted record while its true durable outcome was
+unknown. The reentrancy test also covered only a callback that queues nested
+work and returns its own receipt, not a callback that awaits it.
+
+The regressions were added first. Against the prior behavior the focused run
+had 29 failures and 3 errors in 38 tests/212 assertions: a queued start
+performed its save after a failed recovery latched the runtime blocked; a
+safety stop inside an awaited binding port did not stop the suspended turn from
+saving and installing; an unproven save rejection left the store's record
+unprotected against a queued incompatible start and returned
+`:active-refused` instead of a typed uncertain outcome; a clear rejection
+orphaned the in-memory owner with no validated-recovery path; proven no-write
+failures and genuinely uncertain outcomes were indistinguishable; validated
+recovery and the exact retry after an uncertain save had no specified
+reservation, evidence-preservation or retry semantics.
+
+The corrected bridge applies one rule uniformly: every coordination turn
+rechecks the runtime's blocked latch at section start and after every awaited
+port, refusing with typed `:coordination-blocked` results before its next
+publication — start, recovery, reconciliation publication, progress,
+acceptance and finish alike. A reconciliation that finds the runtime blocked at
+any of its four publication boundaries settles its cause as retryable
+reconcile-pending evidence without installing. For persistence, only a missing
+save port (never invoked) or a port declaring `:proven-no-write` is a clean
+refusal; any other save failure reserves the exact attempted envelope
+(transaction ID, serialized bytes, failure) as `:uncertain-active` evidence and
+returns `:active-save-uncertain`. While the reservation stands, only the exact
+same transaction may retry; a successful republication or validated recovery
+clears it. An uncertain clear rejection retains the installed owner, and
+recovery's `:none` branch now treats the durable store as authoritative: an
+empty store clears an orphaned in-memory owner (and any stale reservation),
+while a validated load resolves an outstanding reservation and preserves the
+exact evidence on failure. The `serialized!` contract is qualified: reentrancy
+is supported only for callbacks that return without awaiting the nested turn;
+the FIFO boundary does not detect or refuse an awaiting callback, and no
+general deadlock-freedom claim is made.
+
+Correction verification:
+
+- Focused production-hook bridge tests: 38/38 tests, 212 assertions.
+- Gap-demonstration run before correction: 38 tests, 212 assertions, 29
+  expected failures and 3 errors (the seven new regression tests plus the
+  updated asynchronous-active-storage assertion).
+- Accepted pure core/planner/executor/comparison/response/identity regressions:
+  75/75.
+- Full ClojureScript test-build compilation succeeded; no new bridge warning.
+- Production browser app compilation: 1,381 files, 148 compiled, zero warnings.
+- Changed-file ClojureScript lint (`og_sync_bridge.cljs`,
+  `og_sync_bridge_test.cljs`): zero warnings.
+
+The new fixtures use controlled deferred synthetic ports and counting ports,
+and assert returned typed results, operational call counts, runtime state,
+blocked-latch phase, reservation contents and deserialized fake-store records
+together. The reservation and blocked recheck are in-memory runtime semantics
+over synthetic ports: they are not cross-process locking, not crash durability
+and not a power-loss guarantee — a real crash between a durable write and its
+acknowledgement is addressed only by future validated recovery designs. The
+bridge remains disabled in every package. No graph, sidecar, helper,
+application, profile, account or network integration was accessed or enabled;
+the native-helper integration tests were deliberately not run in this batch.
