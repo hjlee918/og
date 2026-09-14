@@ -1,9 +1,10 @@
 # Bounded OG integration design
 
-Status: implementation-ready recommendation, 2026-09-12. Documentation and
-source review only. The standalone working-folder experiment is accepted within
-its recorded limits. No OG hook, sidecar, graph enrollment, application launch
-or real-file integration is implemented or approved.
+Status: default-off synthetic hook slice implemented, 2026-09-14. The
+standalone working-folder experiment remains accepted only within its recorded
+limits. The new removable OG bridge is not enabled in any package and has no
+real storage, graph enrollment, sidecar, application launch, native helper,
+network or real-file integration.
 
 ## Recommendation and metadata boundary
 
@@ -189,6 +190,48 @@ Focused acceptance tests:
 This slice proves source-seam placement, disabled equivalence and restartable
 coordination with synthetic ports. It does not apply a real file, prove watcher
 stability, establish power-loss durability or make OG usable for sync.
+
+## Implemented default-off checkpoint
+
+The approved slice is implemented as the single removable namespace
+`frontend.fs.og-sync-bridge`. Its only OG call sites are the existing Node save
+boundary, page rename boundary and raw watcher handler. The existing
+add/change body is exposed as `reconcile-from-disk!` so a future enabled adapter
+can inject that exact boundary; this checkpoint uses only a fake reconciliation
+port.
+
+`ENABLE-OG-SYNC-BRIDGE` defaults to false and is not overridden by any build or
+package. Test runtimes are dynamically bound. With neither the compile flag nor
+a test runtime, hook calls return synchronously before constructing payloads or
+accessing state and add no promise, persistence or watcher-suppression path.
+Save and rename cause tokens retain the exact originating repo and operation
+inputs across later graph switches and overlapping completions. Adapter
+exceptions block only the experimental runtime and do not replace OG results or
+errors.
+
+The synthetic runtime retains completed local causes separately from incoming
+causes. Complete-state matching uses the fake filesystem port and never expects
+operation IDs on watcher events. Zero or multiple matches remain ordinary; a
+different local edit remains on OG's ordinary watcher path. A unique incoming
+match records a successful fake reconciliation before later identical events
+can be classified as echoes. Failure remains retryable. Persisted success can
+survive the simulated restart, but a failure between an idempotent callback and
+its synthetic store record may repeat the callback; this is deliberately not an
+exactly-once or power-loss claim.
+
+The versioned synthetic `ACTIVE` envelope binds graph/replica, source snapshot,
+issued preview, target, authoritative plan, projected snapshot, proposed
+identity bytes, generations, ordered operation IDs, journal identity, graph
+binding and complete causes. Restart recomputes the transaction identity,
+revalidates the plan and binding through injected ports, and blocks incompatible
+batches. Acceptance additionally requires injected complete file, identity,
+checkpoint and binding evidence; snapshot data alone is refused.
+
+Focused ClojureScript verification passed 15 tests with 60 assertions, and the
+accepted pure core/planner/executor/comparison/response/identity regressions
+passed 75/75. The production browser target compiled with zero warnings. It was
+not launched or packaged. No native or filesystem-backed working-tree test was
+run because this batch authorized no graph-data access at all.
 
 ## Limits and approval decisions
 

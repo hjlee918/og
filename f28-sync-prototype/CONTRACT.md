@@ -347,3 +347,44 @@ power-loss durability. The selected generation may advance before a later
 working-file refusal; the retained journal/evidence requires recovery or a new
 reviewed preview. Real metadata placement, OG hooks, Chokidar, real graphs,
 accounts, network, encryption, mobile and cross-device sync remain excluded.
+
+## Default-off OG event bridge
+
+The removable `frontend.fs.og-sync-bridge` namespace is compiled with
+`ENABLE-OG-SYNC-BRIDGE` false unless a future separately approved build changes
+it. No package in this checkpoint changes that define. Tests inject a dynamic
+runtime containing in-memory state, a serialized-string operational store, a
+complete-state filesystem reader and a reconciliation callback. Production
+with the flag off constructs no bridge payload or transaction state and adds no
+promise, write, wait or watcher suppression.
+
+Save pending is registered immediately before the existing `writeFile` IPC.
+Completion follows the existing successful side effects; failure is emitted
+from the existing catch path. Rename intent binds the exact repo and old/new
+paths, while completion follows `fs/rename!` and the existing success callback;
+the existing catch remains the failure settlement. Opaque cause tokens, rather
+than current global graph state, bind later results. Adapter exceptions block
+experimental coordination without changing a successful OG operation or
+hiding its original error.
+
+Raw watcher events have no operation ID. The injected complete-state reader
+compares full path/presence/content evidence with retained causes. A unique
+completed local cause is classified separately from incoming work. Zero or
+ambiguous matches and different content remain ordinary observations. A unique
+incoming match calls the injected reconciliation boundary; successful state is
+stored before a later equal event is an echo, while failure remains pending for
+an idempotent retry. This is not a crash-proof exactly-once guarantee.
+
+The versioned synthetic ACTIVE envelope contains the exact graph, replica,
+snapshot, preview, target, authoritative plan, projected snapshot, proposed
+identity bytes, generation, ordered operation, working-journal, graph-binding
+and cause inputs. Simulated restart verifies its transaction digest, recomputes
+the authoritative plan and revalidates the binding. An incompatible batch is
+refused while ACTIVE remains. Identity acceptance requires complete injected
+file/identity/checkpoint/binding evidence; a snapshot checkpoint alone cannot
+clear ACTIVE.
+
+This contract implements only tested infrastructure. It creates no sidecar,
+chooses no copied-graph policy, enrolls no graph, invokes no native helper,
+persists no real metadata, launches no application and performs no network
+synchronization.

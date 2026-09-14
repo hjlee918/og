@@ -7,6 +7,7 @@
             [frontend.db :as db]
             [frontend.db.model :as model]
             [frontend.fs :as fs]
+            [frontend.fs.og-sync-bridge :as og-sync-bridge]
             [frontend.handler.editor :as editor-handler]
             [frontend.handler.editor.property :as editor-property]
             [frontend.handler.file :as file-handler]
@@ -41,7 +42,7 @@
           (fn [b] [(:block/uuid b) :id (str (:block/uuid b))])
           missing-blocks))))))
 
-(defn- handle-add-and-change!
+(defn reconcile-from-disk!
   [repo path content db-content mtime backup?]
   (p/let [;; save the previous content in a versioned bak file to avoid data overwritten.
           _ (when backup?
@@ -57,6 +58,7 @@
 
 (defn handle-changed!
   [type {:keys [dir path content stat global-dir] :as payload}]
+  (og-sync-bridge/observe-watcher! type dir path content stat global-dir)
   (when dir
     (let [;; Global directory events don't know their originating repo so we rely
           ;; on the client to correctly identify it
@@ -86,7 +88,7 @@
               (and (= "add" type)
                    (not= (string/trim content) (string/trim db-content)))
               (let [backup? (not (string/blank? db-content))]
-                (handle-add-and-change! repo path content db-content mtime backup?))
+                (reconcile-from-disk! repo path content db-content mtime backup?))
 
               (and (= "change" type)
                    (= dir repo-dir)
@@ -99,7 +101,7 @@
                              (string/trim (or (state/get-default-journal-template) "")))
                           (= (string/trim content) "-")
                           (= (string/trim content) "*")))
-                (handle-add-and-change! repo path content db-content mtime (not global-dir))) ;; no backup for global dir
+                (reconcile-from-disk! repo path content db-content mtime (not global-dir))) ;; no backup for global dir
 
               (and (= "unlink" type)
                    exists-in-db?)
@@ -178,12 +180,12 @@
            (cond
              (and file-exists?
                   db-empty?)
-             (handle-add-and-change! repo file-rpath file-content db-content file-mtime false)
+             (reconcile-from-disk! repo file-rpath file-content db-content file-mtime false)
 
              (and file-exists?
                   (not db-empty?)
                   (not= file-content db-content))
-             (handle-add-and-change! repo file-rpath file-content db-content file-mtime true))
+             (reconcile-from-disk! repo file-rpath file-content db-content file-mtime true))
 
            (ui-handler/re-render-root!)
 

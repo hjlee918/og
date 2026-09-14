@@ -13,6 +13,7 @@
             [frontend.db.utils :as db-utils]
             [frontend.format.block :as block]
             [frontend.fs :as fs]
+            [frontend.fs.og-sync-bridge :as og-sync-bridge]
             [frontend.handler.common :as common-handler]
             [frontend.handler.config :as config-handler]
             [frontend.handler.editor :as editor-handler]
@@ -217,14 +218,18 @@
               (log/error :rename-file e)))
        (transact)) ;; interrupted if failed
 
-     (->
-      (p/let [_ (state/offer-file-rename-event-chan! {:repo repo
-                                                      :old-path old-path
-                                                      :new-path new-path})
-              _ (fs/rename! repo old-path new-path)]
-        (ok-handler))
-      (p/catch (fn [error]
-                 (println "file rename failed: " error)))))))
+     (let [cause (og-sync-bridge/rename-intent! repo old-path new-path)]
+       (->
+        (p/let [_ (state/offer-file-rename-event-chan! {:repo repo
+                                                        :old-path old-path
+                                                        :new-path new-path})
+                rename-result (fs/rename! repo old-path new-path)
+                ok-result (ok-handler)]
+          (og-sync-bridge/rename-completed! cause rename-result)
+          ok-result)
+        (p/catch (fn [error]
+                   (og-sync-bridge/rename-failed! cause error)
+                   (println "file rename failed: " error))))))))
 
 (defn- replace-page-ref!
   "Unsanitized names"

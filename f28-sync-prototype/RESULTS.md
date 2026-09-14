@@ -521,3 +521,52 @@ can be selected before a later working-tree refusal, so recovery or a new
 reviewed preview remains necessary. No real sidecar location, watcher, OG hook,
 graph enrollment, application integration, account, network, encryption or
 cross-device behavior was implemented.
+
+## Default-off OG event bridge slice
+
+The approved production-seam slice adds one removable
+`frontend.fs.og-sync-bridge` namespace and minimal hook calls at the existing
+save, rename and watcher boundaries. Its compile-time flag remains false and is
+not enabled by any package. All operational state, serialized storage,
+complete-state reads and reconciliation calls in the tests are injected,
+in-memory fakes. No graph data, filesystem fixture, sidecar, profile,
+application, native helper or network service was accessed.
+
+The first focused run did not complete: two restart assertions used a load port
+that closed over the wrong empty atom, and the overlap fixture tried to resolve
+fake IPC before Promesa had invoked it. After correcting only those fixtures,
+the next run exposed two more expectation/setup defects: the adapter was
+intentionally blocked by the first completion before the second completion had
+been sequenced, and the rename database stub returned an ID rather than the
+synthetic file. These failed results were not treated as passing evidence. The
+fixtures were made explicitly ordered and exact.
+
+Final verification:
+
+- Focused bridge and real OG-boundary tests: 15/15 tests, 60 assertions.
+- Accepted pure core/planner/executor/comparison/response/identity regressions:
+  75/75.
+- Full ClojureScript test-build compilation succeeded (707 files in the final
+  incremental build); its 25 inference/redefinition warnings are pre-existing
+  repository warnings outside this slice.
+- The production browser app target compiled successfully (1,381 files, zero
+  warnings). It was not launched or packaged.
+- Changed source and test lint passed with zero warnings, JavaScript syntax
+  checks for the relevant identity and stable-working coordinators passed, and
+  `git diff --check` passed.
+
+The focused cases cover disabled save/rename/watcher settlement and ordering;
+zero enabled-runtime work while disabled; pending, completed and failed causes;
+adapter-failure isolation; overlapping saves and graph switches; incoming work
+blocked by an unfinished local save; a different local edit remaining ordinary;
+unique, zero and ambiguous complete watcher matching; reconciliation failure,
+retry, recorded success and later echo classification; versioned ACTIVE
+serialization; restart revalidation; tampered inputs; non-authoritative plans;
+incompatible batches; persisted reconciliation progress; and refusal of
+snapshot-only identity acceptance.
+
+This remains synthetic infrastructure, not usable synchronization. The
+reconciliation callback must be idempotent because a crash before its progress
+record can cause a retry. No power-loss durability, real watcher stability,
+sidecar placement, copied-graph decision, enrollment, native application,
+account, network or cross-device behavior is established.
