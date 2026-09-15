@@ -21,9 +21,16 @@ const { execFileSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..', '..');
 const OBSERVATION = process.argv.slice(2).includes('--observation');
+const IDENTITY_CAPTURE = process.argv.slice(2).includes('--identity-capture');
+if (OBSERVATION && IDENTITY_CAPTURE) {
+  die('--observation and --identity-capture are separate builds; pass one mode');
+}
 const STATIC = path.join(REPO, 'static');
-const ID = require(path.join(REPO, OBSERVATION ? 'f28-observation' : 'f28-origin', 'src', 'experiment-identity.js'));
-const EXPECTED_OUT = path.resolve(REPO, '..', OBSERVATION ? 'out-f28-observation' : 'out-originexp');
+const ID = require(path.join(REPO,
+  OBSERVATION ? 'f28-observation' : IDENTITY_CAPTURE ? 'f28-identity-capture' : 'f28-origin',
+  'src', 'experiment-identity.js'));
+const EXPECTED_OUT = path.resolve(REPO, '..', OBSERVATION ? 'out-f28-observation'
+  : IDENTITY_CAPTURE ? 'out-f28-identity-capture' : 'out-originexp');
 const PLATFORM = 'darwin';
 const ARCH = process.arch;
 const FORGE_CLI = path.join(STATIC, 'node_modules', '@electron-forge', 'cli', 'dist',
@@ -70,15 +77,17 @@ console.log(`[package-experiment] packaging ${PLATFORM}/${ARCH} (unsigned, local
 
 let offlineElectron = null;
 let packageEnv = process.env;
-if (OBSERVATION) {
+if (OBSERVATION || IDENTITY_CAPTURE) {
   const installed = path.join(REPO, 'node_modules', 'electron', 'dist');
   const version = fs.readFileSync(path.join(installed, 'version'), 'utf8').trim();
   const packageVersion = require(path.join(REPO, 'node_modules', 'electron', 'package.json')).version;
   if (version !== packageVersion) die(`installed Electron ${version} does not match package ${packageVersion}`);
-  offlineElectron = fs.mkdtempSync(path.join(os.tmpdir(), 'f28-observation-electron-'));
+  offlineElectron = fs.mkdtempSync(path.join(os.tmpdir(),
+    IDENTITY_CAPTURE ? 'f28-identity-capture-electron-' : 'f28-observation-electron-'));
   const zip = path.join(offlineElectron, `electron-v${version}-${PLATFORM}-${ARCH}.zip`);
   execFileSync('/usr/bin/zip', ['-qry', zip, '.'], {cwd: installed, stdio: 'inherit'});
-  packageEnv = Object.assign({}, process.env, {F28_OBSERVATION_ELECTRON_ZIP_DIR: offlineElectron});
+  packageEnv = Object.assign({}, process.env,
+    {[IDENTITY_CAPTURE ? 'F28_IDENTITY_CAPTURE_ELECTRON_ZIP_DIR' : 'F28_OBSERVATION_ELECTRON_ZIP_DIR']: offlineElectron});
   console.log(`[package-experiment] using local Electron ${version} archive; no download`);
 }
 

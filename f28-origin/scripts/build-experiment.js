@@ -34,8 +34,17 @@ const { execFileSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..', '..');
 const OBSERVATION = process.argv.slice(2).includes('--observation');
+// The live identity-capture build: the observation build's renderer and
+// guards, under a THIRD dedicated identity, so the Observation package and
+// its profile are never launched, replaced or claimed by the capture batch.
+const IDENTITY_CAPTURE = process.argv.slice(2).includes('--identity-capture');
+if (OBSERVATION && IDENTITY_CAPTURE) {
+  die('--observation and --identity-capture are separate builds; pass one mode');
+}
+const EXPERIMENT_DIR = OBSERVATION ? 'f28-observation'
+  : IDENTITY_CAPTURE ? 'f28-identity-capture' : 'f28-origin';
 const STATIC = path.join(REPO, 'static');
-const SRC = path.join(REPO, OBSERVATION ? 'f28-observation' : 'f28-origin', 'src');
+const SRC = path.join(REPO, EXPERIMENT_DIR, 'src');
 const ORIGIN_SRC = path.join(REPO, 'f28-origin', 'src');
 const PILOT_SRC = path.join(REPO, 'f27-pilot', 'src');
 const ID = require(path.join(SRC, 'experiment-identity.js'));
@@ -102,7 +111,9 @@ function hashStaticAssets() {
 
 // ---------------------------------------------------------------- preconditions
 log('repo', REPO);
-log('mode', OBSERVATION ? 'isolated observation-only' : 'origin experiment');
+log('mode', OBSERVATION ? 'isolated observation-only'
+  : IDENTITY_CAPTURE ? 'isolated observation-only with external identity capture'
+  : 'origin experiment');
 
 for (const name of PROTECTED_CHECKOUTS) {
   if (path.basename(REPO) === name || REPO.split(path.sep).includes(name)) {
@@ -169,7 +180,10 @@ try {
     "for (const key of ['openExternal', 'openPath', 'showItemInFolder']) { Object.defineProperty(shell, key, {value: () => { return ipcRenderer.invoke('origin-experiment-refuse'); }, writable: false, configurable: false}); }\n" + anchor));
 }
 
-const APP_CONFIG_MERGE = OBSERVATION
+// Both bridge modes compile the same default-off bridge namespaces on; the
+// identity-capture build's in-app runtime remains observation-only, with every
+// persistence and synchronization port absent.
+const APP_CONFIG_MERGE = (OBSERVATION || IDENTITY_CAPTURE)
   ? '{:closure-defines {frontend.fs.og-sync-bridge/ENABLE-OG-SYNC-BRIDGE true '
     + 'frontend.fs.og-sync-bridge/ENABLE-OG-BRIDGE-OBSERVATION true}}'
   : null;
@@ -196,7 +210,7 @@ if (/sentry|posthog/i.test(defines)) {
   die(`the renderer carries an instrumentation define: ${defines}`);
 }
 log('telemetry defines absent from the renderer');
-if (OBSERVATION &&
+if ((OBSERVATION || IDENTITY_CAPTURE) &&
     (!defines.includes('frontend.fs.og_sync_bridge.ENABLE_OG_SYNC_BRIDGE') ||
      !defines.includes('frontend.fs.og_sync_bridge.ENABLE_OG_BRIDGE_OBSERVATION'))) {
   die(`the renderer does not carry both observation closure defines: ${defines}`);
@@ -284,11 +298,13 @@ const basePkg = JSON.parse(fs.readFileSync(path.join(REPO, 'resources', 'package
 const pkg = Object.assign({}, basePkg, {
   name: ID.PACKAGE_NAME,
   productName: ID.PRODUCT_NAME,
-  version: `${basePkg.version}-${OBSERVATION ? 'f28observation' : 'f28originexp'}.1`,
+  version: `${basePkg.version}-${OBSERVATION ? 'f28observation' : IDENTITY_CAPTURE ? 'f28identitycapture' : 'f28originexp'}.1`,
   main: 'pilot-main.js',
   description: OBSERVATION
     ? 'Isolated observation-only bridge build of Logseq OG. Not for distribution.'
-    : 'Isolated local ORIGIN EXPERIMENT build of Logseq OG. Not for distribution.',
+    : IDENTITY_CAPTURE
+      ? 'Isolated observation-only bridge build of Logseq OG for the external identity-capture batch. Not for distribution.'
+      : 'Isolated local ORIGIN EXPERIMENT build of Logseq OG. Not for distribution.',
 });
 // `make`/`publish` must not be reachable from the packaged application.
 delete pkg.scripts;
@@ -296,10 +312,13 @@ fs.writeFileSync(path.join(STATIC, 'package.json'), JSON.stringify(pkg, null, 2)
 log(`package.json: name=${pkg.name} productName="${pkg.productName}" main=${pkg.main}`);
 
 try {
-  execFileSync(process.execPath, [path.join(REPO,
-    OBSERVATION ? 'f28-observation' : 'f27-pilot', 'scripts',
-    OBSERVATION ? 'make-observation-icon.js' : 'make-icon.js')],
-               { stdio: 'inherit' });
+  // The identity-capture build reuses the observation build's hash-pinned
+  // canary icon script unchanged: the icon is identity-independent and pinned
+  // by content hash.
+  const iconScript = OBSERVATION || IDENTITY_CAPTURE
+    ? path.join(REPO, 'f28-observation', 'scripts', 'make-observation-icon.js')
+    : path.join(REPO, 'f27-pilot', 'scripts', 'make-icon.js');
+  execFileSync(process.execPath, [iconScript], { stdio: 'inherit' });
 } catch (e) {
   if (!fs.existsSync(PRESERVED_ICON) || sha256(fs.readFileSync(PRESERVED_ICON)) !== PRESERVED_ICON_SHA256) {
     die('icon generation failed and the exact preserved experimental icon is unavailable');
@@ -340,7 +359,7 @@ const manifest = {
   },
   closureDefines: Object.assign({ 'electron.pilot/PILOT': true,
                                   'electron.origin-experiment/ORIGIN_EXPERIMENT': true },
-                                OBSERVATION ? {
+                                (OBSERVATION || IDENTITY_CAPTURE) ? {
                                   'frontend.fs.og-sync-bridge/ENABLE-OG-SYNC-BRIDGE': true,
                                   'frontend.fs.og-sync-bridge/ENABLE-OG-BRIDGE-OBSERVATION': true,
                                 } : {}),
@@ -372,7 +391,7 @@ const manifest = {
       sha256: sha256(fs.readFileSync(path.join(STATIC, PLUGIN_HOST_BUNDLE))),
       productionSha256: sha256(fs.readFileSync(path.join(REPO, 'resources', 'js', 'lsplugin.core.js'))),
     },
-    bridge: OBSERVATION ? {
+    bridge: (OBSERVATION || IDENTITY_CAPTURE) ? {
       mode: 'observation-only',
       schema: 'frontend.fs.og-sync-bridge.observation/1',
       persistence: false,

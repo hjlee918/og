@@ -58,6 +58,8 @@ const sleep = OP.sleep;
 // preserved and cannot be overwritten. It defaults to `out` for every build
 // that predates that distinction.
 const BUILDS = [
+  { app: 'Logseq-OG-F28-IdentityCapture', dir: 'f28-identity-capture', out: 'out-f28-identity-capture',
+    identity: 'f28-identity-capture/src/experiment-identity.js' },
   { app: 'Logseq-OG-F28-Observation', dir: 'f28-observation', out: 'out-f28-observation',
     identity: 'f28-observation/src/experiment-identity.js' },
   { app: 'Logseq-OG-F28-OriginExp', dir: 'f28-origin', out: 'out-originexp',
@@ -244,7 +246,8 @@ function currentGraphVerdict({ api, liveRepo, storage, approved, allowedRoot }) 
  */
 function resolve(prefer) {
   const wanted = prefer ? BUILDS.filter((b) => b.app === prefer)
-    : BUILDS.filter((b) => !['Logseq-OG-F28-OriginExp', 'Logseq-OG-F28-Observation'].includes(b.app));
+    : BUILDS.filter((b) => !['Logseq-OG-F28-OriginExp', 'Logseq-OG-F28-Observation',
+                             'Logseq-OG-F28-IdentityCapture'].includes(b.app));
   const darwinArch = process.arch === 'arm64' ? 'arm64' : 'x64';
   for (const b of wanted) {
     const appDir = path.join(FEATURE_DIR, b.out || 'out', `${b.app}-darwin-${darwinArch}`, `${b.app}.app`);
