@@ -8,7 +8,7 @@
  * batching, update-request derivation, duplicate collapse, re-feed refusal,
  * stale-evidence pending and the injected record-persistence failure with its
  * exact-retry recovery — against the real anchored helper and the real pure
- * modules, on a scratch owned synthetic graph seeded with putNote fixtures the
+ * modules, on a scratch owned synthetic graph seeded with putNoteFixture seeds the
  * way the persistence acceptance tests seed theirs.
  *
  * It never touches a live OG graph, never launches an application and is not
@@ -55,8 +55,8 @@ PI.initializeOwnedRun(context);
 const open0 = PI.openGraph(context);
 check('unenrolled-before-explicit-enrollment', open0.outcome === 'unenrolled');
 
-PI.putNote(context, englishPath, seed('english'));
-PI.putNote(context, koreanPath, seed('korean'));
+PI.putNoteFixture(context, englishPath, seed('english'));
+PI.putNoteFixture(context, koreanPath, seed('korean'));
 const before = PI.hashGraphNotes(context);
 const enrollment = PI.enrollGraph(context, {
   graphId,
@@ -103,7 +103,7 @@ function captureSave(acceptedState, fileId, notePath, content, {duplicates = fal
 }
 
 // English save, fed once.
-PI.putNote(context, englishPath, seed('english-edit-1'));
+PI.putNoteFixture(context, englishPath, seed('english-edit-1'));
 const save1 = C.stableRead(context, englishPath);
 check('stable-read-matches-disk', save1.stable && save1.content === seed('english-edit-1'));
 const captured1 = captureSave(accepted, 'file-english', englishPath, save1.content);
@@ -111,7 +111,7 @@ accepted = captured1.opened;
 check('save-captured-to-accepted-record', accepted.sidecar.metadataRevision === 'metadata-2');
 
 // A duplicate-fed save collapses to exactly one revision.
-PI.putNote(context, englishPath, seed('english-edit-2'));
+PI.putNoteFixture(context, englishPath, seed('english-edit-2'));
 const save2 = C.stableRead(context, englishPath);
 const captured2 = captureSave(accepted, 'file-english', englishPath, save2.content, {duplicates: true});
 accepted = captured2.opened;
@@ -129,13 +129,13 @@ check('re-fed-created-no-second-revision', PI.openGraph(context).sidecar.metadat
 // disk is ahead of the sidecar the store refuses to read as accepted — that
 // ambiguity is itself the pending state — so the retained pre-edit accepted
 // state is the only capture baseline.
-PI.putNote(context, englishPath, seed('english-edit-3'));
+PI.putNoteFixture(context, englishPath, seed('english-edit-3'));
 const staleBytes = C.stableRead(context, englishPath).content;
 const diskAhead = PI.openGraph(context);
 check('disk-ahead-of-sidecar-refused-as-ambiguous',
   diskAhead.outcome === 'refused' && diskAhead.code === 'snapshot-mismatch');
 const staleAccepted = accepted;
-PI.putNote(context, englishPath, seed('english-edit-4'));
+PI.putNoteFixture(context, englishPath, seed('english-edit-4'));
 const saveId3 = `save-${digestHex(`${graphId}\0${englishPath}\0sha256:${crypto.createHash('sha256').update(staleBytes).digest('hex')}`)}`;
 const staleBatch = C.runCapture(staleAccepted, [
   {observationId: `obs-${saveId3}-complete`, type: 'save-complete', saveId: saveId3,
@@ -187,7 +187,7 @@ check('rename-retains-file-identity-updates-path',
   !Object.keys(accepted.sidecar.identity.tombstones).includes('file-korean'));
 
 // A subsequent save at the new path.
-PI.putNote(context, renamedPath, `${readRenamed.content}- renamed edit\n`);
+PI.putNoteFixture(context, renamedPath, `${readRenamed.content}- renamed edit\n`);
 const save5 = C.stableRead(context, renamedPath);
 const captured5 = captureSave(accepted, 'file-korean', renamedPath, save5.content);
 accepted = captured5.opened;
@@ -195,7 +195,7 @@ check('post-rename-edit-captured-at-new-path', accepted.sidecar.metadataRevision
 
 // An injected record-persistence failure preserves the note and leaves the
 // exact transaction pending; only the identical re-issue recovers it.
-PI.putNote(context, englishPath, seed('english-edit-5'));
+PI.putNoteFixture(context, englishPath, seed('english-edit-5'));
 const save6 = C.stableRead(context, englishPath);
 const causeHash6 = `sha256:${crypto.createHash('sha256').update(save6.content).digest('hex')}`;
 const saveId6 = `save-${digestHex(`${graphId}\0${englishPath}\0${causeHash6}`)}`;

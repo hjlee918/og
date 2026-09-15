@@ -236,17 +236,82 @@ function initializeOwnedRun(context) {
   return context;
 }
 
-function putNote(context, notePath, content) {
+/*
+ * FIXTURE ONLY. `expect: 'any'` installs arbitrary bytes over whatever is at the
+ * destination, which is exactly what a test seed wants and exactly what an
+ * incoming application must never do. Every caller of this function is a test or
+ * harness seed; the incoming applier reaches the graph only through
+ * `putNoteExpecting` below, which has no `any` and no default.
+ */
+function putNoteFixture(context, notePath, content) {
   invoke(context, {
     command: 'put-note', notePath, data: Buffer.from(content, 'utf8'),
     transactionId: digest(`note\0${notePath}\0${content}`), expect: 'any',
   });
 }
 
-function readNote(context, notePath) {
+/*
+ * The only note write reachable from incoming application. The caller must state
+ * the exact state it requires the destination to be in -- `absent` or a 64-hex
+ * content hash -- and the helper rechecks that immediately before its rename.
+ * `any`, an empty value and a missing value are all refused here, so no incoming
+ * path can fall back to an unconditional overwrite.
+ *
+ * This is a recheck-then-rename under the cooperative lock, not an atomic
+ * compare-and-swap: a writer that does not honour the lock can still change the
+ * destination between the recheck and the rename.
+ */
+function putNoteExpecting(context, notePath, bytes, expect) {
+  if (expect !== 'absent' && !/^[0-9a-f]{64}$/.test(String(expect || ''))) {
+    throw new PersistentIdentityError('invalid-precondition',
+      'an incoming note write requires expect to be "absent" or a 64-hex content hash');
+  }
+  const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes), 'utf8');
+  invoke(context, {
+    command: 'put-note', notePath, data, expect,
+    transactionId: digest(`note\0${notePath}\0${data.toString('hex')}`),
+  });
+}
+
+function readNoteBytes(context, notePath) {
   const output = invoke(context, { command: 'read-note', notePath });
-  const data = decodeMaybe(output.data);
+  return decodeMaybe(output.data);
+}
+
+function readNote(context, notePath) {
+  const data = readNoteBytes(context, notePath);
   return data === null ? null : data.toString('utf8');
+}
+
+// ------------------------------------------- incoming-application journal
+
+/*
+ * One bounded device-local record at one compile-time name in the owned profile
+ * directory. The caller expresses no path, name or component: the helper's
+ * JOURNAL_NAME is the only location either command can reach. `expect` is
+ * mandatory in the same shape as every other record write, so the journal slot
+ * itself serializes transactions -- a new transaction can only claim a slot that
+ * is absent or holds the exact closed journal it names.
+ */
+function writeJournal(context, bytes, expect, transactionId = NO_TRANSACTION) {
+  if (expect !== 'absent' && !/^[0-9a-f]{64}$/.test(String(expect || ''))) {
+    throw new PersistentIdentityError('invalid-precondition',
+      'a journal write requires expect to be "absent" or a 64-hex content hash');
+  }
+  const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes), 'utf8');
+  invoke(context, { command: 'write-journal', data, expect, transactionId });
+}
+
+/*
+ * Bytes that do not parse are evidence, not a read error: they are returned
+ * intact and named, so a refusal can report the state without destroying it.
+ */
+function readJournal(context) {
+  const output = invoke(context, { command: 'read-journal' });
+  const bytes = decodeMaybe(output.journal);
+  if (bytes === null) return { bytes: null, hash: null, value: null, malformed: false };
+  const parsed = parseRecord(bytes);
+  return { bytes, hash: bytesHash(bytes), value: parsed.value, malformed: parsed.malformed };
 }
 
 /*
@@ -981,9 +1046,12 @@ module.exports = {
   initializeOwnedRun,
   openGraph,
   publish,
-  putNote,
+  putNoteExpecting,
+  putNoteFixture,
   putNoteRelocatedForTest,
+  readJournal,
   readNote,
+  readNoteBytes,
   readRecords,
   recordAssertionFailure,
   recordDiagnostic,
@@ -993,6 +1061,7 @@ module.exports = {
   snapshotFromDisk,
   transactionFor,
   updateIdentity,
+  writeJournal,
   writeRawRecordForTest,
   writeRecordExpecting,
 };

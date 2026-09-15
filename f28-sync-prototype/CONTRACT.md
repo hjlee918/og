@@ -681,3 +681,90 @@ still not synchronization: no change moves between devices or processes, no
 incoming change is applied, no personal graph is enrolled, and nothing is
 enabled in any normal or existing package; transport and incoming
 application remain separate future approvals.
+
+## Incoming change application contract (2026-09-15)
+
+The first slice in which the external coordinator writes note bytes. Its design
+is `INCOMING_CHANGE_DESIGN.md` and its verified results are in `RESULTS.md`,
+section "Incoming change application (2026-09-15)". Its terms extend this
+contract without weakening any of it.
+
+- **The application still gains nothing.** The packaged build is the accepted
+  observation-only IdentityCapture package, reused unmodified and not rebuilt:
+  no persistence port, no synchronization port, no helper execution, no new
+  IPC, no process-launch exception, no network permission, no renderer
+  filesystem access beyond OG's own. `ENABLE-OG-SYNC-BRIDGE` remains false and
+  no OG source changed.
+- **OG is still the only note writer while it is running.** The coordinator
+  writes notes only while the owned application is proven to have exited, only
+  through the anchored helper, and only with an exact destination precondition.
+- **No unconditional note write is reachable from the incoming path.**
+  `putNoteExpecting` requires `absent` or a 64-hex content hash, has no default
+  and rejects `'any'`. `putNoteFixture` keeps `expect: 'any'` and is reachable
+  only from explicitly identified fixture and seed call sites.
+- **Exact base, never rebased.** A proposal must name the accepted
+  `metadataRevision`, `acceptedSnapshotFingerprint`, `acceptedTransactionId` and
+  `graphId`. Any other base refuses `unknown-base`. The plan is recomputed with
+  `compareSnapshots` and a proposal whose plan is not reproduced refuses
+  `plan-mismatch`; the proposal never names revisions on its own authority.
+- **Newer local edits refuse by content, not by time.** Every affected file is
+  read twice through the anchored helper and compared with the accepted record.
+  A disk-ahead graph refuses `local-ahead-of-accepted`, an absent accepted note
+  refuses `missing-base`, an occupied create destination refuses
+  `destination-occupied`. There is no merge, no last-writer-wins and no
+  time-window rule.
+- **Preview and explicit approval.** `planIncoming` writes nothing anywhere.
+  `applyIncoming` requires the exact `previewFingerprint` to be passed back and
+  recomputes the preview from scratch, refusing `preview-stale` on any
+  difference. There is no default, timeout or standing approval.
+- **Two kinds of refusal, never conflated.** A preflight refusal carries
+  `mutated: false` and is raised before the first note write. An interruption
+  after a note write carries `mutated: true` and the exact list of files already
+  at target. "Nothing changed" is said only of the first kind.
+- **Paths and parents.** An incoming target must be a direct child `.md` of
+  `pages/` or `journals/`, and its parent must be **proven to exist** by an
+  accepted file in that parent reading back through the anchored walk. Syntax
+  alone is not enough, because `put-note` creates missing directories. An
+  unproven parent refuses `unproven-parent-directory` before the helper is
+  invoked, so incoming application creates no directory.
+- **Bytes.** Notes must be valid UTF-8 that round-trips through the string APIs;
+  bytes that do not are refused `non-roundtrip-bytes`, never replaced. Per note
+  256 KiB, per serialized journal 2 MiB, both enforced before the first note
+  write.
+- **One bounded journal at one compile-time name.** `write-journal` and
+  `read-journal` reach only `<profileDir>/incoming-journal.json`; the caller
+  expresses no path. The immutable `approved` half is guarded by `approvedHash`;
+  `progress` is the only mutable part and is a claim, never proof. The journal
+  slot is the transaction lock: creation requires `absent` or the exact hash of
+  a `closed` journal, so an unfinished transaction refuses a fresh proposal with
+  `transaction-outstanding`, and a resumed coordinator discovers it by reading
+  one fixed path with no listing. A closed journal is retained and superseded,
+  never deleted; there is no `clear-journal` command.
+- **Recovery earns the right to write.** Schema, exact key sets, bounds, hex and
+  hash well-formedness, `approvedHash`, graph and profile bindings including
+  device and inode, graph lineage, accepted base, a recomputed plan and a
+  complete unique byte-ordered `applyOrder` must all hold. These establish
+  **consistency, not authenticity**: a forger with write access to the owned
+  profile directory can produce a self-consistent journal and nothing here
+  detects it.
+- **Whole-transaction preflight, roll-forward only.** Every file is classified
+  from disk before any is written. A single `third-state` anywhere stops
+  recovery before any further note mutation, including files earlier in the
+  order that were still pending. Each remaining destination is rechecked
+  immediately before its own write through the helper's precondition — still a
+  recheck-then-rename, not a compare-and-swap. There is no automatic rollback;
+  before-images are evidence for a later, separately approved restoration.
+- **Disk decides progress.** `progress.applied` is cross-checked against the
+  disk classification and a disagreement is reported, not treated as an error:
+  an interruption between a note write and its progress update is expected.
+- **The app-closed gate is verified before every write.** A dead retained PID
+  tree plus zero processes carrying the exact packaged executable name, with
+  unreadable process state treated as uncertain and refused, and re-evaluated
+  per write so a stale verdict cannot authorize a later one. It excludes one
+  application and nothing else — not Finder, cloud agents, external editors, a
+  second coordinator, or the same app launched again after the check passes.
+
+This is not cross-device synchronization. The second replica is a synthetic
+in-memory state on the same host; there is no transport, no peer and no network.
+Incoming rename and delete, application while OG runs, real transport, personal
+data enrollment and daily use remain separate future approvals.

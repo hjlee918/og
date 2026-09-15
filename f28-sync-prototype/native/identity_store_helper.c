@@ -34,6 +34,12 @@
 #define MAX_ENTRIES 512u
 #define SIDECAR_NAME "identity-v1.json"
 #define DEVICE_NAME "device.json"
+/*
+ * The incoming-application journal lives at exactly one compile-time name in
+ * the owned profile directory. No caller can express any other name, path or
+ * component for it, so the journal commands add no reachable location.
+ */
+#define JOURNAL_NAME "incoming-journal.json"
 
 typedef struct {
   char command[24], run[96], owner[129], graphdir[81], profiledir[81];
@@ -213,7 +219,8 @@ static Request parse(void) {
   if (strcmp(line(&cursor, "END"), "1") || *cursor) die("trailing protocol data");
 
   const char *commands[] = {"init", "put-note", "read-note", "hash-graph",
-                            "read-records", "write-record", "clear-intent"};
+                            "read-records", "write-record", "clear-intent",
+                            "write-journal", "read-journal"};
   int known = 0;
   for (size_t index = 0; index < sizeof commands / sizeof commands[0]; index++)
     if (!strcmp(request.command, commands[index])) known = 1;
@@ -754,7 +761,7 @@ int main(void) {
    * before opening anything else: reads share it, mutations take it exclusively.
    */
   int mutating = strcmp(request.command, "read-note") && strcmp(request.command, "read-records") &&
-                 strcmp(request.command, "hash-graph");
+                 strcmp(request.command, "hash-graph") && strcmp(request.command, "read-journal");
   Anchor profile_anchor = open_profile(&request);
   acquire_lock(profile_anchor.descriptor, mutating);
   if (!strcmp(request.relocate, "profile"))
@@ -877,6 +884,31 @@ int main(void) {
     } else die("record target required");
     reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
     printf("STATUS ok\n");
+    return 0;
+  }
+
+  /*
+   * The incoming-application journal: one bounded device-local record at one
+   * fixed name in the owned profile directory. It takes the same destination
+   * precondition, the same exclusive lock, the same staged-write/recheck/rename
+   * publication and the same entry re-verification as every other record. There
+   * is deliberately no clear-journal command: a finished journal is retained and
+   * the next transaction replaces it under its exact hash.
+   */
+  if (!strcmp(request.command, "write-journal")) {
+    if (!request.data_len) die("journal body required");
+    if (!valid_utf8(request.data, request.data_len)) die("journal is not bounded UTF-8");
+    publish_entry(&request, profile_anchor.descriptor, JOURNAL_NAME,
+                  request.data, request.data_len);
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
+    printf("STATUS ok\n");
+    return 0;
+  }
+
+  if (!strcmp(request.command, "read-journal")) {
+    printf("STATUS ok\n");
+    print_entry(profile_anchor.descriptor, "JOURNAL", JOURNAL_NAME);
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
     return 0;
   }
 

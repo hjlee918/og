@@ -1632,3 +1632,196 @@ anything, and no personal graph, backup, export, profile or existing
 package was read, altered, replaced or launched. This is local capture
 only — not cross-device synchronization — and nothing is enabled in any
 normal or existing package.
+
+## Incoming change application (2026-09-15)
+
+The first approved slice in which the external coordinator **writes note bytes**.
+Every earlier stage kept OG as the sole note writer. It does so only through the
+anchored helper, only with an exact precondition, only after an explicitly
+approved preview, and only while the owned application is proven to have exited.
+The design, with the ambiguities resolved before implementation, is
+`f28-sync-prototype/INCOMING_CHANGE_DESIGN.md`.
+
+### What was built
+
+- `native/identity_store_helper.c` gained exactly two commands, `write-journal`
+  and `read-journal`, over one compile-time name (`JOURNAL_NAME`,
+  `incoming-journal.json`) directly inside the already-anchored owned profile
+  directory. Neither accepts a path, name or component, so no new location is
+  reachable. Both use the existing `publish_entry`/`read_entry` code, the
+  existing cooperative lock (write exclusive, read shared), the existing
+  anchoring walk and the existing entry re-verification, and `write-journal`
+  requires an `EXPECT` precondition like every other record write. There is no
+  `clear-journal`: a finished journal is marked `closed` and retained, and the
+  next transaction replaces it under its exact hash. The helper still compiles
+  with `-Wall -Wextra -Werror -Wconversion -Wshadow`.
+- `src/persistent-identity.js` split the fixture-grade note writer in two.
+  `putNoteFixture` keeps `expect: 'any'` and is now called only from explicitly
+  identified fixture and seed call sites (the two test suites and the
+  identity-capture isolation check, all renamed). `putNoteExpecting` requires
+  `absent` or a 64-hex hash, has no default and rejects `'any'` outright; it is
+  the only note write the incoming path can reach. Added `readNoteBytes` (raw
+  bytes, no string decoding), `writeJournal` and `readJournal`.
+- `src/incoming-application.js` is new: proposal validation, plan recomputation,
+  the refusal checks, preview and approval fingerprint, bounded journal with
+  before-images, per-file application and roll-forward recovery. It adds no
+  second engine — the plan is owned by `snapshot-comparison`, the projection by
+  `executor`, the metadata by `identity-capture`, and every byte goes through
+  the anchored helper.
+- `f28-incoming/checks/app-closed-gate.js`, `isolation-check.js` and
+  `run-incoming-application.js` are the external coordinator, in the established
+  pattern.
+
+### The application gained nothing
+
+The package under test is the **accepted IdentityCapture build, reused
+unmodified and not rebuilt**: build manifest `2026-09-15T22-55-52-952Z-eb60e451`,
+from clean commit `e62dbbdadd157b368e3a8c03a3fa78437a079c4c`, bundle
+`com.logseq.logseq-og.f28identitycapture`, x64, bridge
+`{mode: observation-only, persistence: false, synchronizationPorts: false}`. No
+new IPC, no process-launch exception, no network permission, no renderer
+filesystem access. `ENABLE-OG-SYNC-BRIDGE` remains false and no OG source
+changed in this batch.
+
+### Tests actually run
+
+All against the real anchored helper and the real modules on fresh explicitly
+owned synthetic data, on Intel (x86_64, macOS 14.8.3).
+
+| Suite | Result |
+|---|---|
+| `tests/incoming-application.test.js` (new) | **24/24** |
+| `tests/persistent-identity.test.js` | 51/51 |
+| pure: core, planner, executor, identity-capture, snapshot-comparison, read-response | 75/75 |
+| `tests/persistence.test.js` | 8/8 |
+| `tests/filesystem-application.test.js` | 23/23 |
+| `tests/compare-workflow.test.js` | 7/7 |
+| `tests/read-selected.test.js` | 5/5 |
+| `tests/stable-working-tree.test.js` | 12/12 |
+| `f28-identity-capture/checks/isolation-check.js` | 22/22 |
+| `f28-incoming/checks/isolation-check.js` (new) | **17/17** |
+
+The new suite covers: the happy path and sidecar portability; exact-base refusal
+on all four of graph, revision, fingerprint and transaction; a plan the modules
+do not reproduce; missing and stale approval; a local edit between preview and
+apply; an uncaptured local edit; an occupied create destination; a locally
+deleted base; the helper's own precondition refusal; the refusal of `'any'` and
+of every malformed precondition; ten disallowed path shapes; an unproven parent
+directory; a symlink destination; non-round-tripping bytes; an oversized note;
+an unfinished transaction blocking an unrelated proposal; nineteen malformed,
+tampered, substituted, mis-bound, wrong-lineage, wrong-plan, stale and
+bad-apply-order journals; roll-forward recovery; a last-file third state
+blocking every earlier pending write; interruption after the records were
+accepted; journal supersession; the app-closed gate in four states plus a gate
+that flips mid-run; and owned-run containment.
+
+The filesystem suites must be run one suite per `F28_CASE_SUFFIX`. Running
+several in a single `node --test` invocation with a shared suffix collides on
+case directory names and produces four spurious failures; each suite passes on
+its own. That is a harness usage constraint, not a defect found in this batch.
+
+### Two defects found and fixed during the batch
+
+1. `planIncoming` read `sidecar.identity.files[...].contentHash`; the field is
+   `acceptedContentHash`. The comparison against `undefined` made every clean
+   proposal refuse as `local-ahead-of-accepted` — a fail-closed direction, but
+   wrong. Fixed and the correct field asserted throughout.
+2. `validateJournal` checked absence before malformation, so a journal whose
+   bytes were present but unparseable classified as `journal-absent` — which a
+   caller could read as "nothing to recover". Present-but-unparseable bytes are
+   now classified `journal-malformed` first, and the bytes are retained intact.
+
+A third change was made for accuracy rather than as a defect: the store's own
+`snapshot-mismatch` and `missing-note` refusals are now reported in this layer's
+vocabulary as `local-ahead-of-accepted` and `missing-base`, because that is
+exactly what they mean for an incoming proposal.
+
+### Live batch
+
+One host, one fresh synthetic graph, one coherent batch, **36/36 checks, passed
+on the first attempt**. No failed attempt preceded it.
+
+- owned run `f28-incoming-application-2026-09-15T23-48-31-280Z-dfe977` under
+  both anchored roots; app profile
+  `…/Logseq OG F28 IdentityCapture/identity-capture-state`, outside both record
+  roots;
+- helper `sha256:0117ca48ba468e15a55091fa76d9fa6a07360b19ddda60d9bccc2ca8e94ff959`;
+- coordinator source at commit `8626546488f0dbca50cf5d4789788098f6a82dc8` plus
+  the uncommitted work of this batch (recorded as `source.uncommitted: 8`),
+  first committed together with these records;
+- evidence
+  `development/evidence/f28-incoming-application-2026-09-15T23-48-31-280Z.json`
+  (local, never a Git input).
+
+Verified in order: the reused clean observation-only package; owned run under
+both roots; a fresh app profile outside the record roots; the gate reporting
+closed before any launch; launch gates L2.1–L3.2; a fresh isolated profile; the
+observer healthy at startup; **OG itself** creating one English and one Korean
+page; `unenrolled` before explicit enrollment; enrollment leaving note bytes
+byte-identical; accepted local identity at `metadata-1`; a synthetic second
+replica's proposal built in memory (one update, one create) with proposal
+`1e1a7b52…` and plan `plan-31a4b06bdb09e9ce53460c1927054ed2`; a preview produced
+**with the app running** that wrote nothing — no journal, no note byte, records
+still at `metadata-1`; **application refused `app-running`** with the app open,
+with the English bytes unchanged, no journal created and the create's
+destination still absent; the observer healthy before the quit; a clean quit
+with the retained tree dead and zero processes carrying the exact executable
+name; both files applied with exact bytes — the English update and the Korean
+create — while the untouched Korean note stayed byte-identical; identity
+accepted at `metadata-2` (transaction `2b8f42f3…`, snapshot
+`sha256:0c78c8d5…`) naming exactly `file-english`, `file-korean`,
+`file-new-korean`; the sidecar still portable with no `replicaId`, no
+`deviceId`, no absolute path and no trace of the origin replica; the journal
+`closed` with both files in `progress.applied`; recovery finding nothing to do;
+and after the reopen — launch gates again, observer healthy, the incoming
+English update and the incoming Korean create both rendering in OG, the
+untouched Korean note rendering unchanged, identity still `accepted` at
+`metadata-2` with identical note hashes; final clean quit with zero owned
+processes remaining.
+
+Closure was confirmed with a directory-existence check on each exact recorded
+owned run path and a process check on the exact packaged executable name.
+**Neither shared root was listed at any point**, with or without a filter. One
+unrelated experimental app (`Logseq-OG-F28-OriginExp`) was running throughout;
+it was not signalled, opened, closed or otherwise touched, and the gate's exact
+executable-name match never confused it for the owned build.
+
+### Limits
+
+One host, one fresh synthetic graph, one coherent batch, Intel only.
+
+- **The second replica is synthetic.** It is an in-memory state this same
+  process constructed. There is no network, no peer, no transport and no second
+  device, and nothing here establishes anything about cross-device behaviour.
+- **Creates and updates only.** Incoming rename and delete are not implemented
+  and not approved; the helper has no note rename or delete command.
+- **No whole-graph atomicity.** Application is per file. An interruption leaves
+  a mixed state; the tests assert that mixed state explicitly rather than
+  describing the batch as atomic.
+- **No protection from arbitrary writers.** The cooperative lock serializes
+  participating helper invocations only. OG, Finder, iCloud and other cloud
+  agents and external editors do not honour it. The helper's destination
+  precondition is rechecked immediately before its `renameat` under the lock,
+  but recheck and rename are two operations: a non-participating writer can
+  change the destination in between, the rename then overwrites it, and the
+  post-rename verification confirms only that the staged bytes landed.
+- **No cross-process serialization.** Two concurrent coordinator processes were
+  not run and nothing here demonstrates that they would serialize.
+- **The app-closed gate excludes one application.** It proves the owned
+  experimental build has exited, by a dead retained PID tree plus zero processes
+  carrying the exact executable name, re-evaluated before every write, with
+  unreadable process state treated as uncertain and refused. It does not exclude
+  Finder, cloud agents, external editors, a second coordinator, or the same app
+  launched again immediately after the check passes.
+- **Injected failures establish recovery classification, not power-loss
+  durability.** No power-loss and no simultaneous-host test was run.
+- **The journal's validations establish consistency, not authenticity.** They
+  defend against malformed, truncated, stale, superseded, unrelated and
+  accidentally substituted records. A forger who can write into the owned
+  profile directory can produce a self-consistent journal and nothing here
+  detects that. No cryptographic authenticity is claimed.
+- **Directory re-verification does not close the ancestor-relocation race**, and
+  it is not an OS sandbox. That limit is inherited unchanged.
+- Nothing is enabled in any normal or existing package, no personal graph,
+  backup, export or profile was read or altered, and this is still not usable
+  cross-device synchronization.

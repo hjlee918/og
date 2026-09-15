@@ -3,9 +3,25 @@
 This is a standalone CommonJS/Node experiment. OG does not import or package
 it. See [CONTRACT.md](./CONTRACT.md) for its guarantees and limits.
 
-[INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md) is a proposal only: it
-designs how an incoming change could be applied without silently overwriting a
-newer local edit. Nothing in it is implemented, approved or run.
+[INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md) designs how an incoming
+change is applied without silently overwriting a newer local edit. Its first
+slice is implemented in `src/incoming-application.js` and verified in
+[RESULTS.md](./RESULTS.md); creates and updates only, one host, synthetic data,
+with the test application closed during application.
+
+Run its focused suite with the identity helper, in fresh owned children of one
+fresh run:
+
+```sh
+F28_IDENTITY_HELPER=/tmp/f28-identity-store-helper-x86_64 \
+F28_RUN_NAME=<fresh-owned-run> F28_OWNER_TOKEN=<64-hex-token> \
+F28_CASE_SUFFIX=<new-case-suffix> \
+node --test f28-sync-prototype/tests/incoming-application.test.js
+```
+
+Run each filesystem-backed suite in its **own** `node --test` invocation with its
+own `F28_CASE_SUFFIX`. Several suites in one invocation share a case suffix and
+collide on case directory names.
 
 Run the pure and filesystem-focused tests from the checkout root:
 

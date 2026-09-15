@@ -1,16 +1,20 @@
 # Incoming change application design
 
-Status: proposal, written before any implementation, filesystem work or test in
-this stage. Nothing here is implemented or approved. It designs how a change
-that did not originate from this device's OG can be applied to an enrolled test
-graph **without silently overwriting a newer local edit**, reusing the existing
-capture, comparison, identity-store and observation components. It introduces no
-second sync engine.
+Status: **approved and implemented**, 2026-09-15. The user approved the first
+slice; the ambiguities the review raised were resolved in this document before
+implementation, and the sections below describe what was built, not what was
+proposed. Results are recorded in
+[RESULTS.md](./RESULTS.md), section "Incoming change application (2026-09-15)".
 
-Every prior stage kept OG as the sole writer of note files. This design ends
-that, for one experiment, inside the existing anchored roots. That is the single
-largest authority change proposed so far and it is listed first under
-[Decisions requiring user approval](#decisions-requiring-user-approval).
+It designs how a change that did not originate from this device's OG is applied
+to an enrolled test graph **without silently overwriting a newer local edit**,
+reusing the existing capture, comparison, identity-store and observation
+components. It introduces no second sync engine.
+
+Every prior stage kept OG as the sole writer of note files. This slice ends
+that, for one experiment, inside the existing anchored roots — the single
+largest authority change in the project so far, and the first item the user
+approved.
 
 ## What this is not
 
@@ -152,8 +156,23 @@ into a claim about note bytes.
 
 The only clean case is: proposal base == accepted == disk. Everything else is
 one of the typed refusals above. There is no three-way merge, no text merge, no
-last-writer-wins and no "newer timestamp wins". Every refusal changes nothing,
-retains everything, and returns a typed code.
+last-writer-wins and no "newer timestamp wins".
+
+**Two different kinds of refusal, never conflated.** Every refusal returns a
+typed code and retains every record, but they do not make the same claim about
+the graph:
+
+- **Preflight refusal** — raised before the first note write. `mutated: false`.
+  No note byte changed, and the claim that nothing changed is one this code
+  actually establishes. All of §1 and §2, the bounds checks, the parent-directory
+  proof and the app-closed gate refuse here.
+- **Interrupted application** — raised after at least one note write landed.
+  `mutated: true`, with the exact list of files already at their target. The
+  graph is in a mixed state, that state is named in the result and in the
+  journal, and no claim is made that everything is unchanged.
+
+Code that reports a refusal must carry this distinction; "the refusal left
+everything unchanged" is only ever said about the first kind.
 
 ### The race that remains
 
@@ -206,29 +225,74 @@ stale decision is refused by the module rather than by this layer.
 
 ### Journal and before-images
 
-Before any note byte is written, the coordinator writes one device-local record
-in the profile tree:
+Before any note byte is written, the coordinator writes **one** device-local
+record at **one fixed name**, `<profileDir>/incoming-journal.json`. There is no
+second journal file and no per-file marker file. The earlier draft of this
+section proposed a per-proposal filename plus separate marker records; both are
+superseded here, because a per-proposal filename cannot be found again after a
+restart without listing a directory, and separate markers multiply the records a
+restart has to reconcile.
 
 ```
-schema             "f28-incoming-application/1"
-proposalId, planId, previewFingerprint
-transactionId      the identity-store transaction this will become
-base, target       as in the preview
-applyOrder         fileIds in byte order
-files[]            fileId, oldPath, newPath, precondition,
-                   beforeImage { presence, contentHash, content | null },
-                   targetContentHash, targetContent
+schema        "f28-incoming-journal/1"
+state         "open" | "closed"
+approved      IMMUTABLE after creation — the approved inputs
+  proposalId, planId, previewFingerprint
+  graphId
+  graphBinding    { runName, graphDirectory, graphDevice, graphInode }
+  profileBinding  { runName, profileDirectory, profileDevice, profileInode }
+  base          { metadataRevision, snapshotFingerprint, acceptedTransactionId }
+  target        { metadataRevision }
+  applyOrder    [fileId, ...]  complete, unique, byte-ordered
+  files         fileId -> { kind, path, precondition,
+                            beforeImage { presence, contentHash, contentHex },
+                            targetContentHash, targetContentHex }
+approvedHash  "sha256:<64 hex>" over stableStringify(approved)
+supersedes    { proposalId, journalHash } | null
+progress      MUTABLE — what this device believes it has done
+  applied         [fileId, ...]
+  recordsAccepted boolean
+  transactionId   null until updateIdentity accepts
 ```
 
-`beforeImage.content` is the exact pre-application bytes. It lives only in the
-profile tree — device-local, never in the sidecar, never portable — bounded by
-the helper's 4 MiB record limit. The journal is also where `applied` markers go,
-each written as a separate record so "applied" is never inferred from anything.
+**Immutable inputs and mutable progress are separated on purpose.** `approved`
+is written once and never edited; `approvedHash` is recomputed and compared on
+every read, so an edit to the approved half is detected. `progress` is the only
+part a later write may change. `progress` is a *claim*, never proof: on restart
+the bytes on disk decide what was applied, and `progress.applied` is used only
+to cross-check that conclusion and to report a disagreement.
+
+`beforeImage.contentHex` and `targetContentHex` are exact bytes in hex, so no
+string decoding sits between the journal and the file. They live only in the
+profile tree — device-local, never in the sidecar, never portable.
+
+**The journal slot is the transaction lock.** Creation writes with the
+precondition `absent`, or with the exact content hash of a journal whose `state`
+is `closed`. Every progress update writes with the exact content hash of the
+journal bytes just read. So an unfinished transaction for this owned
+graph/profile cannot be bypassed by a fresh proposal: the slot is occupied by an
+`open` journal and the create precondition fails. Discovery needs no listing —
+the name is fixed, and `read-journal` addresses it with no caller-supplied path.
+
+**Retention.** A closed journal is retained in place until a later proposal
+supersedes it. Before that replacement the coordinator copies the superseded
+bytes into its local evidence file (outside Git, beside the checkout) and the
+new journal records `supersedes: { proposalId, journalHash }`, so the chain is
+auditable. The anchored journal is operational state for recovery; the evidence
+file is the archive. Nothing is deleted by this code.
+
+**Bounds, checked before any note write.** Every note's bytes must be valid
+UTF-8 that round-trips exactly through the string APIs the existing modules
+expose; bytes that do not round-trip are refused (`non-roundtrip-bytes`) rather
+than silently replaced with U+FFFD. Per note the limit is 256 KiB; the whole
+serialized journal must be at most 2 MiB, well inside the helper's 4 MiB record
+limit and its 16 MiB request limit. Both are computed and enforced **before the
+first note write**, so an oversized transaction refuses with nothing mutated.
 
 The journal must be readable after a restart, and the existing helper's
 `read-records` returns only a **count** of evidence entries, not their contents.
-See [§7](#7-process-ownership-and-locking) for the one added command pair this
-requires, and the approval it needs.
+See [§7](#7-process-ownership-and-locking) for the added command pair this
+requires.
 
 ### Application
 
@@ -240,34 +304,113 @@ Files are applied one at a time, in `applyOrder`:
    read.
 2. Read the file back **twice** through the helper; require byte-identical
    results whose SHA-256 equals `targetContentHash`.
-3. Write that file's `applied` marker to the journal.
+3. Republish the journal with that fileId appended to `progress.applied`,
+   using the exact hash of the journal bytes just read as the precondition.
+
+Steps 1 and 3 are two separate writes, so an interruption between them is
+expected and must be survivable: the file is at its target but the journal does
+not say so. Recovery resolves that from disk — it sees the target hash, treats
+the file as applied, and the disagreement with `progress.applied` is recorded,
+not treated as an error.
 
 Other files are already visible to anything reading the graph at this point.
 That is stated, not hidden: a single record write is atomic for a reader of that
 one directory; a batch is not.
 
-Path guards the applier enforces before step 1, because the helper does not:
-`put-note` accepts any `.md`/`.org` path inside the graph directory and creates
-missing intermediate directories. The applier therefore refuses any target path
-whose first components are `logseq/` and restricts the first slice to
-`pages/<name>.md` and `journals/<name>.md`, so incoming application creates no
-directory at all.
+**Path and parent-directory guards, enforced by the applier before step 1.**
+Restricting path syntax is not enough: `put-note` accepts any `.md`/`.org` path
+inside the graph directory and, through `note_parent(..., create = 1)`, creates
+every missing intermediate directory. Syntax alone therefore cannot stop the
+helper from creating a directory. The applier requires all of:
 
-### Interrupted recovery
+- exactly two path components, `pages/<name>.md` or `journals/<name>.md` — no
+  nesting, no `.org` in this slice, no component named `.` or `..`, no
+  backslash, no `//`, no leading `/`;
+- the first component is not `logseq`;
+- `<name>` contains no `/` and the exact UTF-8 bytes are preserved;
+- **the parent directory is proven to already exist**, by requiring that the
+  accepted sidecar names at least one file in that same parent and that this
+  file reads back through the anchored, non-following helper walk. A successful
+  `read-note` of `pages/<known>.md` proves `pages/` exists and is a directory
+  the helper can open without following a symlink. If no accepted file lives in
+  the target's parent, the proposal is refused `unproven-parent-directory`.
 
-Recovery classifies **from the bytes actually on disk**, never from a phase
-field — the same rule the record store already follows.
+With that proof in hand, incoming application creates no directory. Without it,
+nothing is written.
 
-| Disk hash for a file | Classification | Action |
-|---|---|---|
-| == `beforeImage.contentHash` (or absent when the before-image is absent) | not applied | may continue if its precondition still holds |
-| == `targetContentHash` | applied | confirmed; never rewritten |
-| any third value | third state | **stop** |
+### Recovery authority: what earns the right to write
 
-A third state stops recovery for the whole transaction. Nothing is rolled back
-over what may be a user edit, nothing is reapplied, every before-image, marker
-and staged byte is retained, and the outcome is `third-state` with a new
-reviewed preview required before anything else happens.
+**A journal is not trusted because it exists, parses, or contains plausible
+hashes.** Before recovery may write one byte, every one of the following must
+hold, and any failure refuses with a typed code and mutates nothing:
+
+1. `schema` is exactly `f28-incoming-journal/1`; the record parses as JSON; the
+   key set is exact at every level; no unexpected key is ignored.
+2. Serialized size is within bounds; `applyOrder` is complete, unique, in byte
+   order, and exactly the key set of `approved.files`; every per-file record has
+   the exact key set and well-formed 64-hex hashes; every `contentHex` decodes,
+   is valid UTF-8, round-trips, and hashes to its stated hash.
+3. `approvedHash` equals the recomputed hash of `approved`. A mismatch is
+   `journal-approved-tampered`.
+4. `approved.graphBinding` and `approved.profileBinding` equal the bindings the
+   store reports **now** — run name, directory name, device and inode for both
+   trees. A journal from another run, another graph directory, another profile,
+   or a relocated copy is `journal-binding-mismatch`.
+5. `approved.graphId` equals the accepted sidecar's `graphId`.
+6. `approved.base` equals the accepted sidecar's `metadataRevision`,
+   `acceptedSnapshotFingerprint` and `acceptedTransactionId` — unless the
+   records have already advanced to `approved.target.metadataRevision`, which is
+   the legitimate "records accepted, journal not closed" case and is the only
+   accepted deviation.
+7. The plan is **recomputed** with `compareSnapshots` from the accepted sidecar
+   and the journal's target state, and must reproduce `approved.planId` exactly.
+   A journal naming a plan the modules do not reproduce is `journal-plan-mismatch`.
+8. `approved.previewFingerprint` is recomputed from the approved inputs and must
+   match. The identity transaction ID is deliberately **not** in `approved`: it
+   is derived by `updateIdentity` from the bytes on disk *after* application, so
+   it cannot be known when the journal is created. It is recorded in
+   `progress.transactionId` once the store accepts it.
+
+**These checks establish consistency, not authenticity.** Every value compared
+here lives in the same profile tree the recovering process can write. An
+attacker who can write arbitrary bytes into the owned profile directory can
+produce a self-consistent journal, and nothing here detects that. The checks
+defend against malformed, truncated, stale, superseded, unrelated and
+accidentally-substituted records — not against a deliberate forger with write
+access. No cryptographic authenticity is claimed and none is implemented.
+
+### Whole-transaction recovery preflight
+
+Recovery classifies **every** file in `applyOrder` before applying **any** of
+them. It never walks the order applying as it goes.
+
+| Disk hash for a file | Classification |
+|---|---|
+| == `targetContentHash` | `applied` |
+| == `beforeImage.contentHash`, or absent when the before-image is absent | `pending` |
+| anything else, including absent when a before-image was present | `third-state` |
+
+- If **any** file classifies `third-state`, recovery stops **before any further
+  note mutation** and returns `third-state`, naming every affected file. A file
+  late in the apply order in a third state therefore prevents writes to files
+  earlier in the order that were still pending. Nothing is rolled back, nothing
+  is reapplied, every before-image and journal byte is retained.
+- Otherwise recovery writes only the `pending` files, in `applyOrder`, and
+  **rechecks each remaining destination immediately before its own write** by
+  passing the exact expected content hash (or `absent`) as the helper's `EXPECT`
+  precondition. A destination that changed between the preflight and its write
+  refuses at the helper (`destination-precondition-failed`) rather than being
+  overwritten.
+- That recheck is still a recheck-then-rename, not an atomic compare-and-swap.
+  A writer that does not honour the cooperative lock can change the destination
+  between the helper's recheck and its `renameat`; the rename then overwrites
+  that change and the post-rename verification confirms only that the staged
+  bytes landed. The preflight narrows this window; it does not close it.
+
+`progress.applied` is compared against the disk classification and any
+disagreement is reported. A file the journal calls applied but disk calls
+pending is the expected outcome of an interruption between a note write and its
+progress update; it is resolved by disk, not by the journal.
 
 Recovery is **roll-forward only**. There is no automatic rollback. The
 before-images exist so that a restoration can be offered to the user later, as
@@ -287,6 +430,32 @@ to the record.
 ## 5. OG reconciliation and watcher-echo handling
 
 ### Recommended first slice: the app is closed during application
+
+#### The gate is verified, not assumed
+
+Before **every** application write and **every** recovery write, the coordinator
+proves the exact owned app has exited:
+
+1. Every PID in the retained owned process tree from this session's launch is
+   dead (`process.kill(pid, 0)` throws for all of them).
+2. No running process's `comm` equals the exact packaged executable's basename,
+   read through `ps -axo pid=,comm=`. This is a process check on one exact
+   recorded executable name — never a name pattern, never a shared-root listing.
+
+If `ps` fails, returns nothing parseable, or the tree cannot be evaluated, the
+state is **uncertain** and the write is refused (`app-state-uncertain`). An
+uncertain gate is never treated as closed. The check is re-run immediately
+before each write rather than once per run, so a stale "closed" flag from
+earlier in the batch cannot authorize a later write.
+
+**What this gate does not do.** It excludes one app: the owned experimental
+build this harness started. It does not exclude Finder, iCloud or other cloud
+agents, external editors, a second coordinator, or the same app launched again
+by anyone at any moment — including immediately after the check passes and
+before the write lands. The cooperative lock does not cover any of them and the
+check-then-rename race is unaffected by whether OG happens to be running.
+
+#### What the closed window buys
 
 There is no watcher and no reconciliation inside the application window, because
 there is no application running. OG picks the files up on its next open through
@@ -421,33 +590,43 @@ binds this experiment.
 
 ### The two source changes this needs
 
-1. **`putNote`'s hardcoded `expect: 'any'`** (`src/persistent-identity.js:242`)
-   is a fixture-grade write and must not be used for incoming application. The
-   incoming path requires an explicit precondition parameter — `absent` or an
-   exact hash — with no `any` default. The helper already implements it; only
-   the JS wrapper is changed, and the existing fixture caller keeps its current
-   behaviour through an explicit argument.
+1. **`putNote`'s hardcoded `expect: 'any'`** (`src/persistent-identity.js`) is a
+   fixture-grade write and must not be reachable from the incoming path. It is
+   split in two: `putNoteFixture`, which keeps `expect: 'any'` and is called only
+   by explicitly identified fixture and test-seed callers, and
+   `putNoteExpecting(context, path, bytes, expect)`, which **requires** an
+   `expect` of `absent` or a 64-hex content hash and throws on anything else —
+   there is no default and `any` is rejected outright. The incoming applier uses
+   only `putNoteExpecting`, and a test asserts that `'any'` is refused there.
 2. **A journal command pair in the anchored helper.** `read-records` returns only
    a count of evidence entries, so today the journal cannot be read back after a
-   restart. The proposal is exactly two commands, `write-journal` and
-   `read-journal`, over one fixed name `incoming-<proposalId>.json` inside an
-   `incoming/` subdirectory of the already-anchored owned profile directory,
-   through the same `publish_entry` / `read_entry` path, the same lock, the same
-   anchoring, the same `EXPECT` precondition and the same entry
-   re-verification. The name is derived from a validated 64-hex proposal ID, so
-   the command expresses no path at all. **No new root, no relaxed guard, no new
-   reachable location** — but it is still an added native command surface inside
-   the boundary, so it is an approval item, not a coder decision.
+   restart. The addition is exactly two commands, `write-journal` and
+   `read-journal`, over **one compile-time constant name**,
+   `incoming-journal.json`, directly inside the already-anchored owned profile
+   directory. Neither command accepts a path, a name, a component or any other
+   caller-selected location: the name is a `#define` in the helper and the
+   caller cannot express a different one. Both go through the existing
+   `publish_entry` / `read_entry` code, the existing cooperative lock
+   (`write-journal` exclusive, `read-journal` shared), the existing anchoring
+   walk and the existing entry re-verification. `write-journal` requires an
+   `EXPECT` precondition exactly as every other record write does.
+   **No new root, no new reachable location, no relaxed guard.**
+
+   There is deliberately **no** `clear-journal` command. A finished journal is
+   marked `closed` and retained; the next proposal replaces it with the closed
+   journal's exact hash as its precondition, recording `supersedes`. Nothing in
+   this code deletes a journal, which matches the approved "retained without
+   cleanup" policy and keeps the command surface at two.
+
+   The fixed name is also what makes [§4](#4-per-file-application-retained-before-images-interrupted-recovery)'s
+   discovery rule work: a resumed coordinator reads one exact path and needs no
+   directory listing, and a fresh proposal cannot start while that slot holds an
+   `open` journal.
 
    Two alternatives, both rejected and recorded: putting the journal in the graph
    tree under `logseq/.og-sync/` would put device-local operational state into
    the portable record; putting it outside both anchored roots would make the one
    record a restart must trust weaker than the records it coordinates.
-
-   If the user declines the helper change, the fallback is a **single-file**
-   first proposal, where the existing intent's `base`/`target`/`staged` fields
-   already cover the whole transaction and no journal is needed. That fallback
-   does not produce a mixed intermediate state, so it tests less.
 
 ## 8. Focused acceptance tests
 
@@ -471,10 +650,27 @@ application involved — the pattern
 | 12 | Re-running the identical approved proposal after success | refused (the base no longer matches); no second revision |
 | 13 | Korean target paths, create and update | exact UTF-8 bytes preserved; NFC/NFD and case-fold collision refused; nothing normalized or merged |
 | 14 | Target path under `logseq/`, and a target path requiring a new directory | both refused by the applier before any helper call |
-| 15 | Before-image fidelity after every refusal above | the retained before-image hash equals the file's bytes on disk for every unapplied file |
+| 15 | Before-image fidelity | for a file still `pending`, the retained before-image hash equals its bytes on disk. **After a third-state edit the file deliberately differs from its retained before-image** — that is the third state — so the assertion there is that the before-image is still the *original* pre-application bytes, unmodified by the later edit, and that recovery reports `third-state` rather than restoring it |
 | 16 | Sidecar portability after an incoming acceptance | `assertPortable` passes; `originReplicaId` appears nowhere in the sidecar |
 | 17 | `hashGraphNotes` after acceptance | equals the projection; `extra` reported separately, never folded in |
 | 18 | Pending-local-write gate | a proposal touching a path with a pending local cause is refused `unfinished-local-write` |
+| 19 | Malformed journal: not JSON, wrong schema, missing key, extra key, bad hex, non-64-hex hash | each refused with its typed code; `mutated: false`; no note write |
+| 20 | Tampered journal: a byte changed inside `approved` | `journal-approved-tampered` |
+| 21 | Substituted journal: valid journal from a different owned run | `journal-binding-mismatch` on run name, directory, device or inode |
+| 22 | Wrong `graphId`; wrong `transactionId`; wrong `previewFingerprint` | `journal-graph-mismatch`, `journal-transaction-mismatch`, `journal-preview-mismatch` |
+| 23 | Stale journal whose base no longer matches the accepted records | `journal-base-mismatch`, except the records-advanced case of §4 item 6 |
+| 24 | `applyOrder` incomplete, reordered, duplicated, or naming an unknown fileId | refused; no note write |
+| 25 | Journal whose plan `compareSnapshots` does not reproduce | `journal-plan-mismatch` |
+| 26 | Note bytes that are not valid UTF-8 or do not round-trip | `non-roundtrip-bytes`; refused before any write |
+| 27 | Oversized: one note over 256 KiB, and a journal over 2 MiB | refused before the first note write; `mutated: false` |
+| 28 | An `open` journal present, then an unrelated new proposal is submitted | refused `transaction-outstanding`; the new proposal never reaches a note write; the existing journal is unchanged |
+| 29 | Three-file proposal where the **last** file is in a third state | recovery refuses `third-state` before writing the earlier still-pending file; **zero** further note writes; every before-image retained |
+| 30 | Interruption after a note write but before its progress update | recovery reads the target hash from disk, classifies `applied`, reports the disagreement with `progress.applied`, and does not rewrite the file |
+| 31 | Interruption after records accepted but before the journal closes | recovery accepts the advanced base, performs no note write, no second `updateIdentity`, and closes the journal |
+| 32 | Target whose parent directory is not proven by an accepted file | `unproven-parent-directory`; the helper is never invoked for that write, so no directory is created |
+| 33 | Symlink at the destination note path | the helper preserves it and refuses (`destination entry is not a regular file`); the link is intact afterwards |
+| 34 | Path shapes: nested, `.org`, `logseq/` prefix, `..`, backslash, `//`, absolute | each refused by the applier before any helper call |
+| 35 | `putNoteExpecting` called with `'any'` or with no precondition | throws; incoming code cannot reach `EXPECT any` |
 
 Live batch, one host, one fresh synthetic graph, app closed during application:
 
@@ -542,11 +738,14 @@ right first — base matching, conflict refusal, per-file recovery and record
 ordering — and defers the watcher-coexistence problem to an experiment that has
 to be designed and approved on its own terms.
 
-## Decisions requiring user approval
+## Decisions requiring user approval — all approved 2026-09-15
+
+Recorded as asked and answered. Every item below was approved for this slice
+only; none of them generalizes to personal data, a second host, or daily use.
 
 1. **May the coordinator write note bytes into the enrolled test graph at all?**
    Every prior stage kept OG as the sole note writer. Incoming application ends
-   that. Nothing below matters until this is decided.
+   that. **Approved**, for fresh synthetic data on Intel only.
 2. **App closed during application as a hard gate for the first slice?**
    Recommended yes, for the reasons above.
 3. **Adding `write-journal` / `read-journal` to the anchored helper** — two

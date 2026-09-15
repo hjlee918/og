@@ -15,7 +15,7 @@ const {
   adoptCopy,
   publish,
   writeRecordExpecting,
-  putNote,
+  putNoteFixture,
   putNoteRelocatedForTest,
   readNote,
   readRecords,
@@ -85,7 +85,7 @@ function owned(caseName) {
 
 function seeded(caseName, notes = NOTES) {
   const context = owned(caseName);
-  for (const note of notes) putNote(context, note.path, note.content);
+  for (const note of notes) putNoteFixture(context, note.path, note.content);
   return context;
 }
 
@@ -183,7 +183,7 @@ function updateRequest(values = {}) {
 test('a subsequent identity update is accepted against a matching validated snapshot', () => {
   const context = seeded('update');
   enrollGraph(context, enrollmentRequest());
-  putNote(context, 'pages/기준 대상 페이지.md', UPDATED_KOREAN);
+  putNoteFixture(context, 'pages/기준 대상 페이지.md', UPDATED_KOREAN);
 
   const stale = openGraph(context);
   assert.equal(stale.outcome, 'refused');
@@ -392,7 +392,7 @@ test('a stale device record naming an older metadata revision is refused', () =>
   const context = seeded('stale');
   enrollGraph(context, enrollmentRequest());
   const stale = readRecords(context).device;
-  putNote(context, 'pages/기준 대상 페이지.md', UPDATED_KOREAN);
+  putNoteFixture(context, 'pages/기준 대상 페이지.md', UPDATED_KOREAN);
   updateIdentity(context, updateRequest());
   writeRawRecordForTest(context, 'device', serialize(stale));
   const opened = openGraph(context);
@@ -415,7 +415,7 @@ test('a device record naming different sidecar bytes is refused', () => {
 test('a note changed behind the sidecar is a refusal, not a silent rebase', () => {
   const context = seeded('drift');
   enrollGraph(context, enrollmentRequest());
-  putNote(context, 'pages/Anchor Page.md', '- edited outside the adapter\n');
+  putNoteFixture(context, 'pages/Anchor Page.md', '- edited outside the adapter\n');
   const opened = openGraph(context);
   assert.equal(opened.outcome, 'refused');
   assert.equal(opened.code, 'snapshot-mismatch');
@@ -454,7 +454,7 @@ test('a traversal or non-portable note path is refused', () => {
   const context = seeded('traversal');
   for (const bad of ['../escape.md', 'pages/../../escape.md', '/absolute.md',
     'pages\\windows.md', 'pages//double.md', 'pages/not-a-note.txt']) {
-    assert.throws(() => putNote(context, bad, '- nope\n'),
+    assert.throws(() => putNoteFixture(context, bad, '- nope\n'),
       (error) => error.code === 'helper-refused', `${bad} must be refused`);
   }
 });
@@ -465,7 +465,7 @@ test('a symlinked note is refused rather than followed', () => {
   fs.symlinkSync(target, graphPath(context, 'pages/linked.md'));
   assert.throws(() => readNote(context, 'pages/linked.md'),
     (error) => error.code === 'helper-refused');
-  assert.throws(() => putNote(context, 'pages/linked.md', '- through a link\n'),
+  assert.throws(() => putNoteFixture(context, 'pages/linked.md', '- through a link\n'),
     (error) => error.code === 'helper-refused');
   assert.equal(fs.readFileSync(target, 'utf8'), NOTES[0].content);
 });
@@ -475,7 +475,7 @@ test('a symlinked ancestor directory is refused rather than followed', () => {
   fs.symlinkSync(graphPath(context, 'pages'), graphPath(context, 'shadow'));
   assert.throws(() => readNote(context, 'shadow/Anchor Page.md'),
     (error) => error.code === 'helper-refused');
-  assert.throws(() => putNote(context, 'shadow/new.md', '- nope\n'),
+  assert.throws(() => putNoteFixture(context, 'shadow/new.md', '- nope\n'),
     (error) => error.code === 'helper-refused');
 });
 
@@ -498,7 +498,7 @@ function copyEnrolledGraph(source, caseName) {
     profileDirectory: source.profileDirectory,
   };
   initializeOwnedRun(copy);
-  for (const note of NOTES) putNote(copy, note.path, readNote(source, note.path));
+  for (const note of NOTES) putNoteFixture(copy, note.path, readNote(source, note.path));
   writeRawRecordForTest(copy, 'sidecar', readRecords(source).sidecarBytes);
   return copy;
 }
@@ -670,14 +670,14 @@ test('restart revalidates the actual bytes instead of an accepted-looking record
 
   // A record that still claims this exact accepted transaction, over a graph
   // whose bytes no longer match it.
-  putNote(context, 'journals/2026_09_15.md', '- 재시작 뒤 달라진 일지 항목\n');
+  putNoteFixture(context, 'journals/2026_09_15.md', '- 재시작 뒤 달라진 일지 항목\n');
   const restarted = openGraph(context);
   assert.equal(restarted.outcome, 'refused');
   assert.equal(restarted.code, 'snapshot-mismatch');
   assert.equal(restarted.sidecar.acceptedTransactionId, enrolled.transactionId);
 
   // Restoring the exact accepted bytes makes the same evidence validate again.
-  putNote(context, 'journals/2026_09_15.md', NOTES[2].content);
+  putNoteFixture(context, 'journals/2026_09_15.md', NOTES[2].content);
   const settled = openGraph(context);
   assert.equal(settled.outcome, 'accepted');
   assert.equal(settled.sidecar.acceptedTransactionId, enrolled.transactionId);
@@ -785,7 +785,7 @@ test('a publication derived from a stale read refuses instead of overwriting', (
   enrollGraph(context, enrollmentRequest());
   const stale = readRecords(context);
 
-  putNote(context, 'pages/기준 대상 페이지.md', UPDATED_KOREAN);
+  putNoteFixture(context, 'pages/기준 대상 페이지.md', UPDATED_KOREAN);
   const pending = updateIdentity(context, updateRequest());
   assert.equal(pending.outcome, 'accepted');
   const current = readRecords(context);
