@@ -76,10 +76,14 @@ async function pageContains(session, pageName, expected) {
 }
 
 async function run() {
+  const resumeIndex = process.argv.indexOf('--resume');
+  const resumeFile = resumeIndex >= 0 ? process.argv[resumeIndex + 1] : null;
+  const prior = resumeFile ? JSON.parse(fs.readFileSync(path.resolve(resumeFile), 'utf8')) : null;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const evidenceFile = path.join(EVIDENCE, `f28-observation-${stamp}.json`);
   const out = {schema: 'f28-og-live-observation/1', stamp, status: 'preparing', checks: [],
-    simulation: false, synchronizationEnabled: false, contentRecorded: false};
+    simulation: false, synchronizationEnabled: false, contentRecorded: false,
+    resumedFrom: resumeFile ? path.resolve(resumeFile) : null};
   const record = (id, ok, detail) => {
     out.checks.push({id, ok, detail});
     save(evidenceFile, out);
@@ -104,9 +108,22 @@ async function run() {
       bridge: manifest.experiment.bridge, executable: built.exe};
     record('identity-clean-observation-build', true, out.build);
 
-    profile = FP.swapAside(built.identity, {stamp});
+    if (prior) {
+      const state = FP.stateRootFor(built.identity);
+      const kept = prior.profileCleanup?.kept;
+      assert(kept && fs.existsSync(kept), 'preserved resume profile is missing');
+      assert(!fs.existsSync(state.root), 'observation profile root is occupied; refusing resume');
+      FP.assertOurs(kept, built.identity);
+      fs.renameSync(kept, state.root);
+      profile = {identity: built.identity, root: state.root, productDir: state.productDir,
+        stamp, preserved: null, marker: null, preExisting: false};
+    } else {
+      profile = FP.swapAside(built.identity, {stamp});
+    }
     out.profile = {root: profile.root, preExisting: profile.preExisting, preserved: profile.preserved};
-    const graph = graphPath(stamp);
+    const graph = prior
+      ? B.assertInsideAllowedRoot('resumed owned observation graph', prior.graph)
+      : graphPath(stamp);
     out.graph = graph;
     record('canonical-owned-live-target', fs.realpathSync(graph) === graph && graph !== B.allowedRootReal(), {graph});
 
@@ -127,23 +144,31 @@ async function run() {
     const initialEvents = await readEvents(session.page);
     record('observation-runtime-only', Array.isArray(initialEvents), {schema: 'frontend.fs.og-sync-bridge.observation/1', initialCount: initialEvents?.length});
 
-    const english = `Observation English ${stamp.slice(0, 10)}`;
-    const korean = `관찰 한국어 ${stamp.slice(0, 10)}`;
-    const renamed = `관찰 이름변경 ${stamp.slice(0, 10)}`;
+    const nameDate = (prior ? prior.stamp : stamp).slice(0, 10);
+    const english = `Observation English ${nameDate}`;
+    const korean = `관찰 한국어 ${nameDate}`;
+    const renamed = `관찰 이름변경 ${nameDate}`;
     const englishCreate = 'Synthetic English note created through OG.';
     const koreanCreate = 'OG를 통해 만든 합성 한국어 노트입니다.';
     const englishEdit = 'Synthetic English note edited and saved through OG.';
     const koreanEdit = '이름을 바꾼 뒤 OG에서 다시 편집하고 저장했습니다.';
 
-    const beforeCreate = (await readEvents(session.page)).length;
-    await api(session.page, 'create_page', english, {}, {redirect: false, createFirstBlock: false, format: 'markdown'});
-    const englishBlock = await api(session.page, 'insert_block', english, englishCreate, {focus: false});
-    await api(session.page, 'create_page', korean, {}, {redirect: false, createFirstBlock: false, format: 'markdown'});
-    const koreanBlock = await api(session.page, 'insert_block', korean, koreanCreate, {focus: false});
-    await waitForEventCount(session.page, beforeCreate + 4);
+    let englishBlock, koreanBlock;
+    if (prior) {
+      const englishTree = await api(session.page, 'get_page_blocks_tree', english);
+      const koreanTree = await api(session.page, 'get_page_blocks_tree', korean);
+      englishBlock = englishTree && englishTree[0];
+      koreanBlock = koreanTree && koreanTree[0];
+    } else {
+      await api(session.page, 'create_page', english, {}, {redirect: false, createFirstBlock: false, format: 'markdown'});
+      englishBlock = await api(session.page, 'insert_block', english, englishCreate, {focus: false});
+      await api(session.page, 'create_page', korean, {}, {redirect: false, createFirstBlock: false, format: 'markdown'});
+      koreanBlock = await api(session.page, 'insert_block', korean, koreanCreate, {focus: false});
+    }
     record('created-english-and-korean-via-og',
       englishBlock && englishBlock.uuid && koreanBlock && koreanBlock.uuid,
-      {englishBlock: englishBlock.uuid, koreanBlock: koreanBlock.uuid});
+      {englishBlock: englishBlock.uuid, koreanBlock: koreanBlock.uuid,
+       resumedAfterVerifiedInitialApiCreation: !!prior});
 
     const beforeEdit = (await readEvents(session.page)).length;
     await api(session.page, 'update_block', englishBlock.uuid, englishEdit, {});
@@ -220,6 +245,7 @@ async function run() {
   } catch (error) {
     out.status = 'failed';
     out.failure = {message: String(error && error.message), stack: String(error && error.stack)};
+    if (session) out.eventsAtFailure = await readEvents(session.page).catch(() => null);
     throw error;
   } finally {
     if (session) out.emergencyClose = await APP.close(session).catch(error => ({error: String(error)}));
