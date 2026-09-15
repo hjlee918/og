@@ -23,7 +23,8 @@
   [repo dir rpath content {:keys [ok-handler error-handler old-content skip-compare?]} stat]
   (let [file-fpath (path/path-join dir rpath)]
     (if skip-compare?
-      (let [cause (og-sync-bridge/save-pending! repo rpath content)]
+      (let [cause (when-not (og-sync-bridge/observation-only?)
+                    (og-sync-bridge/save-pending! repo rpath content))]
         (p/catch
          (p/let [result (ipc/ipc "writeFile" repo file-fpath content)
                  handler-result (when ok-handler
@@ -55,7 +56,8 @@
           (state/pub-event! [:file/not-matched-from-disk rpath disk-content content])
 
           :else
-          (let [cause (og-sync-bridge/save-pending! repo rpath content)]
+          (let [cause (when-not (og-sync-bridge/observation-only?)
+                        (og-sync-bridge/save-pending! repo rpath content))]
             (->
              (p/let [result (ipc/ipc "writeFile" repo file-fpath content)
                      mtime (gobj/get result "mtime")]

@@ -3,6 +3,7 @@
   platforms by delegating to implementations of the fs protocol"
   (:require [cljs-bean.core :as bean]
             [frontend.config :as config]
+            [frontend.fs.og-sync-bridge :as og-sync-bridge]
             [frontend.fs.nfs :as nfs]
             [frontend.fs.node :as node]
             [frontend.fs.capacitor-fs :as capacitor-fs]
@@ -94,7 +95,11 @@
   [repo dir rpath content opts]
   (when content
     (let [path (gp-util/path-normalize rpath)
-          fs-record (get-fs dir)]
+          fs-record (get-fs dir)
+          cause (when (and (og-sync-bridge/observation-only?)
+                           (og-sync-bridge/enabled?)
+                           (not (string/blank? repo)))
+                  (og-sync-bridge/save-pending! repo path content))]
       (->
        (p/let [opts (assoc opts
                            :error-handler
@@ -104,8 +109,11 @@
                                                                           :fs (type fs-record)
                                                                           :user-agent (when js/navigator js/navigator.userAgent)
                                                                           :content-length (count content)}}])))
-               _ (protocol/write-file! (get-fs dir) repo dir path content opts)])
+               result (protocol/write-file! (get-fs dir) repo dir path content opts)]
+         (when cause (og-sync-bridge/save-completed! cause result))
+         result)
        (p/catch (fn [error]
+                  (when cause (og-sync-bridge/save-failed! cause error))
                   (log/error :file/write-failed {:dir dir
                                                  :path path
                                                  :error error})

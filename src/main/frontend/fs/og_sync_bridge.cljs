@@ -36,6 +36,10 @@
   []
   (some? (current-runtime)))
 
+(defn observation-only?
+  []
+  ENABLE-OG-BRIDGE-OBSERVATION)
+
 (defn install-runtime!
   "Install a runtime only in a separately enabled build. Tests use the dynamic
   binding instead, and a default build allocates no runtime atom."
