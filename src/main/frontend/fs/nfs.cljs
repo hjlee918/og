@@ -9,6 +9,7 @@
             [frontend.util :as util]
             [clojure.string :as string]
             [frontend.idb :as idb]
+            [frontend.fs.og-sync-bridge :as og-sync-bridge]
             [promesa.core :as p]
             [lambdaisland.glogi :as log]
             [goog.object :as gobj]
@@ -46,6 +47,25 @@
                  path)]
       ;; Bad code
       (db/set-file-last-modified-at! repo path last-modified))))
+
+(defn- observed-save!
+  "Observation-build wrapper for the actual File System Access write. The
+  disabled path invokes the existing operation directly and adds no promise."
+  [repo path content save!]
+  (if-not (og-sync-bridge/enabled?)
+    (save!)
+    (let [cause (og-sync-bridge/save-pending! repo path content)]
+      (try
+        (-> (save!)
+            (p/then (fn [result]
+                      (og-sync-bridge/save-completed! cause result)
+                      result))
+            (p/catch (fn [error]
+                       (og-sync-bridge/save-failed! cause error)
+                       (throw error))))
+        (catch :default error
+          (og-sync-bridge/save-failed! cause error)
+          (throw error))))))
 
 (defn- verify-handle-permission
   [handle read-write?]
@@ -259,12 +279,15 @@
                  (not (contains? #{"excalidraw" "edn" "css"} ext))
                  (not (string/includes? path "/.recycle/")))
               (state/pub-event! [:file/not-matched-from-disk path disk-content content])
-              (p/let [_ (verify-permission repo true)
-                      _ (utils/writeFile file-handle content)
-                      file (.getFile file-handle)]
-                (when file
-                  (db/set-file-content! repo path content)
-                  (nfs-saved-handler repo path file)))))
+              (observed-save!
+               repo path content
+               (fn []
+                 (p/let [_ (verify-permission repo true)
+                         _ (utils/writeFile file-handle content)
+                         file (.getFile file-handle)]
+                   (when file
+                     (db/set-file-content! repo path content)
+                     (nfs-saved-handler repo path file)))))))
           ;; file no-exist, write via parent dir handle
           (p/let [basename (path/filename fpath)
                   parent-dir (path/parent fpath)
@@ -278,11 +301,14 @@
                       file (.getFile file-handle)
                       text (.text file)]
                 (if (string/blank? text)
-                  (p/let [;; _ (idb/set-item! file-handle-path file-handle)
-                          _ (utils/writeFile file-handle content)
-                          file (.getFile file-handle)]
-                    (when file
-                      (nfs-saved-handler repo path file)))
+                  (observed-save!
+                   repo path content
+                   (fn []
+                     (p/let [;; _ (idb/set-item! file-handle-path file-handle)
+                             _ (utils/writeFile file-handle content)
+                             file (.getFile file-handle)]
+                       (when file
+                         (nfs-saved-handler repo path file)))))
                   (do
                     (notification/show! (str "The file " path " already exists, please append the content if you need it.\n Unsaved content: \n" content)
                                         :warning
