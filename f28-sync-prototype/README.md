@@ -3,6 +3,10 @@
 This is a standalone CommonJS/Node experiment. OG does not import or package
 it. See [CONTRACT.md](./CONTRACT.md) for its guarantees and limits.
 
+[INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md) is a proposal only: it
+designs how an incoming change could be applied without silently overwriting a
+newer local edit. Nothing in it is implemented, approved or run.
+
 Run the pure and filesystem-focused tests from the checkout root:
 
 ```sh
