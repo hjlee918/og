@@ -290,6 +290,69 @@ persistence ports; it is neither a cross-process lock nor crash durability, and
 the uncertain-save reservation is in-memory runtime evidence, not a
 power-loss guarantee.
 
+## End-to-end adapter verification against the prototype modules
+
+The bridge suite above injects stand-ins: plan revalidation echoes the
+caller's plan and identity acceptance is a boolean port. A separate test-only
+adapter, `src/test/frontend/fs/og_sync_e2e_adapter.cljs`, now connects those
+two boundaries to the actual standalone prototype modules. It is imported only
+by `src/test/frontend/fs/og_sync_bridge_e2e_test.cljs`, never by production
+code, so the prototype is still not bundled into the application: the adapter
+loads the modules at runtime through Node's `require` with a dynamically
+constructed path, which the compiler cannot statically process.
+
+**Real production logic exercised by the end-to-end suite:** `createState`,
+`applyOperation`, `stableStringify` and `snapshotFingerprint` (core/planner)
+build every synthetic state and selected snapshot;
+`captureChanges`/`enrollIdentityMetadata`/`initializeReplica`/`validateMetadata`
+(identity-capture) own all change capture, replica initialization and sidecar
+validation; `compareSnapshots` (snapshot-comparison) recomputes the
+authoritative plan for every `:revalidate-plan!` port call — the caller's
+supplied plan is accepted only when the recomputation matches it — and
+`executePlan` (executor) applies exactly that recomputed plan to build each
+projected state. The bridge lifecycle, coordination turns, envelope
+validation, recovery and evidence rules are the production bridge namespace
+itself, unchanged.
+
+**Simulated in memory:** the working folder, snapshot checkpoint, identity
+sidecar bytes, ACTIVE record store, evidence ledgers, graph binding and
+reconciliation callback are atoms in the adapter. Observation `stable: true`
+flags and the save-completion evidence are synthetic inputs; they prove
+capture-module acceptance of that evidence, not real disk stability. No
+filesystem, graph, profile, native helper, application or network is
+accessed. The tests use Korean page paths and content to exercise exact
+byte handling without any file access.
+
+**Verified scenarios (9 tests, 128 assertions, 2026-09-14):** a local save's
+bridge cause becomes capture evidence, and the executed plan's revision,
+projected head and proposed sidecar name the same revision, path and content;
+the completed edit is never reapplied — replaying its old evidence against
+the advanced accepted metadata is refused by the capture module
+(`save-evidence-mismatch`) and the watcher classifies it as a completed local
+cause. An incoming change reconciles through the actual comparison result with
+exact file IDs, paths, revision IDs and content asserted, and the two
+replicas' independently derived plans and targets agree byte-for-byte. A
+subsequent transaction runs from a replica reinitialized via
+`initializeReplica` over the accepted checkpoint, with accepted metadata and
+snapshot head revisions asserted equal for every file. A simulated restart
+recovers incomplete work over retained storage with the plan recomputed (never
+echoed), refuses a tampered record and a forged progress claim, and resolves
+an uncertain clear only through validated recovery — both the failed-clear
+and clear-then-unknown branches. Refusals cover a changed plan
+(`:plan-mismatch`, nothing persisted), a changed projected snapshot and
+tampered sidecar bytes (refused at acceptance with evidence preserved at
+files-applied), a different local edit (an ordinary observation that never
+reconciles and blocks false success), and incomplete acceptance evidence.
+Rename causes are deliberately not exercised end-to-end: the bridge's
+complete-state port derives only a path/presence/content observation and
+cannot confirm the old-path absence a rename cause requires; renames remain
+covered by the stand-in bridge suite.
+
+This is component agreement under the recorded simulation boundary, not
+usable synchronization: no real storage durability, filesystem stability,
+watcher matching or power-loss behavior is claimed. The bridge remains
+default-off and unenrolled in every package.
+
 ## Limits and approval decisions
 
 Uncooperative writers remain outside the lock; checks do not eliminate

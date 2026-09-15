@@ -825,3 +825,71 @@ only by future reviewed recovery designs. The bridge remains disabled in
 every package. No graph, sidecar, helper, application, profile, account or
 network integration was accessed or enabled; the native-helper integration
 tests were deliberately not run in this batch.
+
+## OG bridge end-to-end adapter verification (2026-09-14)
+
+The bridge's two injected stand-ins — plan revalidation that echoed the
+caller's plan and a boolean identity-acceptance port — were connected to the
+actual standalone prototype modules through a new test-only adapter,
+`src/test/frontend/fs/og_sync_e2e_adapter.cljs`, used solely by
+`src/test/frontend/fs/og_sync_bridge_e2e_test.cljs`. The adapter is never
+imported by production code and loads the modules at runtime through Node's
+`require` with a dynamically constructed path, so the prototype is still not
+bundled into any application build.
+
+The suite drives one coherent in-memory workflow per scenario. Local saves
+enter through the bridge's save-pending/completion hooks; the emitted cause
+token becomes the `save-complete`/`stable-read` capture evidence, the actual
+`captureChanges` result feeds `compareSnapshots`, the recomputed plan is
+executed by `executePlan`, and identity acceptance re-derives the projection
+and validates the retained sidecar bytes with `validateMetadata`. The
+`:revalidate-plan!` port recomputes the plan from the retained source/target
+pair and never returns the caller's plan; acceptance evidence must match the
+recomputed projected working files, sidecar, checkpoint and binding. Korean
+page paths and content run through every hash and comparison without any
+filesystem access.
+
+Scenario coverage: local save with exact revision/path/content identity and
+no reapplication of the completed edit (replayed stale evidence is refused by
+the capture module with `save-evidence-mismatch`); an incoming change whose
+cause, projected head and accepted sidecar name the same revision with exact
+IDs asserted, including cross-replica plan and target agreement; a subsequent
+transaction from a replica reinitialized with `initializeReplica` over the
+accepted checkpoint, with metadata and head revisions asserted equal per
+file; a simulated restart over retained fake storage that recomputes the
+plan, refuses an incompatible batch, refuses a tampered record
+(`:tampered-active`) and a forged files-applied progress claim, continues the
+incomplete transaction, and resolves an outstanding uncertain clear through
+validated recovery in both the failed-clear and clear-then-unknown branches;
+and refusals for a changed plan (`:plan-mismatch`, nothing persisted, runtime
+not latched), a changed projected snapshot and tampered sidecar bytes
+(refused at acceptance with evidence preserved at files-applied and finish
+blocked), a different local edit (an ordinary observation that never
+reconciles, never blocks the retained cause evidence, and prevents false
+success until the exact content is restored), and incomplete acceptance
+evidence. Rename causes are deliberately outside this suite: the complete-state
+port cannot derive the old-path absence a rename cause requires; renames stay
+covered by the stand-in bridge suite.
+
+Verification:
+
+- New end-to-end suite: 9/9 tests, 128 assertions.
+- Existing production-hook bridge tests: 45/45 tests, 280 assertions,
+  unchanged.
+- Accepted pure core/planner/executor/comparison/response/identity
+  regressions: 75/75.
+- Full test-build compilation succeeded; all 25 warnings are the
+  pre-existing `calc.cljc`/`no/en/core.cljc` baseline and none come from the
+  new files. No production code changed, so no browser build was rerun.
+- No clj-kondo binary is installed on this machine, so changed-file lint was
+  the compiler pass above.
+
+The simulated boundary is unchanged: working files, checkpoint, sidecar,
+ACTIVE store and evidence ledgers are atoms; `stable: true` observations are
+synthetic and prove nothing about real disk stability. This is component
+agreement, not usable synchronization — no real storage durability, watcher
+matching or power-loss behavior is claimed. The bridge remains default-off
+and unenrolled in every package. No graph, sidecar, helper, application,
+profile, account or network integration was accessed or enabled; the
+native-helper and two-host integration tests were deliberately not run in this
+batch.

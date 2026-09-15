@@ -397,6 +397,17 @@ recovery remains. Identity acceptance requires complete injected
 file/identity/checkpoint/binding evidence; a snapshot checkpoint alone cannot
 clear ACTIVE.
 
+A separate test-only adapter (`frontend.fs.og-sync-e2e-adapter`, under
+src/test, imported by no production namespace) backs the same port contract
+with the actual standalone prototype modules: the `:revalidate-plan!` port
+recomputes the plan through the real snapshot-comparison module over the
+retained source/target pair instead of echoing the caller's plan, and the
+`:validate-acceptance!` port re-derives the projection and validates the
+retained sidecar bytes with the real identity-capture module. Working files,
+the checkpoint, the sidecar, the ACTIVE store and the evidence ledgers remain
+in-memory atoms, so this adapter verifies component agreement only — no real
+storage durability or usable synchronization is implied.
+
 Every ACTIVE publication is serialized through one process-local coordination
 boundary. Each runtime owns a first-in/first-out chain of coordination turns
 reserved in call order: `start-active!`, reconciliation publication,
