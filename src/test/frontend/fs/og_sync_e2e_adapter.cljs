@@ -112,7 +112,7 @@
   "The simulated working folder: {path content} for every live single head."
   [state]
   (into {}
-        (comp (map (fn [[file-id file]]
+        (comp (map (fn [[_file-id file]]
                      (let [revision (get-in state ["revisions" (first (get file "heads"))])]
                        (when-not (get revision "deleted")
                          [(get revision "path") (get revision "content")]))))
@@ -124,7 +124,7 @@
   JavaScript validation orders it (UTF-8 path bytes)."
   [state]
   (->> (get state "files")
-       (map (fn [[file-id file]]
+       (map (fn [[_file-id file]]
               (get-in state ["revisions" (first (get file "heads"))])))
        (remove #(get % "deleted"))
        (map (fn [revision] {"path" (get revision "path")
@@ -183,7 +183,7 @@
 
 (defn capture-changes
   [{:keys [metadata replica selected expected-metadata-revision
-           proposed-metadata-revision observations]}]
+           proposed-metadata-revision observations review-decisions]}]
   (<-js (.captureChanges
          identity-module
          (->js {"schema" "f28-capture-batch/1"
@@ -193,14 +193,14 @@
                 "expectedMetadataRevision" expected-metadata-revision
                 "proposedMetadataRevision" proposed-metadata-revision
                 "observations" (vec observations)
-                "reviewDecisions" []}))))
+                "reviewDecisions" (vec (or review-decisions []))}))))
 
 (defn metadata-valid?
   "Run the actual identity validator over a metadata/selected-snapshot pair."
   [metadata selected]
   (try
-    (do (.validateMetadata identity-module (->js metadata) (->js selected))
-        true)
+    (.validateMetadata identity-module (->js metadata) (->js selected))
+    true
     (catch :default _error
       false)))
 
@@ -377,10 +377,15 @@
 
 (defn e2e-runtime
   "A bridge test runtime whose ports run the actual prototype logic over the
-  simulated world. Plan revalidation recomputes the comparison plan; identity
-  acceptance validates the actual sidecar bytes; reconciliation checks the
-  cause against the recomputed plan projection. The storage, evidence and
-  working-file ports are the fake in-memory stores of the world."
+  simulated world. The adapter port records the single event-map argument it
+  receives (never nil/undefined). Plan revalidation recomputes the comparison
+  plan; identity acceptance validates the actual sidecar bytes; reconciliation
+  checks the cause against the recomputed plan projection; complete state is
+  derived from the working folder only — rename evidence requires old-path
+  absence plus byte-identical new-path content against a retained cause, and
+  incomplete, contradictory or ambiguous evidence never infers a rename. The
+  storage, evidence and working-file ports are the fake in-memory stores of
+  the world."
   [world]
   (let [state* (atom {:causes {} :writes {}})
         events (atom [])
@@ -388,20 +393,77 @@
     {:state state*
      :events events
      :world world
-     :adapter! (fn [_kind event] (swap! events conj event))
+     :adapter! (fn [event]
+                ;; The bridge port contract passes exactly one argument — the
+                ;; event map itself; the kind keyword is the port phase. A
+                ;; recorder with the wrong arity would silently store
+                ;; undefined, so any non-event argument is kept as a loud
+                ;; invalid marker that no event assertion can filter past.
+                (swap! events conj
+                       (if (and (map? event) (keyword? (:event event)))
+                         event
+                         {:event :invalid-event-record
+                          :recorded-argument event})))
      :next-id! (fn [kind] (str (name kind) "-" (swap! counter inc)))
      :rename-content-hash! (fn [_graph path]
                              (content-hash (get @(:working-files world) path "")))
      :complete-state!
      (fn [observation]
        (let [path (:path observation)
-             working @(:working-files world)]
+             working @(:working-files world)
+             graph-id (:graph-id world)
+             ;; Complete rename evidence: a retained rename cause whose new
+             ;; path is the observed path, whose old path is absent from the
+             ;; working folder and whose exact unchanged content hash the new
+             ;; path holds. Content alone never infers a rename — the cause's
+             ;; own old/new paths and content hash must all agree.
+             rename-candidates
+             (when (contains? working path)
+               (let [hash (content-hash (get working path))]
+                 (->> (vals (:causes @state*))
+                      (filter #(= :rename (:kind %)))
+                      (filter #(= path (:new-path %)))
+                      (filter #(and (not (contains? working (:old-path %)))
+                                    (= hash (:content-hash %))))
+                      vec)))]
          (if (contains? working path)
-           {:graph-id (:graph-id world)
-            :new-path path
-            :new-present true
-            :new-content-hash (content-hash (get working path))}
-           {:graph-id (:graph-id world)
+           (cond
+             (= 1 (count rename-candidates))
+             (let [cause (first rename-candidates)]
+               {:graph-id graph-id
+                :old-path (:old-path cause)
+                :old-present false
+                :new-path (:new-path cause)
+                :new-present true
+                :new-content-hash (:content-hash cause)})
+
+             (zero? (count rename-candidates))
+             ;; Ordinary new-path presence: save/update/create evidence only.
+             ;; A rename cause with incomplete or contradictory folder
+             ;; evidence deliberately does not match this map.
+             {:graph-id graph-id
+              :new-path path
+              :new-present true
+              :new-content-hash (content-hash (get working path))}
+
+             ;; Several retained rename causes fit the same evidence. Only
+             ;; when they agree on the old path is the shared evidence
+             ;; emitted, so the bridge itself sees the multi-cause ambiguity
+             ;; (match-count > 1 stays :ordinary). Contradictory old paths
+             ;; are refused outright: no identity may be guessed.
+             :else
+             (let [old-paths (set (map :old-path rename-candidates))]
+               (when (= 1 (count old-paths))
+                 {:graph-id graph-id
+                  :old-path (first old-paths)
+                  :old-present false
+                  :new-path path
+                  :new-present true
+                  :new-content-hash (content-hash (get working path))})))
+           ;; The observed path is absent from the working folder: only
+           ;; old-path absence evidence exists, which can settle a delete
+           ;; cause and stays deliberately incomplete for a rename.
+           {:graph-id graph-id
             :old-path path
             :old-present false})))
      :reconcile!
@@ -455,6 +517,47 @@
                         :checkpoint-match :binding-match}
                       (set (keys evidence))))
           (acceptance-valid? world active evidence))))}))
+
+(def ^:const invalid-event-record-kind
+  "The recorded kind for an adapter argument that was not an event map. A
+  recorder with the wrong arity stores undefined; this marker makes that
+  visible instead of silently filterable."
+  :invalid-event-record)
+
+(defn event-records
+  "Every entry the runtime's adapter port recorded, in completion order. The
+  bridge delivers exactly one argument per event — the event map itself — so
+  every real record is a map with an :event kind keyword. Anything else is
+  kept as an {:event :invalid-event-record} marker."
+  [runtime]
+  @(:events runtime))
+
+(defn event-kinds
+  "The recorded event kinds, in the order the adapter received them."
+  [runtime]
+  (mapv :event (event-records runtime)))
+
+(defn valid-event-records?
+  "True only when every recorded entry is a real bridge event map: a map with
+  an :event kind keyword and no invalid marker. A recorder that passed
+  nil/undefined through, or stored the wrong argument, fails this check."
+  [runtime]
+  (boolean
+   (every? (fn [entry]
+             (and (map? entry)
+                  (keyword? (:event entry))
+                  (not= invalid-event-record-kind (:event entry))))
+           (event-records runtime))))
+
+(defn events-of-kind
+  "The recorded event maps of one kind, in order."
+  [runtime kind]
+  (filterv #(= kind (:event %)) (event-records runtime)))
+
+(defn first-event-of-kind
+  "The first recorded event map of one kind, or nil."
+  [runtime kind]
+  (first (events-of-kind runtime kind)))
 
 (defn transaction-inputs
   "Assemble the ACTIVE input envelope from the actual capture/derivation

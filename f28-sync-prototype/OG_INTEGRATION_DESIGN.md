@@ -323,7 +323,22 @@ filesystem, graph, profile, native helper, application or network is
 accessed. The tests use Korean page paths and content to exercise exact
 byte handling without any file access.
 
-**Verified scenarios (9 tests, 128 assertions, 2026-09-14):** a local save's
+**Adapter event-record contract (verified 2026-09-14):** the bridge's
+`:adapter!` port receives exactly one argument — the event map itself; the
+event kind keyword is the port phase. The end-to-end adapter originally
+recorded with a two-argument function, so the delivered event map bound to
+the first parameter and `undefined` was stored while scenario event filters
+passed vacuously. The recorder is now single-argument and funnels any
+non-event argument into a loud `{:event :invalid-event-record}` marker, and a
+dedicated test drives the port directly with an event map, `nil` and a string
+to pin that behavior. Every scenario asserts the recorded stream as real
+event maps: exact cause identity (cause ID, graph, kind, origin, Korean
+path/content-hash, status and result), the event kinds in completion order
+(`:save-pending` before `:save-completed`; raw observation, reconciliation
+request, success result, echo), and the reconciliation request's full
+cause/observation/complete-state payloads.
+
+**Verified scenarios (12 tests, 247 assertions, 2026-09-14):** a local save's
 bridge cause becomes capture evidence, and the executed plan's revision,
 projected head and proposed sidecar name the same revision, path and content;
 the completed edit is never reapplied — replaying its old evidence against
@@ -343,10 +358,28 @@ and clear-then-unknown branches. Refusals cover a changed plan
 tampered sidecar bytes (refused at acceptance with evidence preserved at
 files-applied), a different local edit (an ordinary observation that never
 reconciles and blocks false success), and incomplete acceptance evidence.
-Rename causes are deliberately not exercised end-to-end: the bridge's
-complete-state port derives only a path/presence/content observation and
-cannot confirm the old-path absence a rename cause requires; renames remain
-covered by the stand-in bridge suite.
+
+**Synthetic rename round trip (2026-09-14):** one round trip now exercises
+renames end-to-end through the actual modules. A local rename's bridge cause
+becomes rename-intent/rename-complete/stable-read capture observations (with
+`oldPathAbsent: true`); the actual comparison/executor produce one pure
+rename action over Korean paths with a deterministic revision and unchanged
+content, and the accepted sidecar names the renamed path. A simulated
+incoming rename arrives as external-unlink plus external-add, both held for
+review, and one review decision binds them into a rename at the revision the
+authoritative comparison plan names; the destination capture, the remote
+capture and the recomputed plan agree byte-for-byte, the bridge reconciles
+the `:kind :rename` cause through the recomputed plan projection, metadata
+acceptance validates over the final checkpoint, and the next capture from
+the reinitialized accepted replica refuses the old unlink-plus-add evidence
+(`external-identity-mismatch`) while cleanly capturing a fresh save at the
+renamed Korean path. The complete-state port derives rename evidence from
+the simulated working folder only — old-path absence plus byte-identical
+new-path content matched against a retained rename cause — and a refusal
+test keeps that boundary honest: no move, a copy instead of a move, changed
+content at the new path, and two causes claiming the same move all stay
+`:ordinary` (the last with `:match-count 2`); a rename is never inferred
+from content alone.
 
 This is component agreement under the recorded simulation boundary, not
 usable synchronization: no real storage durability, filesystem stability,

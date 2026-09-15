@@ -893,3 +893,71 @@ and unenrolled in every package. No graph, sidecar, helper, application,
 profile, account or network integration was accessed or enabled; the
 native-helper and two-host integration tests were deliberately not run in this
 batch.
+
+## OG bridge end-to-end event records and rename round trip (2026-09-14)
+
+Two follow-ups to the end-to-end adapter verification, both test-only.
+
+**Event-recorder contract fix.** The bridge invokes the `:adapter!` port
+with exactly one argument — the event map — because the event kind keyword
+is the port phase in `invoke-sync-port`. The end-to-end adapter recorded
+with a two-argument function, so the delivered event map bound to the first
+parameter and `undefined` was stored while its event-kind filters passed
+vacuously. This was a test-side defect; the production bridge emits
+correctly and is unchanged. The recorder is now single-argument and funnels
+any non-event argument into a loud `{:event :invalid-event-record}` marker,
+so no nil/undefined record can pass unnoticed. A dedicated test drives the
+port directly with an event map, `nil` and a string to pin the contract, and
+the scenarios now assert the recorded stream as real event maps: exact cause
+identity (cause ID, graph, kind, origin, Korean path/content-hash, status,
+result), event kinds in completion order, and the reconciliation request's
+full cause/observation/complete-state payloads.
+
+**Synthetic rename round trip.** One round trip now exercises renames
+through the actual modules. Locally, the bridge's rename-intent/completion
+hooks produce the cause, and rename-intent/rename-complete/stable-read
+observations (with `oldPathAbsent: true`) capture through the actual
+`captureChanges`; the actual comparison/executor derive one pure rename
+action over Korean paths with a deterministic revision and unchanged
+content, the transaction completes, and the accepted sidecar names the
+renamed path. The complete-state port was extended to derive rename
+evidence from the simulated working folder only: old-path absence plus
+byte-identical new-path content matched against a retained rename cause.
+For the simulated incoming rename, the destination observes
+external-unlink plus external-add — both held for review — and one review
+decision binds them into a rename at the revision the authoritative
+comparison plan names; destination capture, remote capture and recomputed
+plan agree byte-for-byte, the bridge reconciles the `:kind :rename` cause
+through the recomputed plan projection, metadata acceptance validates over
+the final checkpoint, and the next capture from the reinitialized accepted
+replica refuses the old unlink-plus-add evidence
+(`external-identity-mismatch`) while cleanly capturing a fresh save at the
+renamed path. A refusal test keeps the evidence boundary honest: no move,
+a copy instead of a move, changed content at the new path, and two causes
+claiming the same move all stay `:ordinary` (the last with `:match-count
+2`); a rename is never inferred from content alone.
+
+Verification:
+
+- End-to-end suite: 12/12 tests, 247 assertions (was 9/128).
+- Existing production-hook bridge tests: 45/45 tests, 280 assertions,
+  unchanged.
+- Accepted pure core/planner/executor/comparison/response/identity
+  regressions: 75/75, unchanged.
+- Configured lint `clojure -M:clj-kondo --lint <changed files> --cache
+  false` ran successfully (clj-kondo 2023.05.26 via the Maven alias; the
+  earlier batch's missing-binary note did not apply to the configured
+  command): 0 errors, 0 warnings on the two changed test files.
+- Full test-build compilation succeeded; the warning baseline is unchanged
+  and none come from the changed files. No production code changed, so no
+  browser build was rerun.
+
+The simulated boundary is unchanged: the working folder, checkpoint,
+sidecar, ACTIVE store and evidence ledgers remain atoms; review decisions
+and watcher observations are synthetic inputs that prove module acceptance
+of that evidence, not real disk behavior. The rename round trip does not
+claim real metadata placement, copied-graph handling or any enabled
+application integration — those still require separate approval. The bridge
+remains default-off and unenrolled in every package. No graph, sidecar,
+helper, application, profile, account or network integration was accessed
+or enabled.

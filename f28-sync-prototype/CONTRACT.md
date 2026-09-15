@@ -403,9 +403,19 @@ with the actual standalone prototype modules: the `:revalidate-plan!` port
 recomputes the plan through the real snapshot-comparison module over the
 retained source/target pair instead of echoing the caller's plan, and the
 `:validate-acceptance!` port re-derives the projection and validates the
-retained sidecar bytes with the real identity-capture module. Working files,
-the checkpoint, the sidecar, the ACTIVE store and the evidence ledgers remain
-in-memory atoms, so this adapter verifies component agreement only — no real
+retained sidecar bytes with the real identity-capture module. The `:adapter!`
+recorder follows the port's actual delivery contract — exactly one argument,
+the event map, with the event kind as the port phase — and keeps any
+non-event argument as a visible `{:event :invalid-event-record}` marker, so
+nil/undefined records cannot pass unnoticed. The `:complete-state!` port
+derives rename evidence from the simulated working folder only: a rename
+complete map requires old-path absence plus byte-identical new-path content
+matched against a retained rename cause; missing, contradictory or ambiguous
+old/new-path evidence yields no rename match (zero/multiple candidates stay
+`:ordinary`), and a rename is never inferred from content alone. Working
+files, the checkpoint, the sidecar, the ACTIVE store and the evidence ledgers
+remain in-memory atoms, and review decisions plus watcher observations are
+synthetic inputs, so this adapter verifies component agreement only — no real
 storage durability or usable synchronization is implied.
 
 Every ACTIVE publication is serialized through one process-local coordination
