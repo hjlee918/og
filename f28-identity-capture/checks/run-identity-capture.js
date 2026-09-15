@@ -136,9 +136,45 @@ async function flushPageThroughOg(page, pageName) {
   }, pageName);
 }
 
-async function editBlockThroughUi(session, pageName, blockUuid, content) {
+// OG's file carries no id:: properties, so a page re-parse after a completed
+// save re-derives the block uuid: a creation-time uuid goes stale after the
+// first edit's flush. Resolve the page's CURRENT first block through the OG
+// API right before every edit — the exact resolution the observation stage's
+// verified resume path uses — and never reuse a captured one.
+async function currentFirstBlockUuid(session, pageName) {
+  const tree = await api(session.page, 'get_page_blocks_tree', pageName);
+  const first = Array.isArray(tree) && tree[0];
+  assert(first?.uuid, `the page "${pageName}" exposes no first block through the OG API`);
+  return first.uuid;
+}
+
+async function editBlockThroughUi(session, pageName, content) {
+  const blockUuid = await currentFirstBlockUuid(session, pageName);
   await session.goTo(pageName);
-  const block = session.page.locator(`#main-content-container [blockid="${blockUuid}"] .block-content`).first();
+  const blockAt = () =>
+    session.page.locator(`#main-content-container [blockid="${blockUuid}"] .block-content`).first();
+  // Assigning the hash the page already shows does not re-render, so if the
+  // saved page is not showing the current block, force one away-and-back
+  // navigation through OG's own routes.
+  if (!(await blockAt().count())) {
+    await session.page.evaluate(() => { location.hash = '#/'; });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await session.goTo(pageName);
+  }
+  if (!(await blockAt().count())) {
+    // Still absent: capture what IS rendered instead of timing out blind, so
+    // the evidence names the route, the rendered block ids and the visible
+    // text rather than only a locator that never resolved.
+    const rendered = await session.page.evaluate(() => ({
+      hash: location.hash,
+      blockIds: [...document.querySelectorAll('#main-content-container [blockid]')]
+        .map(element => element.getAttribute('blockid')).slice(0, 12),
+      visibleText: (document.querySelector('#main-content-container')?.innerText || '')
+        .slice(0, 400),
+    }));
+    throw new Error(`the edited block is not rendered on "${pageName}": ${JSON.stringify(rendered)}`);
+  }
+  const block = blockAt();
   await block.click({timeout: 20000});
   const editor = session.page.locator('textarea[aria-label="editing block"]').first();
   await editor.waitFor({state: 'visible', timeout: 10000});
@@ -532,7 +568,7 @@ async function run() {
 
     // ------------------------------------ English edits A then B, pending demo
     phase('english-edits');
-    const englishUiA = await editBlockThroughUi(session, english, englishBlock.uuid, englishEditA);
+    const englishUiA = await editBlockThroughUi(session, english, englishEditA);
     assert(englishUiA.editorValueMatched, 'English first edit did not reach the editor');
     const preFlushGroups = saveGroupsFor(await currentEvents(session.page), expectedGraphId, englishPath);
     const preFlushDisk = stableRead(context, englishPath);
@@ -557,7 +593,7 @@ async function run() {
     const bytesA = readA.content;
     const saveIdA = `save-${digestHex(`${expectedGraphId}\0${englishPath}\0${newHashA}`)}`;
 
-    const englishUiB = await editBlockThroughUi(session, english, englishBlock.uuid, englishEditB);
+    const englishUiB = await editBlockThroughUi(session, english, englishEditB);
     assert(englishUiB.editorValueMatched, 'English second edit did not reach the editor');
     await flushPageThroughOg(session.page, english);
     const readB = stableRead(context, englishPath);
@@ -634,7 +670,7 @@ async function run() {
 
     // --------------------------------------------------------- Korean save
     phase('korean-save');
-    const koreanUi = await editBlockThroughUi(session, koreanSource, koreanBlock.uuid, koreanEdit);
+    const koreanUi = await editBlockThroughUi(session, koreanSource, koreanEdit);
     assert(koreanUi.editorValueMatched, 'Korean edit did not reach the editor');
     await flushPageThroughOg(session.page, koreanSource);
     const readK = stableRead(context, oldKoreanPath);
@@ -702,7 +738,7 @@ async function run() {
 
     // ------------------------------------- edit at the new path + duplicates
     phase('edit-after-rename');
-    const koreanUi2 = await editBlockThroughUi(session, renamed, koreanBlock.uuid, koreanEditAfterRename);
+    const koreanUi2 = await editBlockThroughUi(session, renamed, koreanEditAfterRename);
     assert(koreanUi2.editorValueMatched, 'the post-rename Korean edit did not reach the editor');
     await flushPageThroughOg(session.page, renamed);
     const readR2 = stableRead(context, renamedPath);
@@ -757,7 +793,7 @@ async function run() {
 
     // ------------------------------------- injected record-persistence failure
     phase('injected-failure');
-    const englishUiC = await editBlockThroughUi(session, english, englishBlock.uuid, englishEditC);
+    const englishUiC = await editBlockThroughUi(session, english, englishEditC);
     assert(englishUiC.editorValueMatched, 'the third English edit did not reach the editor');
     await flushPageThroughOg(session.page, english);
     const readC = stableRead(context, englishPath);

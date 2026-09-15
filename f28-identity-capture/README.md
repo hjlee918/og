@@ -101,6 +101,10 @@ node f28-origin/scripts/package-experiment.js --identity-capture
 
 ## What the batch verifies
 
+The passing run's exact checks, identities and limitations are recorded in
+[f28-sync-prototype/RESULTS.md](../f28-sync-prototype/RESULTS.md), section
+"Live OG save/rename capture into persistent identity records (2026-09-15)".
+
 - explicit enrollment of only the fresh synthetic graph leaves note bytes
   unchanged;
 - English and Korean saves through OG produce matching accepted records, with

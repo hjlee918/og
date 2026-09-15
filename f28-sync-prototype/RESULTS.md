@@ -1452,3 +1452,125 @@ cloud-storage durability is claimed, and this remains not usable
 synchronization: no change moves between two devices or two processes, no
 watcher, OG hook, application launch, network, account or import is involved,
 and no package enables any of it.
+
+## Live OG save/rename capture into persistent identity records (2026-09-15)
+
+The approved single-machine integration batch. One fresh synthetic graph,
+written only by OG through a separately packaged experimental build
+(`Logseq OG F28 IdentityCapture`, observation-only runtime, unchanged from
+the verified observation stage), was connected to the persistent
+file-identity and recovery records by an **external test-owned coordinator**
+(`f28-identity-capture/checks/run-identity-capture.js`, a plain Node process
+started by the operator). The coordinator reads the observation runtime's
+sanitized in-memory cause stream through the existing read-only
+`__LOGSEQ_OG_BRIDGE_OBSERVATION__` page API and drives the existing anchored
+`identity_store_helper` for every graph-byte read and record write. The
+application gained nothing: no persistence or synchronization port, no new
+IPC, no process-launch exception, no helper execution, no renderer
+filesystem access beyond OG's own. The network control's process-launch
+refusal inside the app was not disabled.
+
+### Isolation check first
+
+`f28-identity-capture/checks/isolation-check.js` exercised the coordinator's
+exact wiring headless — observation shapes, capture batching, update
+derivation, duplicate collapse, re-feed refusal, stale-evidence pending,
+rename identity retention, and the injected failure with its refusal and
+recovery — against the real helper and modules on a scratch owned run
+(`f28-iso-2026-09-15T22-53-58-453Z-5ab16f`, retained): 22/22 checks. It also
+asserted on every save capture that the accepted sidecar identity is
+deep-equal to the capture proposal, which no earlier suite had verified
+against the live store.
+
+### Live batch
+
+One coherent batch, run twice total (see the failure note below). The passing
+run: owned run `f28-identity-capture-2026-09-15T23-02-22-317Z-2dd7b6` under
+both anchored roots, graph identity
+`f28-identity-graph-2026-09-15-1aafad5c`, app profile
+`…/Logseq OG F28 IdentityCapture/identity-capture-state` outside both record
+roots, packaged app from build manifest
+`2026-09-15T22-55-52-952Z-eb60e451` (renderer revision `e62dbbdad`, clean
+tree), helper `sha256:30075327737c505297ea06533484c7513a1b0c8b278fef7502c0b452a783206b`.
+**43/43 checks passed**, `status: passed`; evidence
+`development/evidence/f28-identity-capture-2026-09-15T23-02-22-317Z.json`
+(local, never a Git input). The app profile was set aside and the preserved
+profile state restored by the existing fresh-profile tooling; the owned run
+is retained; the failed first attempt's run and evidence are preserved
+untouched and neither shared root was enumerated.
+
+The batch verified, in order: launch gates (L2.1–L3.2), fresh isolated
+profile, no plugins, pre-navigation network refusal, observation runtime
+only, observer healthy at startup; English and Korean pages created through
+OG's own API; `unenrolled` before explicit enrollment; enrollment leaves
+note bytes unchanged (whole-graph note hash identical) and reads back
+exactly (`metadata-1`); the sidecar contains no device material; a pending
+intent is never completion evidence; the first English edit's completed
+cause group (4 causes collapsed to one logical save, cause hash equal to the
+disk bytes) is captured to an accepted record (`metadata-2`, transaction
+`fd02b40c…`, accepted sidecar identity deep-equal to the capture proposal);
+a later edit leaves the earlier completed save **pending**
+(`unstable-read` + `save-awaiting-matching-stable-read`) while the disk is
+ahead of the sidecar (`openGraph` refused `snapshot-mismatch`, records
+still at `metadata-1`, sidecar bytes unchanged); the Korean save captured
+(`metadata-3`); the Korean rename retains file identity and updates the
+exact path (`pages/신원캡처 이름변경 2026-09-15 230222.md`,
+`metadata-4`, content hash unchanged); a subsequent edit at the new path
+captured (`metadata-5`); duplicate-fed observations collapse to one
+revision (4 fed, 1 captured event); re-fed completed evidence refused
+(`save-evidence-mismatch`), no second revision; the injected
+record-persistence failure (`after-stage` at the device step, graph-first)
+preserved OG's saved note byte-for-byte
+(`0230a069…`, the exact same hash as the completed save cause), left
+`recovery-required`/`outstanding-intent` with intent and evidence retained,
+and no experimental path reported the OG save as failed; the identical
+re-issue was refused (`stale-metadata-revision` — the sidecar already names
+the target) and recovery of the exact outstanding transaction
+(`25efb979…`) classified `graph-applied` and reconciled to `metadata-6`
+with the disk bytes exactly as OG saved them; observer healthy before the
+quit; a clean quit; identity consistent across the quit with no application
+running (`accepted`, `metadata-6`, whole-graph note hash identical before
+and after); and after the reopen — launch gates again, observer healthy,
+the third-edit English content and the renamed Korean content both render,
+identity still `accepted` at `metadata-6`, byte hashes unchanged; final
+clean quit with no owned process remaining.
+
+### First-attempt failure and the correction
+
+The first live run (`f28-identity-capture-2026-09-15T22-56-48-699Z`,
+evidence and owned run preserved) passed its first 19 checks and stopped at
+the second English UI edit: the coordinator clicked the block by its
+creation-time uuid, but OG's saved page file carries no `id::` properties,
+so the page re-parse after the first edit's flush re-derived the block uuid
+and the original no longer existed in the rendered page. The observation
+stage never met this because each block there was edited at most once. The
+coordinator now resolves the page's current first block through the OG API
+immediately before every edit — the exact resolution the observation
+stage's verified resume path uses — and, if the current block is not
+rendered after navigation, forces one away-and-back navigation through OG's
+own routes and otherwise fails with the rendered route, block ids and
+visible text captured as evidence instead of a blind locator timeout. The
+diagnosis preceded the single re-run, which used a fresh run name.
+
+### Tested build versus this documentation
+
+The packaged application under test is exactly commit `e62dbdad` (manifest
+`2026-09-15T22-55-52-952Z-eb60e451`); the only source that changed between
+the two attempts is the external coordinator script itself, recorded in the
+passing run's evidence as `source.uncommitted: 1` — the coordinator fix
+committed after the run. No application source changed and the app binary
+was not rebuilt.
+
+### Remaining limits
+
+One host, one synthetic graph, one coherent batch. The injected failure
+establishes recovery classification, not power-loss durability; no
+power-loss or simultaneous-host test was run. The cooperative lock
+serializes participating helper invocations only. Block-uuid resolution
+depends on OG's own page API, which returned the current first block on
+every call in this batch. Watcher-based incoming matching remains
+synthetic-only: no incoming change was applied, nothing here transports
+anything, and no personal graph, backup, export, profile or existing
+package was read, altered, replaced or launched. This is local capture
+only — not cross-device synchronization — and nothing is enabled in any
+normal or existing package.

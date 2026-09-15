@@ -634,3 +634,50 @@ storage-hardware or power-loss durability, and no real power-loss test was run. 
 launches an application, contacts a network, account or service, imports anything,
 or is enabled in any package. Real OG enrollment, a sidecar in a real graph and
 any enabled build remain separate future approvals.
+
+## Live capture contract (2026-09-15 identity-capture batch)
+
+The preceding paragraphs describe the store, the adapter contract and the
+observation seams in isolation. The identity-capture batch connected them
+under one approved contract, recorded in
+`f28-identity-capture/LIVE_CAPTURE_DESIGN.md` and verified live in
+`f28-sync-prototype/RESULTS.md` (section "Live OG save/rename capture into
+persistent identity records"). Its terms, which extend this contract without
+weakening any of it:
+
+- **The application gains nothing.** A separately packaged experimental build
+  carries exactly the observation-only runtime; an external test-owned
+  coordinator — a plain operator-started Node process, outside the app —
+  reads the sanitized cause stream through the existing read-only page API
+  and invokes the anchored helper for every graph-byte read and record
+  write. No new privileged IPC, process-launch exception, access root or
+  renderer filesystem access exists anywhere in the flow, and the in-app
+  process-launch refusal stays on.
+- **OG remains the sole note writer.** The coordinator never issues a note
+  write against the live graph; its only graph-tree writes are the
+  helper-owned `logseq/.og-sync` records. A completed OG edit is never
+  reapplied as an incoming write.
+- **Completion is cause-bound, not time-bound.** One logical save is the
+  group of causes sharing the exact graph-id + path + content-hash, complete
+  only when every cause in the group completed; a pending or failed cause,
+  intent or queue flush is never completion evidence.
+- **Acceptance requires a stable read-back.** The exact note is read twice
+  through the anchored helper and must be byte-identical with a SHA-256
+  equal to the cause's content hash (a rename additionally requires the old
+  path absent twice and the bytes unchanged). An unstable, mismatched or
+  superseded read leaves the operation pending — recorded, never falsely
+  accepted — and the store's refusal to read a disk-ahead graph as accepted
+  is itself the pending state.
+- **OG's results are never affected.** A capture or record-persistence
+  failure stops capture only: the saved note stays saved, its bytes are
+  re-read and asserted unchanged, and no experimental path reports an OG save
+  as failed, erases a note or alters an OG error. Recovery of the reserved
+  transaction — never a re-derivation over the moved sidecar — is the only
+  continuation after an uncertain second-record write.
+
+Real OG enrollment of one fresh synthetic graph happened under this batch
+and this contract, on one host, through the external coordinator. It is
+still not synchronization: no change moves between devices or processes, no
+incoming change is applied, no personal graph is enrolled, and nothing is
+enabled in any normal or existing package; transport and incoming
+application remain separate future approvals.
