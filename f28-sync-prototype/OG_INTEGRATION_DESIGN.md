@@ -411,11 +411,34 @@ save, rename, or raw watcher event. This remained true with default-off gated
 seams at the common filesystem dispatch, both desktop filesystem backends, and
 the save-tree promise boundary.
 
-This is evidence that the current proposed production hook placement does not
-intercept the live packaged graph path; it is not evidence that events occurred
-and were correctly ordered. Synthetic event ordering remains valid only inside
-its stated simulation boundary. No lower-level/native publisher was added to
-force visibility because that was outside the approved observation boundary.
-Before any further integration work, a separately reviewed design must identify
-the packaged graph persistence and watcher ownership without enabling sync,
-metadata, identity, or graph enrollment. This phase stops at the observed gap.
+That reading — that the proposed hook placement misses the live packaged graph
+path — turned out to be wrong, and is corrected below.
+
+## Resolved: the hook placement was right, the recorder was not (2026-09-15)
+
+The seams were reached on every operation. The observation recorder computed a
+watcher observation's `:content-bytes` with cljs `count` over the `Uint8Array`
+from `TextEncoder.encode`; that throws, the throw escaped the recording `swap!`,
+and `invoke-sync-port` latched `:blocked`, silently ending all later recording
+from the first watcher event onward. The reader exposed only events, so a dead
+observer was indistinguishable from an unreached one.
+
+With that fixed and sanitized observer health exposed, one bounded live run on a
+fresh synthetic graph recorded the English and Korean save pairs, the Korean
+rename pair and the post-rename edit, each pending-before-completed and bound to
+the exact operated graph, alongside graph-bound raw watcher observations. So
+`frontend.fs/write-plain-text-file!`, the desktop node backend,
+`frontend.handler.page` rename and `frontend.fs.watcher-handler` are confirmed as
+the live packaged save, rename and watcher path for this build. No lower-level or
+native publisher was needed or added.
+
+Global-directory watcher events are reported against OG's current repo, which is
+its own `local` placeholder before a graph is bound; they are ordinary and are
+not graph-bound. Any design that resolves an observation against a graph
+identity must treat global-directory events as unbound rather than misattribute
+them.
+
+Watcher-to-cause matching beyond recording, and rejection behaviour, remain
+synthetic-only. This phase stops here: no sync, metadata, identity, enrollment
+or persistence is enabled, and further integration still needs separate
+approval.

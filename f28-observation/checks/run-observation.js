@@ -373,10 +373,30 @@ async function run() {
        completed: renamedPair.completed.sequence, graphId: expectedGraphId, path: renamedPath,
        bytesSha256: sha256(renamedBytes), persistedDuringOwnedQuit: true});
     const raw = liveEvents.filter(event => event.event === 'raw-watcher-observation');
-    const graphIds = new Set(raw.map(event => event.observation?.['graph-id']).filter(Boolean));
-    record('raw-watcher-observed-without-suppression', raw.length > 0 &&
-      [...graphIds].every(id => id === expectedGraphId),
-      {count: raw.length, types: [...new Set(raw.map(event => event.observation?.type))], graphIds: [...graphIds],
+    // Global-dir events are not graph events. OG reports them against whatever
+    // repo is current, which before the graph opens is its own "local"
+    // placeholder, so requiring every watcher event to name the operated graph
+    // would fail on ordinary correct behaviour. They must still be recorded and
+    // must stay inside the owned isolated profile; only graph-dir observations
+    // carry the graph-binding requirement, and the operated pages must appear
+    // among them.
+    const graphRaw = raw.filter(event => !event.observation?.['global-dir']);
+    const globalRaw = raw.filter(event => event.observation?.['global-dir']);
+    const graphIds = new Set(graphRaw.map(event => event.observation?.['graph-id']).filter(Boolean));
+    const globalContained = globalRaw.every(event =>
+      (event.observation?.dir || '').startsWith(profile.root + path.sep));
+    const observedPaths = new Set(graphRaw.map(event => event.observation?.path).filter(Boolean));
+    record('raw-watcher-observed-without-suppression', graphRaw.length > 0 &&
+      [...graphIds].every(id => id === expectedGraphId) && globalContained &&
+      observedPaths.has(englishPath) && observedPaths.has(oldKoreanPath) &&
+      observedPaths.has(renamedPath),
+      {count: raw.length, graphDirCount: graphRaw.length, globalDirCount: globalRaw.length,
+       globalContainedInOwnedProfile: globalContained,
+       types: [...new Set(raw.map(event => event.observation?.type))], graphIds: [...graphIds],
+       globalGraphIds: [...new Set(globalRaw.map(event => event.observation?.['graph-id']).filter(Boolean))],
+       operatedPagesObserved: {english: observedPaths.has(englishPath),
+                               koreanSource: observedPaths.has(oldKoreanPath),
+                               renamed: observedPaths.has(renamedPath)},
        paths: [...new Set(raw.map(event => event.observation?.path).filter(Boolean))]});
 
     reopened = await APP.open({built, graph, bad, errors, say: console.log,

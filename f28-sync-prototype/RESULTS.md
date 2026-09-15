@@ -987,7 +987,8 @@ then the owned app quit with no retained owned process. Ordinary graph
 housekeeping was limited to `.DS_Store`, `logseq/config.edn`,
 `logseq/custom.css`, and `pages/contents.md`; no sync metadata or sidecar exists.
 
-The bridge observation itself failed and is not promoted to a success claim.
+The bridge observation itself failed in that run and is not promoted to a
+success claim. Its cause was found and fixed; see the section below.
 Across the final live operation run, the in-memory stream contained four events,
 all for the isolated profile's global `preferences.json` write (two nested
 pending/completed pairs). It contained **zero graph-page save events, zero rename
@@ -999,6 +1000,58 @@ none exposed this build's live page persistence/rename/watcher path. Consequentl
 pending-before-completion, graph binding, rename cause identity, and watcher
 ordering are proven only by the synthetic 45-test/281-assertion and
 12-test/247-assertion suites, not by this live run.
+
+## Resolved observation cause and confirmed run (2026-09-15)
+
+The gap above was a defect in the observation recorder, not in hook placement.
+Every seam was reached. `observation-event` computed `:content-bytes` for a raw
+watcher observation with cljs `count` over the `Uint8Array` returned by
+`TextEncoder.encode`. A `Uint8Array` is neither `array?` nor `ICounted`, so
+`count` throws `No protocol method ICounted.-count`. The throw escaped the
+recording `swap!` — so the watcher event itself was never recorded — and
+`invoke-sync-port` caught it and latched `:blocked`, after which every
+`save-pending!`, `rename-intent!` and `observe-watcher!` returned nil silently.
+The four retained events were the two nested `write-plain-text-file!`/node pairs
+for the startup `preferences.json` write, which precede the first watcher event.
+
+The synthetic suite had bound a stand-in `:adapter!`, so `make-observation-runtime`
+and `observation-event` — the code the packaged build actually runs — had no
+coverage at all. That constructor is now public solely so the suite exercises the
+real recorder, and the reader exposes sanitized `observation-health`:
+enabled/blocked, the fixed blocked stage and code, the runtime instance the
+reader holds versus the one the seams resolve live, and hook-entry versus
+recorded-event counts. It exposes no note content, cause payload or error text,
+and never clears the latch. Hook-entry counts are what separate "hook never
+called" from "recording failed". Both closure defines remain false by default.
+
+Source `b76b0ecde0eb58e7056de744819c3ef9d149a83c`, build
+`2026-09-15T16-29-06-192Z-7cbf97ee` (these are distinct identities; the earlier
+failed run used build `2026-09-15T15-52-45-333Z-16574558` from `d160c6ba4`, which
+is retained). Synthetic suites: bridge 50 tests / 308 assertions, end-to-end 12
+tests / 247 assertions, whole frontend suite 709 tests / 4350 assertions, all
+passing.
+
+One bounded live confirmation on the fresh synthetic graph
+`f28-og-observation-2026-09-15T16-32-47-771Z-2afd50da`, a direct canonical child
+of `Logseq Test`, with the dedicated `observation-state` TEST profile, passed
+**30/30 checks** (evidence `f28-observation-2026-09-15T16-32-47-771Z.json`). The
+observer reported healthy and unblocked at startup and after the live
+operations, with the reader and the seams on the same runtime instance. Eighty
+sanitized events were recorded: the English and Korean save pairs, the Korean
+rename pair and the post-rename edit, each pending-before-completed and bound to
+the exact operated graph, plus 18 raw watcher observations. All 17
+graph-directory watcher observations named that graph; the single
+global-directory observation stayed inside the owned isolated profile and is
+reported against OG's own `local` placeholder repo, which is ordinary OG
+behaviour for a global event observed before a graph is bound. Korean paths and
+multi-byte content byte counts were recorded correctly. Reopen displayed both
+exact saved edits, the owned app quit with no retained process, and the run's
+profile was preserved by rename.
+
+Live graph event ordering and graph binding are therefore now demonstrated for
+save and rename on this build, rather than resting on the synthetic suites
+alone. Watcher-to-cause matching beyond recording, and rejection behaviour,
+remain synthetic-only.
 
 No safe existing operation produced a controlled live rejection, and permissions
 or paths were not weakened to manufacture one; failure behavior remains
