@@ -400,3 +400,22 @@ the user must separately approve (1) the recommended graph-local
 explicit copied-graph choice between same lineage/new replica and new lineage.
 Real sidecar creation, native application and enabled preview remain separate
 future approvals.
+
+## Live observation checkpoint (2026-09-15)
+
+The isolated observation build preserved real OG create/edit/rename/save/reopen
+behavior on one contained synthetic graph, but did not establish the expected
+bridge event flow. Exact page bytes and the Korean rename persisted, while the
+in-memory observation stream saw only profile-preferences writes and no page
+save, rename, or raw watcher event. This remained true with default-off gated
+seams at the common filesystem dispatch, both desktop filesystem backends, and
+the save-tree promise boundary.
+
+This is evidence that the current proposed production hook placement does not
+intercept the live packaged graph path; it is not evidence that events occurred
+and were correctly ordered. Synthetic event ordering remains valid only inside
+its stated simulation boundary. No lower-level/native publisher was added to
+force visibility because that was outside the approved observation boundary.
+Before any further integration work, a separately reviewed design must identify
+the packaged graph persistence and watcher ownership without enabling sync,
+metadata, identity, or graph enrollment. This phase stops at the observed gap.

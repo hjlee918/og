@@ -107,7 +107,10 @@ async function pageContains(session, pageName, expected) {
 
 async function run() {
   const resumeIndex = process.argv.indexOf('--resume');
-  const resumeFile = resumeIndex >= 0 ? process.argv[resumeIndex + 1] : null;
+  const verifyIndex = process.argv.indexOf('--verify-reopen');
+  const resumeFile = resumeIndex >= 0 ? process.argv[resumeIndex + 1] :
+    (verifyIndex >= 0 ? process.argv[verifyIndex + 1] : null);
+  const verifyReopenOnly = verifyIndex >= 0;
   const prior = resumeFile ? JSON.parse(fs.readFileSync(path.resolve(resumeFile), 'utf8')) : null;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const evidenceFile = path.join(EVIDENCE, `f28-observation-${stamp}.json`);
@@ -180,6 +183,22 @@ async function run() {
     record('pre-navigation-network-refusal', network?.active && network.sessions >= 1, network);
     const initialEvents = await readEvents(session.page);
     record('observation-runtime-only', Array.isArray(initialEvents), {schema: 'frontend.fs.og-sync-bridge.observation/1', initialCount: initialEvents?.length});
+
+    if (verifyReopenOnly) {
+      assert(prior?.operation?.english && prior?.operation?.renamed,
+        'reopen evidence lacks exact operated page identities');
+      const expectedEnglish = `Synthetic English note edited and saved through OG (${prior.stamp}).`;
+      const expectedKorean = `이름을 바꾼 뒤 OG에서 다시 편집하고 저장했습니다 (${prior.stamp}).`;
+      record('reopen-saved-english', await pageContains(session, prior.operation.english, expectedEnglish),
+        {page: prior.operation.english});
+      record('reopen-saved-renamed-korean', await pageContains(session, prior.operation.renamed, expectedKorean),
+        {page: prior.operation.renamed});
+      out.finalClose = await APP.close(session); session = null;
+      record('final-owned-quit-clean', out.finalClose.stillAlive.length === 0 &&
+        !ownedProcesses(built.exe).length, out.finalClose);
+      out.status = 'reopen-verified-after-observation-gap';
+      return;
+    }
 
     const nameDate = (prior ? prior.stamp : stamp).slice(0, 10);
     const english = `Observation English ${nameDate}`;

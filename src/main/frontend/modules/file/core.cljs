@@ -5,14 +5,12 @@
             [frontend.db :as db]
             [frontend.db.model :as model]
             [frontend.db.utils :as db-utils]
-            [frontend.fs.og-sync-bridge :as og-sync-bridge]
             [frontend.handler.file :as file-handler]
             [frontend.modules.file.uprint :as up]
             [frontend.state :as state]
             [frontend.util.fs :as fs-util]
             [frontend.util.property :as property]
-            [logseq.common.path :as path]
-            [promesa.core :as p]))
+            [logseq.common.path :as path]))
 
 (defn- indented-block-content
   [content spaces-tabs]
@@ -162,17 +160,8 @@
           (state/pub-event! [:capture-error {:error (js/Error. "Empty content")
                                              :payload {}}])
           (let [files [[file-path new-content]]
-                repo (state/get-current-repo)
-                cause (when (and (og-sync-bridge/observation-only?)
-                                 (og-sync-bridge/enabled?))
-                        (og-sync-bridge/save-pending! repo file-path new-content))]
-            (-> (file-handler/alter-files-handler! repo files {} {})
-                (p/then (fn [result]
-                          (when cause (og-sync-bridge/save-completed! cause result))
-                          result))
-                (p/catch (fn [error]
-                           (when cause (og-sync-bridge/save-failed! cause error))
-                           (throw error)))))))
+                repo (state/get-current-repo)]
+            (file-handler/alter-files-handler! repo files {} {}))))
       ;; In e2e tests, "card" page in db has no :file/path
       (js/console.error "File path from page-block is not valid" page-block tree))))
 

@@ -961,3 +961,49 @@ application integration — those still require separate approval. The bridge
 remains default-off and unenrolled in every package. No graph, sidecar,
 helper, application, profile, account or network integration was accessed
 or enabled.
+
+## Isolated live OG observation (2026-09-15)
+
+The approved observation batch used only the synthetic graph
+`f28-og-observation-2026-09-15T03-45-45-074Z-e216551e`, a direct canonical child
+of `Logseq Test`, with the dedicated `observation-state` TEST profile. The tested
+package was `Logseq OG F28 Observation` / `com.logseq.logseq-og.f28observation`,
+x64 and unsigned, build `2026-09-15T15-52-45-333Z-16574558` from clean commit
+`d160c6ba4eeb05b6243cb1863c0039f27e513974`. Its manifest reports
+observation-only mode with persistence and synchronization ports false. Startup
+refused an outside-root picker result before filesystem inspection, independently
+confirmed both live graph identities, found zero plugins, kept all profile paths
+under the dedicated root, and retained `f28-origin-network/1` refusal.
+
+Normal OG behavior passed. English and Korean notes were created through the OG
+API and edited through the real editor. The Korean page was renamed through
+`logseq.api.rename_page`, then edited again at the renamed page. After the owned
+quit, the English file was 80 bytes with SHA-256
+`c9809336d7625ea3e6cf86dbb28569904b1001134c877aad596a6b6b6919f8b4`; the final
+Korean file was 98 bytes with SHA-256
+`b0ef338c27d22757cadb7f96db239dc987738fdf642ef1d62c3a6c1c3cf4f5f6`; its exact
+previous path was absent. One contained reopen displayed both exact saved edits,
+then the owned app quit with no retained owned process. Ordinary graph
+housekeeping was limited to `.DS_Store`, `logseq/config.edn`,
+`logseq/custom.css`, and `pages/contents.md`; no sync metadata or sidecar exists.
+
+The bridge observation itself failed and is not promoted to a success claim.
+Across the final live operation run, the in-memory stream contained four events,
+all for the isolated profile's global `preferences.json` write (two nested
+pending/completed pairs). It contained **zero graph-page save events, zero rename
+events, and zero raw watcher observations**. Earlier stopped/resumed runs showed
+the same absence while exact graph bytes and rename results still changed through
+OG. Gated observation seams were exercised at common filesystem dispatch, Node,
+File System Access, and save-tree boundaries without suppressing normal handling;
+none exposed this build's live page persistence/rename/watcher path. Consequently
+pending-before-completion, graph binding, rename cause identity, and watcher
+ordering are proven only by the synthetic 45-test/281-assertion and
+12-test/247-assertion suites, not by this live run.
+
+No safe existing operation produced a controlled live rejection, and permissions
+or paths were not weakened to manufacture one; failure behavior remains
+synthetic-only. No ACTIVE record, identity acceptance, incoming application,
+sidecar, enrollment, native publisher, sync port, account action, import, or
+network access was enabled. Generated graph data, profiles, packages, and local
+JSON evidence remain outside Git. This observation phase stops here; the next
+phase is not authorized.
