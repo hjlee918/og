@@ -16,6 +16,7 @@ const {
   publish,
   writeRecordExpecting,
   putNote,
+  putNoteRelocatedForTest,
   readNote,
   readRecords,
   recover,
@@ -855,4 +856,63 @@ test('the cooperative lock is created in the owned profile and is not followed',
   assert.throws(() => readRecords(context), (error) => error.code === 'helper-refused');
   assert.equal(fs.readFileSync(graphPath(context, 'pages/Anchor Page.md'), 'utf8'),
     NOTES[0].content, 'the link target must be untouched');
+});
+
+// ------------------------- review regressions (2026-09-15, batch three)
+
+/*
+ * A retained descriptor keeps referencing its directory after the pathname is
+ * renamed or replaced, so a same-descriptor re-verification was vacuous: it
+ * could never detect a substituted entry. The helper now re-opens the
+ * parent-relative entry without following and compares device/inode against
+ * the retained handle. The relocation is simulated deterministically by the
+ * helper itself, inside the owned run, between acquisition and verification —
+ * the previous same-descriptor check passed exactly this scenario.
+ */
+test('a graph directory replaced between acquisition and verification refuses', () => {
+  const context = seeded('relocgraph');
+  const relocated = `${graphPath(context)}.relocated`;
+  assert.equal(fs.existsSync(relocated), false);
+
+  assert.throws(
+    () => putNoteRelocatedForTest(context, 'pages/Relocated Page.md', '- relocated note\n', 'graph'),
+    (error) => error.code === 'helper-refused'
+      && /graph directory entry no longer names/.test(error.message),
+  );
+
+  // The renamed-aside original is preserved with its evidence, and refusal
+  // after a write does not mean the write did not happen: the note landed in
+  // the renamed directory through the retained descriptor.
+  for (const note of NOTES) {
+    assert.equal(fs.readFileSync(path.join(relocated, note.path), 'utf8'), note.content);
+  }
+  assert.equal(fs.readFileSync(path.join(relocated, 'pages/Relocated Page.md'), 'utf8'),
+    '- relocated note\n');
+
+  // The replacement left at the original entry is preserved too, empty.
+  assert.deepEqual(fs.readdirSync(graphPath(context)), []);
+});
+
+test('a profile directory replaced between acquisition and verification refuses', () => {
+  const context = owned('relocprofile');
+  const relocated = `${profilePath(context)}.relocated`;
+  assert.equal(fs.existsSync(relocated), false);
+
+  const record = serialize({ schema: 'f28-device-record/1', note: 'relocation fixture' });
+  assert.throws(
+    () => writeRawRecordForTest(context, 'device', record, undefined, 'profile'),
+    (error) => error.code === 'helper-refused'
+      && /profile directory entry no longer names/.test(error.message),
+  );
+
+  // Refusal after a write does not mean no write happened: the record landed
+  // in the renamed-aside profile through the retained descriptor, and the
+  // original evidence (owner, lock, evidence directory) is preserved beside it.
+  assert.deepEqual(fs.readFileSync(path.join(relocated, 'device.json')), record);
+  assert.equal(fs.existsSync(path.join(relocated, 'OWNER')), true);
+  assert.equal(fs.existsSync(path.join(relocated, 'LOCK')), true);
+  assert.equal(fs.statSync(path.join(relocated, 'evidence')).isDirectory(), true);
+
+  // The replacement left at the original entry is preserved too, empty.
+  assert.deepEqual(fs.readdirSync(profilePath(context)), []);
 });

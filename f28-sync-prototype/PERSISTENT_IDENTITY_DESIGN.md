@@ -378,10 +378,27 @@ classification cannot interleave. End-to-end serialization between two concurren
 adapter processes has **not** been tested; only the lock's creation, inode
 stability and non-following behaviour have been.
 
-Every command also records the device/inode of the anchored graph and profile
-directories when it opens them, and re-verifies both before reporting success.
-This detects a directory that was replaced between open and completion; it does
-not prevent it.
+Every command that opens the graph or profile directory retains the owned
+parent handle and entry name beside the device/inode recorded at open, and
+before reporting success re-opens that parent-relative entry without following
+and compares its identity with the retained handle's. An open descriptor keeps
+referencing its original directory after its pathname is renamed or replaced,
+so the same-descriptor re-verification previously used here was vacuous — it
+could never detect a substitution, and a supervisor review found that gap. The
+entry check detects, at the moment of the check, an entry renamed away (the
+re-open fails) or replaced by a different directory or a symbolic link (the
+re-open is refused or the identity differs). It prevents nothing: a relocation
+after the check still passes unnoticed, because the verification and the
+caller's use of its result are separate operations and a check-to-use interval
+remains.
+
+A test-only `RELOCATE` protocol field makes the replacement deterministic in
+the acceptance tests: the helper itself, inside the owned run, renames the
+named owned directory aside and leaves an empty replacement at its entry
+between acquisition and verification, then continues. Production callers
+never set it. Both the renamed original and the replacement are preserved as
+evidence, and a refusal after a write never means the write did not happen —
+the write reached the renamed directory through the retained handle.
 
 ## Containment and anchoring
 
@@ -393,8 +410,9 @@ Every access, in both trees, performs the same sequence before touching data:
 3. Open `<graphDir>` or `<profileDir>` — a validated single component.
 4. For a graph-relative file, walk each path component with `openat` +
    `O_NOFOLLOW`; refuse `.`, `..`, absolute paths, backslashes and `//`.
-5. Record the device/inode of each opened directory and re-verify them after the
-   operation.
+5. Record the device/inode of each opened directory and retain its owned parent
+   handle and entry name; after the operation, re-open that entry without
+   following and compare identities.
 
 Reads are `O_NOFOLLOW` and require a regular file. Writes create a new
 unpredictable name with `O_CREAT|O_EXCL|O_NOFOLLOW`, so an existing or
@@ -431,9 +449,11 @@ tested end to end.
 
 Anchored opens and the destination precondition refuse the substitutions visible
 at those checks. They do **not** close the ancestor-relocation race: a process
-that replaces an already-open ancestor directory between a check and a write is
-not prevented, only sometimes detected by the identity re-verification. Nothing
-here is an OS sandbox, and no cross-process or cloud-storage guarantee is claimed.
+that relocates an already-open ancestor directory — a run or a root, above the
+entries the re-verification re-opens — is neither prevented nor detected, since
+the entry check covers only the graph and profile entries within their owned
+run. Nothing here is an OS sandbox, and no cross-process or cloud-storage
+guarantee is claimed.
 
 Real OG enrollment, real sidecar placement in a real graph, and any enabled build
 remain separate future approvals.

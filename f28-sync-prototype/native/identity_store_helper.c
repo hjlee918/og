@@ -37,7 +37,7 @@
 
 typedef struct {
   char command[24], run[96], owner[129], graphdir[81], profiledir[81];
-  char tx[65], attempt[33], target[16], failure[40], expect[72];
+  char tx[65], attempt[33], target[16], failure[40], expect[72], relocate[16];
   char *note_path;
   unsigned char *data;
   size_t data_len;
@@ -206,6 +206,7 @@ static Request parse(void) {
   copy_text(request.expect, sizeof request.expect, line(&cursor, "EXPECT"), "bad expectation");
   copy_text(request.target, sizeof request.target, line(&cursor, "TARGET"), "bad target");
   copy_text(request.failure, sizeof request.failure, line(&cursor, "FAILURE"), "bad failure point");
+  copy_text(request.relocate, sizeof request.relocate, line(&cursor, "RELOCATE"), "bad relocation choice");
   request.note_path = (char *)unhex(line(&cursor, "NOTEPATHHEX"), MAX_PATH_BYTES, &length);
   if (length && !valid_utf8((unsigned char *)request.note_path, length)) die("note path is not UTF-8");
   request.data = unhex(line(&cursor, "DATAHEX"), MAX_RECORD, &request.data_len);
@@ -230,6 +231,12 @@ static Request parse(void) {
   for (size_t index = 0; index < sizeof failures / sizeof failures[0]; index++)
     if (!strcmp(request.failure, failures[index])) known = 1;
   if (!known) die("unknown failure point");
+
+  const char *relocations[] = {"none", "graph", "profile"};
+  known = 0;
+  for (size_t index = 0; index < sizeof relocations / sizeof relocations[0]; index++)
+    if (!strcmp(request.relocate, relocations[index])) known = 1;
+  if (!known) die("unknown relocation choice");
 
   if (!safe_component(request.run) || !safe_component(request.graphdir) ||
       !safe_component(request.profiledir) || !hex64(request.owner) || !hex64(request.tx))
@@ -596,42 +603,83 @@ static void hash_tree(int directory, const char *relative, CC_SHA256_CTX *contex
   }
 }
 
-/* Open <graph root>/<run>/<graphdir>, verifying run ownership on the way. */
-typedef struct { int descriptor; dev_t device; ino_t inode; } Anchor;
+/*
+ * An anchored directory: the retained handle, the device/inode it named when
+ * opened, and the parent handle plus entry name that must still name it.
+ */
+typedef struct {
+  int descriptor;
+  int parent;
+  const char *name;
+  dev_t device;
+  ino_t inode;
+} Anchor;
 
-static Anchor anchor_of(int descriptor) {
-  Anchor anchor = { descriptor, 0, 0 };
+static Anchor anchor_of(int descriptor, int parent, const char *name) {
+  Anchor anchor = { descriptor, parent, name, 0, 0 };
   identity(descriptor, &anchor.device, &anchor.inode);
   return anchor;
 }
 
-/* Re-verify that an anchored directory handle still names what it named. */
-static void reverify(const Anchor *anchor, const char *message) {
+/*
+ * Verify that the expected parent-relative entry still names the retained
+ * handle's directory: re-open the entry from the retained parent without
+ * following, and compare device/inode with the handle. A same-descriptor
+ * fstat cannot do this — an open descriptor keeps referencing its original
+ * directory after the pathname is renamed or replaced, so its identity never
+ * changes and the check was vacuous.
+ *
+ * This is a check, not a prevention. It detects, at the moment of the check,
+ * an entry renamed away (the re-open fails) or replaced by a different
+ * directory or a symbolic link (the re-open is refused or the identity
+ * differs). It detects nothing that happens after it: the verification and
+ * the caller's use of the result remain separate operations, so a
+ * check-to-use interval remains.
+ */
+static void reverify_entry(const Anchor *anchor, const char *message) {
+  int current = openat(anchor->parent, anchor->name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (current < 0) die(message);
   struct stat status;
-  if (fstat(anchor->descriptor, &status)) die(message);
-  if (status.st_dev != anchor->device || status.st_ino != anchor->inode) die(message);
+  int failed = fstat(current, &status) ||
+               status.st_dev != anchor->device || status.st_ino != anchor->inode;
+  if (close(current) && !failed) die("verification close failed");
+  if (failed) die(message);
 }
 
-static int open_graph(const Request *request, dev_t *device, ino_t *inode) {
+/*
+ * Test-only simulated relocation, standing in for an external process that
+ * renames an owned directory aside and leaves a different directory at its
+ * entry while this command is between acquisition and verification.
+ * Production callers never set RELOCATE. The rename stays inside the owned
+ * run, and both the renamed original and the replacement are preserved as
+ * evidence for the caller to inspect.
+ */
+static void relocate_owned(int parent, const char *name) {
+  char aside[96];
+  (void)snprintf(aside, sizeof aside, "%s.relocated", name);
+  if (renameat(parent, name, parent, aside)) die("test relocation rename refused");
+  if (mkdirat(parent, name, 0700)) die("test relocation replacement refused");
+}
+
+static Anchor open_graph(const Request *request) {
   int root = anchored_root(GRAPH_ROOT);
   int run = open_directory(root, request->run);
   close(root);
   verify_owner(run, request->owner);
   int graph = open_directory(run, request->graphdir);
-  close(run);
-  if (device) identity(graph, device, inode);
-  return graph;
+  /* The run handle is retained: the entry re-verification needs it. */
+  return anchor_of(graph, run, request->graphdir);
 }
 
-static int open_profile(const Request *request) {
+static Anchor open_profile(const Request *request) {
   int root = anchored_root(PROFILE_ROOT);
   int run = open_directory(root, request->run);
   close(root);
   verify_owner(run, request->owner);
   int profile = open_directory(run, request->profiledir);
-  close(run);
   verify_owner(profile, request->owner);
-  return profile;
+  /* The run handle is retained: the entry re-verification needs it. */
+  return anchor_of(profile, run, request->profiledir);
 }
 
 /* Open (or create) the hidden graph-local sidecar directory. */
@@ -707,20 +755,23 @@ int main(void) {
    */
   int mutating = strcmp(request.command, "read-note") && strcmp(request.command, "read-records") &&
                  strcmp(request.command, "hash-graph");
-  Anchor profile_anchor = anchor_of(open_profile(&request));
+  Anchor profile_anchor = open_profile(&request);
   acquire_lock(profile_anchor.descriptor, mutating);
+  if (!strcmp(request.relocate, "profile"))
+    relocate_owned(profile_anchor.parent, request.profiledir);
 
   if (!strcmp(request.command, "put-note")) {
     valid_note_path(request.note_path);
-    Anchor graph_anchor = anchor_of(open_graph(&request, NULL, NULL));
+    Anchor graph_anchor = open_graph(&request);
+    if (!strcmp(request.relocate, "graph")) relocate_owned(graph_anchor.parent, request.graphdir);
     int graph = graph_anchor.descriptor;
     char *leaf;
     int parent = note_parent(graph, request.note_path, &leaf, 1);
     publish_entry(&request, parent, leaf, request.data, request.data_len);
     free(leaf);
     close(parent);
-    reverify(&graph_anchor, "graph directory identity changed");
-    reverify(&profile_anchor, "profile directory identity changed");
+    reverify_entry(&graph_anchor, "graph directory entry no longer names the opened directory");
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
     close(graph);
     printf("STATUS ok\n");
     return 0;
@@ -728,23 +779,31 @@ int main(void) {
 
   if (!strcmp(request.command, "read-note")) {
     valid_note_path(request.note_path);
-    int graph = open_graph(&request, NULL, NULL);
+    Anchor graph_anchor = open_graph(&request);
+    if (!strcmp(request.relocate, "graph")) relocate_owned(graph_anchor.parent, request.graphdir);
     char *leaf;
-    int parent = note_parent(graph, request.note_path, &leaf, 0);
-    if (!present(parent, leaf)) { printf("STATUS ok\nDATA -\n"); return 0; }
-    size_t length;
-    unsigned char *data = read_entry(parent, leaf, MAX_RECORD, &length);
-    printf("STATUS ok\n");
-    print_hex("DATA", data, length);
-    free(data);
+    int parent = note_parent(graph_anchor.descriptor, request.note_path, &leaf, 0);
+    if (!present(parent, leaf)) {
+      printf("STATUS ok\nDATA -\n");
+    } else {
+      size_t length;
+      unsigned char *data = read_entry(parent, leaf, MAX_RECORD, &length);
+      printf("STATUS ok\n");
+      print_hex("DATA", data, length);
+      free(data);
+    }
     free(leaf);
     close(parent);
-    close(graph);
+    reverify_entry(&graph_anchor, "graph directory entry no longer names the opened directory");
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
+    close(graph_anchor.descriptor);
     return 0;
   }
 
   if (!strcmp(request.command, "hash-graph")) {
-    int graph = open_graph(&request, NULL, NULL);
+    Anchor graph_anchor = open_graph(&request);
+    if (!strcmp(request.relocate, "graph")) relocate_owned(graph_anchor.parent, request.graphdir);
+    int graph = graph_anchor.descriptor;
     CC_SHA256_CTX context;
     CC_SHA256_Init(&context);
     size_t files = 0, extra = 0;
@@ -755,14 +814,15 @@ int main(void) {
     for (int index = 0; index < 32; index++) (void)snprintf(output + index * 2, 3, "%02x", digest[index]);
     output[64] = 0;
     close(graph);
+    reverify_entry(&graph_anchor, "graph directory entry no longer names the opened directory");
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
     printf("STATUS ok\nHASH %s\nCOUNT %zu\nEXTRA %zu\n", output, files, extra);
     return 0;
   }
 
   if (!strcmp(request.command, "read-records")) {
-    dev_t graph_device;
-    ino_t graph_inode;
-    Anchor graph_anchor = anchor_of(open_graph(&request, &graph_device, &graph_inode));
+    Anchor graph_anchor = open_graph(&request);
+    if (!strcmp(request.relocate, "graph")) relocate_owned(graph_anchor.parent, request.graphdir);
     int graph = graph_anchor.descriptor;
     int sidecar_directory = open_sidecar_directory(&request, graph, 0);
     int profile = profile_anchor.descriptor;
@@ -783,11 +843,11 @@ int main(void) {
       close(evidence);
     } else printf("EVIDENCE 0\n");
     printf("GRAPHDEVICE %lld\nGRAPHINODE %llu\n",
-           (long long)graph_device, (unsigned long long)graph_inode);
+           (long long)graph_anchor.device, (unsigned long long)graph_anchor.inode);
     printf("PROFILEDEVICE %lld\nPROFILEINODE %llu\n",
            (long long)profile_anchor.device, (unsigned long long)profile_anchor.inode);
-    reverify(&graph_anchor, "graph directory identity changed");
-    reverify(&profile_anchor, "profile directory identity changed");
+    reverify_entry(&graph_anchor, "graph directory entry no longer names the opened directory");
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
     close(graph);
     return 0;
   }
@@ -796,11 +856,13 @@ int main(void) {
     if (!request.data_len) die("record body required");
     if (!valid_utf8(request.data, request.data_len)) die("record is not bounded UTF-8");
     if (!strcmp(request.target, "sidecar")) {
-      int graph = open_graph(&request, NULL, NULL);
-      int directory = open_sidecar_directory(&request, graph, 1);
+      Anchor graph_anchor = open_graph(&request);
+      if (!strcmp(request.relocate, "graph")) relocate_owned(graph_anchor.parent, request.graphdir);
+      int directory = open_sidecar_directory(&request, graph_anchor.descriptor, 1);
       publish_entry(&request, directory, SIDECAR_NAME, request.data, request.data_len);
       close(directory);
-      close(graph);
+      reverify_entry(&graph_anchor, "graph directory entry no longer names the opened directory");
+      close(graph_anchor.descriptor);
     } else if (!strcmp(request.target, "device") || !strcmp(request.target, "intent")) {
       publish_entry(&request, profile_anchor.descriptor,
                     !strcmp(request.target, "device") ? DEVICE_NAME : intent_name,
@@ -813,7 +875,7 @@ int main(void) {
       publish_entry(&request, evidence, name, request.data, request.data_len);
       close(evidence);
     } else die("record target required");
-    reverify(&profile_anchor, "profile directory identity changed");
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
     printf("STATUS ok\n");
     return 0;
   }
@@ -825,7 +887,7 @@ int main(void) {
     inject(&request, "after-clear");
     sync_directory(profile);
     if (present(profile, intent_name)) die("intent still present after removal");
-    reverify(&profile_anchor, "profile directory identity changed");
+    reverify_entry(&profile_anchor, "profile directory entry no longer names the opened directory");
     printf("STATUS ok\n");
     return 0;
   }

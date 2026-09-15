@@ -555,10 +555,16 @@ be an ordinary file, taken shared for reads and exclusively for mutations, and
 held for the whole command. It serializes participating helper invocations only:
 OG, Finder, cloud agents and external editors do not honour it, it is not a
 durability mechanism, and end-to-end serialization of two concurrent adapter
-processes has not been tested. Every command also records the device/inode of the
-anchored graph and profile directories and re-verifies both before reporting
-success, which detects a directory replaced between open and completion without
-preventing it.
+processes has not been tested. Every command that opens the graph or profile
+directory retains its owned parent handle and entry name beside the recorded
+device/inode, and before reporting success re-opens that parent-relative entry
+with `O_NOFOLLOW` and compares identities with the retained handle. An open
+descriptor keeps referencing its original directory after its pathname is
+renamed or replaced, so the same-descriptor check this replaces was vacuous.
+The entry check detects, at the moment of the check, an entry renamed away or
+replaced by a different directory or a symlink; it prevents nothing, and a
+relocation after the check — or of any ancestor above the re-opened entry —
+still passes unnoticed.
 
 The unchanged-note claim is a hash over Markdown/Org notes only, by exact
 relative path and exact bytes. Any other regular file in the graph tree is
@@ -617,10 +623,11 @@ writing entry point refuses while any record is malformed.
 Unreleased limits are unchanged and inherited. Anchored component-by-component
 opens with `O_NOFOLLOW` refuse traversal, symlinked notes, symlinked ancestors, a
 symlinked sidecar container and a symlinked lock, and the destination
-precondition refuses the substitutions visible at those checks; none of this
-makes the sequence race-free against a process that relocates an already-open
-ancestor between checks, which is at best detected afterwards by the identity
-re-verification and is never prevented. This is not an OS sandbox, and no
+precondition refuses the substitutions visible at those checks, and the entry
+re-verification detects, when it runs, a graph or profile entry renamed away or
+replaced; none of this makes the sequence race-free against a process that
+relocates an already-open ancestor between checks, which is neither prevented
+nor detected. This is not an OS sandbox, and no
 cross-process or cloud-storage guarantee is claimed. Injected failures establish
 ordering and recovery classification only — they do not establish
 storage-hardware or power-loss durability, and no real power-loss test was run. Nothing here runs a watcher,

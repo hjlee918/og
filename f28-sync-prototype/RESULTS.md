@@ -1343,3 +1343,112 @@ test was run and no storage-hardware or cloud-storage durability is claimed.
 This remains not usable synchronization: no change moves between two devices or
 two processes, no watcher, OG hook, application launch, network, account or
 import is involved, and no package enables any of it.
+
+## Directory-verification correction (2026-09-15, batch three)
+
+### Supervisor finding
+
+Supervisor review found that the batch-two replacement-detection claim was
+wrong in its mechanism. The re-verification fstat'd the same descriptor the
+command had opened, and compared the result with the identity recorded from that
+descriptor. An open descriptor keeps referencing its original directory after
+its pathname is renamed or replaced, and a directory's device/inode never
+changes, so that comparison could never fail for a substitution: the check was
+vacuous. Any relocation of the graph or profile directory between open and
+completion passed unnoticed. The batch-two statements that this "detects a
+directory replaced between open and completion", and that ancestor relocation
+is "at best detected afterwards by the identity re-verification", are corrected
+here rather than rewritten in place.
+
+### Correction
+
+The graph and profile directories are now anchored with their owned parent
+handle and entry name beside the recorded device/inode, and before reporting
+success every command that opened them re-opens the parent-relative entry with
+`O_NOFOLLOW` and compares identities with the retained handle.
+
+- Substitutions this detects, at the moment of the check: an entry renamed away
+  (the re-open fails), and an entry replaced by a different directory (the
+  identities differ) or by a symbolic link (the non-following re-open is
+  refused).
+- Why the same-descriptor check was insufficient: it verified that a descriptor
+  still named the object the descriptor was opened on — a tautology, since a
+  descriptor always does — not that the expected pathname still named that
+  object.
+- The remaining check-to-use interval: the re-verification is a check, not a
+  prevention. A relocation after it passes unnoticed, and it detects nothing
+  above the re-opened entry: a run or root that is itself relocated while its
+  handle stays open is neither prevented nor detected.
+
+`read-note` and `hash-graph`, which previously carried no re-verification at
+all, now verify the graph and profile entries like every other command.
+
+### Deterministic regression and evidence
+
+A test-only `RELOCATE` protocol field (production callers never set it) lets
+the helper itself, inside the owned run, rename the named owned directory aside
+and leave an empty replacement at its entry between acquisition and
+verification, then continue — a deterministic stand-in for an external process
+relocating the directory mid-command. Two regressions cover the graph
+directory (during a note write) and the profile directory (during a record
+write), and each asserts all of:
+
+- the command is refused, naming the substituted entry;
+- the renamed-aside original is preserved with its evidence — the seeded notes,
+  the owner file, the lock, the evidence directory;
+- the write the command performed before refusing is present in the renamed
+  directory: a refusal after a write never means the write did not happen;
+- the empty replacement left at the original entry is preserved too.
+
+Removing the identity comparison from the entry re-verification makes both
+regressions fail, so they do not pass for the wrong reason; the mutated helper
+was run once, the source was then restored byte-identical (hash re-checked), and
+the restored build re-ran the suite.
+
+### Validation
+
+Fresh unique run `f28-identity-relocfinal-20260915T184336Z` under both approved
+roots, with fresh per-case graph and profile children for the ordinary and
+sanitized case sets. Neither shared root and no previous run was enumerated; all
+earlier runs and their evidence are preserved. Source-identity evidence is now
+the exact hashes below, recorded **before** execution; the earlier batch's
+mtime-based citation of its retained sanitizer run remains preserved with its
+stated limitation.
+
+- Sources (pre-run): `identity_store_helper.c`
+  `39d2c1a5729acc3d30520c09df63e9aa9b4290471e2dd9f645bc1b6add536350`;
+  `persistent-identity.js`
+  `7359f092a08f858bd585c995c7fa04e43074a405000d1aa08d999f834057408c`;
+  `persistent-identity.test.js`
+  `b483003e54ef5fb877bd0faffe88f7b4536de87aec4a92150c1565ba736c94ba`.
+- Binaries (pre-run): ordinary
+  `ab5e7d02d9003900020d4c2de3de3fbc0c6f5cda5144bf2582326c09c6b6c2d8`;
+  ASan+UBSan
+  `d97e75b987bd47a49cdfe7494963b90b3515caa1470ef95d18be1232e8b39f68`.
+
+- 51/51 tests against the ordinary helper — the 49 from batch two plus the 2
+  new regressions.
+- 51/51 against the AddressSanitizer + UndefinedBehaviorSanitizer build, one
+  fresh full run, zero sanitizer diagnostics.
+- The accepted pure regressions still pass 75/75.
+- Both helper builds use `-Wall -Wextra -Werror -Wconversion -Wshadow`; all JS
+  passes `node --check`.
+- Bounded failure capture was on for both runs: each relocation refusal is
+  recorded as one bounded JSON line naming the case, command, owned directory
+  components and relocation choice — 34 records per run, no note content, no
+  absolute paths, no owner token.
+
+### Remaining limitations
+
+The entry re-verification detects substitutions only at the moment it runs and
+only at the graph and profile entries within their owned run. Relocation after
+the check, relocation of any ancestor above the re-opened entry, and any change
+that leaves the same directory object in place are not detected. The
+cooperative lock still serializes participating helper invocations only, and
+two concurrent adapter processes have still never been run against each other.
+The refusal messages print the incidental `errno` of the moment, which is not
+part of any guarantee. Nothing here is an OS sandbox, no cross-process or
+cloud-storage durability is claimed, and this remains not usable
+synchronization: no change moves between two devices or two processes, no
+watcher, OG hook, application launch, network, account or import is involved,
+and no package enables any of it.

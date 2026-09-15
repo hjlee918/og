@@ -137,6 +137,18 @@ function expectField(expect) {
   return bare;
 }
 
+/*
+ * Test-only simulated relocation of an owned directory mid-command: `none`
+ * for every production caller, or the owned directory the helper renames
+ * aside — leaving a replacement at its entry — between acquisition and the
+ * entry re-verification.
+ */
+function relocateField(relocate) {
+  if (relocate === undefined || relocate === null) return 'none';
+  if (relocate === 'graph' || relocate === 'profile') return relocate;
+  throw new PersistentIdentityError('invalid-relocation', 'relocation choice is malformed');
+}
+
 function encode(request) {
   return [
     'MAGIC\tF28ID1', `COMMAND\t${request.command}`,
@@ -148,6 +160,7 @@ function encode(request) {
     `EXPECT\t${expectField(request.expect)}`,
     `TARGET\t${request.target || 'none'}`,
     `FAILURE\t${request.failurePoint || 'none'}`,
+    `RELOCATE\t${relocateField(request.relocate)}`,
     `NOTEPATHHEX\t${request.notePath ? hex(request.notePath) : ''}`,
     `DATAHEX\t${request.data ? Buffer.from(request.data).toString('hex') : ''}`,
     'END\t1', '',
@@ -163,7 +176,8 @@ function invoke(context, request) {
     recordDiagnostic('invocation', {
       command: merged.command, target: merged.target || 'none',
       graphDirectory: merged.graphDirectory, profileDirectory: merged.profileDirectory,
-      failurePoint: merged.failurePoint || 'none', exitCode: null,
+      failurePoint: merged.failurePoint || 'none', relocate: relocateField(merged.relocate),
+      exitCode: null,
       signal: result.signal || null, execError: boundedText(result.error.message),
     });
     throw new PersistentIdentityError('helper-execution-failed', result.error.message);
@@ -182,6 +196,7 @@ function invoke(context, request) {
       command: merged.command, target: merged.target || 'none',
       graphDirectory: merged.graphDirectory, profileDirectory: merged.profileDirectory,
       expect: expectField(merged.expect), failurePoint: error.failurePoint,
+      relocate: relocateField(merged.relocate),
       exitCode: result.status, signal: result.signal || null,
       stderr: boundedText(result.stderr), code: error.code,
     });
@@ -929,13 +944,25 @@ function adoptCopy(context, request, options = {}) {
  * so malformed, stale, mismatched and copied fixtures can be built. Production
  * callers never reach this; it is exported for the acceptance tests.
  */
-function writeRawRecordForTest(context, target, data, transactionId = NO_TRANSACTION) {
-  invoke(context, { command: 'write-record', target, transactionId, data, expect: 'any' });
+function writeRawRecordForTest(context, target, data, transactionId = NO_TRANSACTION, relocate) {
+  invoke(context, { command: 'write-record', target, transactionId, data, expect: 'any', relocate });
 }
 
 /* Write one record only if its destination is exactly in the expected state. */
 function writeRecordExpecting(context, target, data, expect, transactionId = NO_TRANSACTION) {
   invoke(context, { command: 'write-record', target, transactionId, data, expect });
+}
+
+/*
+ * Write one note while asking the helper to simulate, deterministically and
+ * inside the owned run, that the graph or profile directory was renamed aside
+ * and replaced between acquisition and the entry re-verification. Test-only.
+ */
+function putNoteRelocatedForTest(context, notePath, content, relocate) {
+  invoke(context, {
+    command: 'put-note', notePath, data: Buffer.from(content, 'utf8'),
+    transactionId: digest(`note\0${notePath}\0${content}`), expect: 'any', relocate,
+  });
 }
 
 module.exports = {
@@ -955,6 +982,7 @@ module.exports = {
   openGraph,
   publish,
   putNote,
+  putNoteRelocatedForTest,
   readNote,
   readRecords,
   recordAssertionFailure,
