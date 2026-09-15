@@ -139,6 +139,7 @@
 
 (def ^:private observation-api-name "__LOGSEQ_OG_BRIDGE_OBSERVATION__")
 (def ^:private observation-schema "frontend.fs.og-sync-bridge.observation/1")
+(def ^:private observation-console-prefix "[OG-BRIDGE-OBSERVATION] ")
 
 (defn- observation-event
   [sequence event]
@@ -176,13 +177,21 @@
                  (str "observation-" (name kind) "-"
                       (inc (count (:causes @state)))))
      :adapter! (fn [event]
-                 (swap! state
-                        (fn [current]
-                          (let [sequence (inc (:observation-sequence current))]
-                            (-> current
-                                (assoc :observation-sequence sequence)
-                                (update :observation-events conj
-                                        (observation-event sequence event)))))))
+                 (let [recorded (volatile! nil)]
+                   (swap! state
+                          (fn [current]
+                            (let [sequence (inc (:observation-sequence current))
+                                  observation (observation-event sequence event)]
+                              (vreset! recorded observation)
+                              (-> current
+                                  (assoc :observation-sequence sequence)
+                                  (update :observation-events conj observation)))))
+                   ;; The renderer disappears during a normal quit flush. Mirror
+                   ;; only the already-sanitized record so the owned harness can
+                   ;; retain ordering evidence without adding a persistence port.
+                   (js/console.info
+                    (str observation-console-prefix
+                         (.stringify js/JSON (clj->js @recorded))))))
      :rename-content-hash! (fn [_graph-id _old-path] nil)}))
 
 (defn- install-observation-runtime!
