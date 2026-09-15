@@ -197,8 +197,8 @@ if (/sentry|posthog/i.test(defines)) {
 }
 log('telemetry defines absent from the renderer');
 if (OBSERVATION &&
-    (!defines.includes('frontend.fs.og-sync-bridge/ENABLE-OG-SYNC-BRIDGE') ||
-     !defines.includes('frontend.fs.og-sync-bridge/ENABLE-OG-BRIDGE-OBSERVATION'))) {
+    (!defines.includes('frontend.fs.og_sync_bridge.ENABLE_OG_SYNC_BRIDGE') ||
+     !defines.includes('frontend.fs.og_sync_bridge.ENABLE_OG_BRIDGE_OBSERVATION'))) {
   die(`the renderer does not carry both observation closure defines: ${defines}`);
 }
 
