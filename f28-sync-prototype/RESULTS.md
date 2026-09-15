@@ -1490,14 +1490,21 @@ both anchored roots, graph identity
 `f28-identity-graph-2026-09-15-1aafad5c`, app profile
 `…/Logseq OG F28 IdentityCapture/identity-capture-state` outside both record
 roots, packaged app from build manifest
-`2026-09-15T22-55-52-952Z-eb60e451` (renderer revision `e62dbbdad`, clean
-tree), helper `sha256:30075327737c505297ea06533484c7513a1b0c8b278fef7502c0b452a783206b`.
+`2026-09-15T22-55-52-952Z-eb60e451` (renderer revision `e62dbdad` — the short
+spelling the manifest records for full commit
+`e62dbbdadd157b368e3a8c03a3fa78437a079c4c`; clean tree), helper
+`sha256:30075327737c505297ea06533484c7513a1b0c8b278fef7502c0b452a783206b`.
 **43/43 checks passed**, `status: passed`; evidence
 `development/evidence/f28-identity-capture-2026-09-15T23-02-22-317Z.json`
 (local, never a Git input). The app profile was set aside and the preserved
 profile state restored by the existing fresh-profile tooling; the owned run
 is retained; the failed first attempt's run and evidence are preserved
-untouched and neither shared root was enumerated.
+untouched. During the run itself neither shared root was enumerated by the
+batch, the adapter or the helper — but the post-run cleanup verification
+then enumerated entry names of both shared roots, which the correction
+subsection below records as a procedural violation of the design's
+no-enumeration rule; the earlier "neither shared root was enumerated"
+claim is withdrawn and corrected there.
 
 The batch verified, in order: launch gates (L2.1–L3.2), fresh isolated
 profile, no plugins, pre-navigation network refusal, observation runtime
@@ -1554,12 +1561,63 @@ diagnosis preceded the single re-run, which used a fresh run name.
 
 ### Tested build versus this documentation
 
-The packaged application under test is exactly commit `e62dbdad` (manifest
-`2026-09-15T22-55-52-952Z-eb60e451`); the only source that changed between
-the two attempts is the external coordinator script itself, recorded in the
-passing run's evidence as `source.uncommitted: 1` — the coordinator fix
-committed after the run. No application source changed and the app binary
-was not rebuilt.
+The packaged application under test is exactly commit
+`e62dbbdadd157b368e3a8c03a3fa78437a079c4c` (build manifest
+`2026-09-15T22-55-52-952Z-eb60e451`, whose `rendererRevision` field records
+that same commit under the short spelling `e62dbdad`). The only source that
+changed between the two attempts is the external coordinator script itself,
+recorded in the passing run's evidence as `source.uncommitted: 1`: the
+coordinator as executed was the `run-identity-capture.js` of commit
+`e62dbbdadd157b368e3a8c03a3fa78437a079c4c` plus the uncommitted
+block-resolution fix, which was first committed — together with these
+result records — as
+`455fabe1bf7ea9e9375d4da32584215c0afda122`. No application source changed
+and the app binary was not rebuilt. The enumeration correction below is a
+later documentation-only commit that changes no tested source.
+
+### Cleanup enumeration correction (procedural, recorded after the run)
+
+The passing-run paragraph above originally ended "…and neither shared root
+was enumerated." That claim was true of the batch but false of the whole
+session, and is withdrawn and corrected here. After the final clean quit,
+the post-run cleanup verification ran this command, verbatim:
+
+    ls "/Users/johnlee/Library/Mobile Documents/com~apple~CloudDocs/Logseq Test" | grep f28-identity-capture
+    ls "/Users/johnlee/Library/Application Support/Logseq OG F28 IdentityExp" | grep f28-identity-capture
+
+Its purpose was to confirm that both owned runs — the failed first
+attempt's and the passing run's — were retained under both anchored roots,
+alongside a process-name check. `ls` enumerated every entry
+name of each shared root into the pipeline, so this violated the design's
+no-enumeration rule regardless of the `grep` filter: the violation is the
+listing of the shared root's entry names, not the display of the filtered
+output.
+
+What the retained record can and cannot establish: the visible output
+contains only the `grep`-matched lines — the two owned run names under
+each root, `f28-identity-capture-2026-09-15T22-56-48-699Z-cd1981` and
+`f28-identity-capture-2026-09-15T23-02-22-317Z-2dd7b6`. The unmatched entry
+names were consumed by the filter and are not available in the transcript,
+so which other entries those roots contain is not established by it;
+neither the claim that nothing outside the owned runs was seen nor the
+claim that something else was seen can be supported by the available
+record. No file contents were read, no metadata beyond entry names was
+read, and no subdirectory was entered. No recorded step accessed a
+personal graph, backup, export or profile and no evidence of any such
+access exists; the two listed roots are the approved synthetic-graph test
+root and this experiment's own record root.
+
+Prevention rule for future cleanup verification: retention and process
+state are confirmed using only the exact recorded owned paths and process
+identities from the run's evidence — a directory-existence check on each
+recorded owned run directory and a process check on the exact packaged
+executable name — never a shared-root listing followed by a name filter.
+
+This is a procedural violation of the cleanup discipline, recorded and
+corrected as documentation only. It does not alter the 43/43 functional
+result above, which stands exactly as recorded and is preserved separately
+from this violation; the failed first attempt's run, evidence and console
+log are preserved untouched, and nothing was rerun to replace the record.
 
 ### Remaining limits
 
