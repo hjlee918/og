@@ -150,8 +150,12 @@ async function run() {
     const renamed = `관찰 이름변경 ${nameDate}`;
     const englishCreate = 'Synthetic English note created through OG.';
     const koreanCreate = 'OG를 통해 만든 합성 한국어 노트입니다.';
-    const englishEdit = 'Synthetic English note edited and saved through OG.';
-    const koreanEdit = '이름을 바꾼 뒤 OG에서 다시 편집하고 저장했습니다.';
+    const englishEdit = prior
+      ? `Synthetic English note edited and saved through OG (${stamp}).`
+      : 'Synthetic English note edited and saved through OG.';
+    const koreanEdit = prior
+      ? `이름을 바꾼 뒤 OG에서 다시 편집하고 저장했습니다 (${stamp}).`
+      : '이름을 바꾼 뒤 OG에서 다시 편집하고 저장했습니다.';
 
     let englishBlock, koreanBlock;
     if (prior) {
