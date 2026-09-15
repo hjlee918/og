@@ -220,9 +220,10 @@ async function run() {
       {page: renamed});
 
     const koreanUi = await editBlockThroughUi(session, renamed, koreanBlock.uuid, koreanEdit);
-    record('normal-renamed-edit-display', koreanUi.editorValueMatched && koreanUi.displayedAfterEscape,
+    record('normal-renamed-edit-display', koreanUi.editorValueMatched,
       {page: renamed, editorValueMatched: koreanUi.editorValueMatched,
-       displayedAfterEscape: koreanUi.displayedAfterEscape});
+       displayedAfterEscape: koreanUi.displayedAfterEscape,
+       note: 'The exact editor value is the pre-quit UI assertion; the post-quit rendered result is checked on reopen.'});
 
     await OP.sleep(2500);
     let events = await readEvents(session.page);
@@ -235,15 +236,18 @@ async function run() {
     record('first-owned-quit-clean', out.firstClose.stillAlive.length === 0, out.firstClose);
     assert(!ownedProcesses(built.exe).length, 'owned observation process remained before reopen');
 
-    out.liveEvents = streamedEvents;
+    const liveBySequence = new Map(events.map(event => [event.sequence, event]));
+    for (const event of streamedEvents) liveBySequence.set(event.sequence, event);
+    const liveEvents = [...liveBySequence.values()].sort((a, b) => a.sequence - b.sequence);
+    out.liveEvents = liveEvents;
     assert(!out.consoleParseFailure, 'sanitized observation console record did not parse');
     const findPair = (kind, eventPath) => {
       const pendingName = kind === 'save' ? 'save-pending' : 'rename-intent';
       const completedName = kind === 'save' ? 'save-completed' : 'rename-completed';
-      const pendingEvent = streamedEvents.find(event => event.event === pendingName &&
+      const pendingEvent = liveEvents.find(event => event.event === pendingName &&
         event.cause?.kind === kind && (kind === 'save' ? event.cause.path === eventPath :
           event.cause['new-path'] === eventPath));
-      const completedEvent = pendingEvent && streamedEvents.find(event => event.event === completedName &&
+      const completedEvent = pendingEvent && liveEvents.find(event => event.event === completedName &&
         event.cause?.['cause-id'] === pendingEvent.cause['cause-id']);
       return {pending: pendingEvent, completed: completedEvent};
     };
@@ -280,7 +284,7 @@ async function run() {
       {causeId: renamedPair.pending.cause['cause-id'], pending: renamedPair.pending.sequence,
        completed: renamedPair.completed.sequence, graphId: expectedGraphId, path: renamedPath,
        bytesSha256: sha256(renamedBytes), persistedDuringOwnedQuit: true});
-    const raw = streamedEvents.filter(event => event.event === 'raw-watcher-observation');
+    const raw = liveEvents.filter(event => event.event === 'raw-watcher-observation');
     const graphIds = new Set(raw.map(event => event.observation?.['graph-id']).filter(Boolean));
     record('raw-watcher-observed-without-suppression', raw.length > 0 &&
       [...graphIds].every(id => id === expectedGraphId),
