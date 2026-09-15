@@ -1060,3 +1060,140 @@ sidecar, enrollment, native publisher, sync port, account action, import, or
 network access was enabled. Generated graph data, profiles, packages, and local
 JSON evidence remain outside Git. This observation phase stops here; the next
 phase is not authorized.
+
+## Test-only persistent identity and recovery records (2026-09-15)
+
+This stage persisted portable graph identity and device-local recovery records
+for the first time. It is a bounded experiment, not working synchronization:
+nothing moves a change between two devices or two processes, no package enables
+it, and no application was launched.
+
+### The additional boundary that was required
+
+The existing verified helpers could not perform this stage at all. Both
+`filesystem_helper.c` and `working_tree_helper.c` compile exactly one root — the
+approved `Logseq Test` root — and address every working or metadata directory as
+a single `safe_component` inside one `<run>/<case>` beneath it. A device record
+under `~/Library/Application Support` is therefore not addressable by either,
+and Node exposes no `openat`/`renameat`, so the pathname-based `persistence.js`
+prototype is not a substitute: it re-resolves names between checks and does not
+close the ancestor-substitution race.
+
+The exact additional boundary required was **a second compile-time anchored root
+of equal strictness, in a new helper**. That is what
+`native/identity_store_helper.c` is: it compiles both `Logseq Test` and the new
+`Logseq OG F28 IdentityExp` profile root, requires the caller to send each
+byte-for-byte, and can express no other location. The two existing helpers were
+not modified and no guard in them was relaxed. This second root is an addition to
+the boundary, not a widening of it, and it is recorded here because it is a new
+owned location on this host.
+
+The profile root did not exist before this stage. No installed or existing
+profile, package, launcher or ownership lease was touched, and
+`Logseq OG F28 OriginExp` and `Logseq OG F28 Observation` were not read.
+
+### What was implemented
+
+`src/persistent-identity.js` is the only new adapter. It reuses the accepted
+`identity-capture.js` enrollment, replica initialization and metadata validation
+unchanged, and rebuilds the snapshot those functions validate against from the
+bytes actually read out of the graph through anchored, non-following opens. It
+introduces no second synchronization engine: there is no planner, executor,
+publisher, watcher or reconciliation path in it.
+
+The portable sidecar `logseq/.og-sync/identity-v1.json` carries graph ID,
+metadata revision, accepted transaction, accepted snapshot fingerprint, selected
+generation and the complete identity map, and nothing else — a validator enforces
+the exact key set and refuses replica, device, binding, cursor, lock, lease,
+token, secret, credential or absolute-path material at any depth. The device
+record in the profile is the only place a replica ID, device ID and the exact
+transaction/graph/replica binding live.
+
+### Tests actually run
+
+Forty tests with 176 assertions, on fresh synthetic English/Korean notes
+(`pages/Anchor Page.md`, `pages/기준 대상 페이지.md`,
+`journals/2026_09_15.md`), all passing against the real helper and the real
+adapter. Each test case used its own fresh graph and profile directory below one
+fresh uniquely named run; the shared root was never listed. Coverage: explicit
+enrollment with exact readback and restart; unchanged note bytes; a subsequent
+update against a matching validated snapshot; interrupted publication in both
+orderings at both a staged-not-installed and an installed-not-verified point;
+write-then-error and clear-then-error uncertainty; proven no-write refusal;
+missing, malformed, non-JSON, stale, hash-mismatched and drifted records
+preserved and refused; a tampered intent and a third state stopping recovery;
+traversal, non-portable path, symlinked note, symlinked ancestor and symlinked
+sidecar-container refusal; the copied-graph choice and both explicit choices;
+reused graph or file identity refused; and the exact retry.
+
+The accepted pure regressions — core, planner, executor, snapshot comparison,
+read response and identity capture — still pass 75/75, unchanged.
+
+The helper was also built with AddressSanitizer and UndefinedBehaviorSanitizer
+and the same 40 tests run against that build. Two sanitizer runs passed 40/40
+with no sanitizer diagnostic of any kind. A third, earlier sanitizer run — the
+first one, which overlapped with another test process on the same host — reported
+one failure in the copied-graph test; that test then passed both in isolation and
+in two full reruns, and the failing run's detail was not captured, so its cause
+is recorded as unexplained rather than attributed. The sanitized helper is
+several times slower per call, and contention on this host is the leading
+suspicion, but that is a suspicion and not a finding.
+
+### Failures encountered, and what they changed
+
+Five defects were found by watching tests fail, and each produced a real fix
+rather than a weakened test or a weakened guard.
+
+1. **The graph hash counted the container, not the notes.** The first
+   unchanged-bytes test failed because enrollment creates the ordinary hidden
+   `logseq/` container. The hash now covers every regular file by exact relative
+   path and exact bytes, excluding only `logseq/.og-sync`, so the claim it
+   supports is precisely "no note byte and no note file outside that hidden
+   container changed".
+2. **`dup` shares a directory offset.** Two `readdir` passes over the same
+   profile directory returned nothing on the second pass, so an outstanding
+   intent was invisible — a recovery-defeating bug. Every listing now rewinds.
+3. **A retained pending file blocked its own retry.** Naming the staged file per
+   transaction meant the evidence from an interrupted attempt collided with the
+   retry. The pending name now carries a fresh random attempt component, so the
+   evidence is retained *and* the retry proceeds, as the contract requires.
+4. **A write could replace a symlink.** `renameat` over a symlinked destination
+   succeeded. It did not follow the link, but it destroyed it. The helper now
+   refuses any destination that is not an ordinary file.
+5. **The reader destroyed the evidence it was meant to preserve.** Unparseable
+   record bytes threw, so a malformed record could not be inspected or reported.
+   Reads now retain the bytes and name which record is malformed, and every
+   writing entry point refuses while any record is malformed.
+
+One test expectation was wrong rather than the code: an injected failure after
+`renameat` means the record *did* land, so recovery correctly classifies it
+`applied`. That case was split into two — staged-not-installed rolls the
+remaining record forward, installed-but-unverified only needs the intent cleared
+— so both are asserted instead of assumed.
+
+The four guards that were already implemented when their tests were written
+(missing sidecar, restart revalidation, snapshot drift, ownership) were
+mutation-checked: removing each guard fails its test, so they are not tests that
+pass for the wrong reason.
+
+### Confirmation about note bytes
+
+Enrollment changed no synthetic note byte. The hash over every note file of the
+graph, and the file count, are identical before and after enrollment, and the
+Korean path `pages/기준 대상 페이지.md` round-trips byte-exact through the
+anchored reader and into the sidecar's identity map.
+
+### Remaining limitations
+
+This is not usable synchronization. No change moves between two devices or two
+processes; there is no watcher, no OG hook, no application launch, no network,
+account, service or import; and no package enables any of it. Injected failures
+establish ordering and recovery classification only — they do not establish
+storage-hardware or power-loss durability, and no real power-loss test was run.
+Anchored opens refuse traversal, symlinks and the substitutions visible at those
+checks, but do not make the sequence race-free against a process that relocates
+an already-open ancestor between checks; this is not an OS sandbox. The
+simulated user choices for a copied graph are test inputs, not a user interface.
+Recovery has been exercised only against controlled injected failures on this
+one host. Real OG enrollment, a sidecar in a real graph, and any enabled build
+remain separate future approvals.

@@ -492,7 +492,104 @@ record, the in-memory owner and the reservation rather than installing over
 them. Recovery evidence records the failure's typed code alongside its
 serialized and envelope material.
 
-This contract implements only tested infrastructure. It creates no sidecar,
-chooses no copied-graph policy, enrolls no graph, invokes no native helper,
-persists no real metadata, launches no application and performs no network
-synchronization.
+The default-off OG event bridge described above implements only tested
+infrastructure. It creates no sidecar, chooses no copied-graph policy, enrolls
+no graph, invokes no native helper, persists no real metadata, launches no
+application and performs no network synchronization.
+
+## Test-only persistent identity and recovery records
+
+The standalone `src/persistent-identity.js` adapter and its
+`native/identity_store_helper.c` boundary persist portable graph identity and
+device-local recovery records across two explicitly owned locations. They are a
+test-only experiment: no OG namespace imports them, no package enables them, and
+they synchronize nothing between two devices or two processes. The design,
+schemas, orderings and recovery table are in
+[PERSISTENT_IDENTITY_DESIGN.md](./PERSISTENT_IDENTITY_DESIGN.md).
+
+The existing verified helpers could not perform this stage. Both are anchored to
+one compile-time root and address every directory as a single component inside
+one `<run>/<case>` beneath it, so neither can reach a profile under
+`~/Library/Application Support`, and Node exposes no `openat`/`renameat`. The
+required additional boundary is therefore a **second compile-time anchored root
+of equal strictness in a new helper**. `identity_store_helper.c` compiles both
+the approved `Logseq Test` root and the new `Logseq OG F28 IdentityExp` profile
+root, requires the caller to send each byte-for-byte, and can express no other
+location. `filesystem_helper.c` and `working_tree_helper.c` are unchanged and no
+guard in them is relaxed.
+
+Identity itself is not reimplemented: enrollment, replica initialization and
+metadata validation are the existing `identity-capture.js` functions, and the
+snapshot they validate against is rebuilt from the bytes actually read out of the
+graph through anchored, non-following opens.
+
+Enrollment is explicit only. `openGraph` reads, validates and classifies, and
+never writes; an opened graph is never enrolled as a side effect. Only an
+explicit `complete` list of caller-supplied file IDs, paths, contents and
+accepted revisions creates a sidecar, and each supplied content must equal the
+bytes on disk. Enrollment writes only inside the hidden `logseq/.og-sync`
+directory that OG's reader and watcher already skip; a hash over every note file
+of the graph is identical before and after.
+
+The portable sidecar `logseq/.og-sync/identity-v1.json` (`f28-graph-identity/1`)
+carries the graph ID, metadata revision, accepted transaction, accepted snapshot
+fingerprint, selected generation and the complete identity map. A validator
+enforces its exact key set and refuses any replica, device, binding, cursor,
+lock, lease, token, secret, credential or absolute-path material at any depth.
+The device record (`f28-device-record/1`) is the only place a replica ID, device
+ID and the exact transaction/graph/replica binding — run, graph directory, device
+and inode — are stored, and it never travels with the graph.
+
+Cross-directory atomicity does not exist here and is not claimed. Each record
+write refuses a non-regular destination, stages under a fresh per-attempt
+unpredictable `.pending` name with `O_CREAT|O_EXCL|O_NOFOLLOW`, `F_FULLFSYNC`s,
+renames within that one directory, syncs it, then reopens the installed file with
+`O_NOFOLLOW`, matches the staged inode and compares exact bytes. One record write
+is atomic for a reader of that one directory; a two-tree batch is not. A pending
+file retained from an interrupted attempt is never reopened, truncated or reused:
+it stays as evidence while the retry stages under a new name.
+
+Publication writes the intent first in both orderings, then the two records in
+the recorded order, then clears the intent as a separately failing step. The
+intent records base and target hashes and the exact staged bytes, and carries no
+phase, step or status field at all. Recovery therefore hashes what is actually on
+disk in both trees and classifies `prepared`, `graph-applied`, `device-applied`,
+`applied` or `mismatch`; a third state refuses and preserves everything. An
+observed hash is matched against target before base, so a record already at its
+intended state is never rewritten. With no intent present, absent/absent is
+`unenrolled`, and a sidecar without a device record, a device record without a
+sidecar, disagreeing records, a stale metadata revision and graph bytes that no
+longer match the accepted sidecar are each a typed refusal that changes nothing.
+A missing file is never by itself proof that work completed.
+
+A failure after staging leaves the durable outcome unknown. Only a failure before
+staging is a proven no-write refusal; every other write failure returns
+`uncertain-write`, and a clear failure after the unlink returns `uncertain-clear`,
+each reserving the exact transaction through the retained intent and a retained
+evidence record. An enrollment, update or adoption re-issued with identical
+inputs recomputes the identical transaction ID and is routed through recovery
+rather than writing again, so an exact retry creates no second identity; differing
+inputs are refused as `incompatible-transaction` while the intent stands.
+
+A copy is never resolved automatically. Identical bytes, identical paths, an
+identical sidecar and the observable inodes do not decide it: a graph whose
+device record binds a different location, or for which this device holds no
+record, is refused as `copied-graph-choice-required` or `missing-device-record`
+until the caller passes one explicit choice. `same-lineage-new-replica` keeps the
+graph ID, requires an explicit new replica and device ID, writes only a new device
+record and leaves both sidecars byte-identical. `new-graph-lineage` requires a new
+graph ID and entirely new file IDs — a reused graph or file identity is refused —
+so two independent graphs can never be merged later. Unparseable record bytes are
+retained and reported as evidence rather than treated as a read error, and every
+writing entry point refuses while any record is malformed.
+
+Unreleased limits are unchanged and inherited. Anchored component-by-component
+opens with `O_NOFOLLOW` refuse traversal, symlinked notes, symlinked ancestors and
+a symlinked sidecar container, and refuse the substitutions visible at those
+checks; they do not make the sequence race-free against a process that relocates
+an already-open ancestor between checks, and this is not an OS sandbox. Injected
+failures establish ordering and recovery classification only — they do not
+establish storage-hardware or power-loss durability. Nothing here runs a watcher,
+launches an application, contacts a network, account or service, imports anything,
+or is enabled in any package. Real OG enrollment, a sidecar in a real graph and
+any enabled build remain separate future approvals.

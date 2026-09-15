@@ -54,3 +54,28 @@ node --test f28-sync-prototype/tests/stable-working-tree.test.js
 The test creates only explicit case names below that run; it never discovers or
 lists the shared root. Set `F28_SANITIZE=1` when building the working helper for
 its AddressSanitizer/UndefinedBehaviorSanitizer pass.
+
+Build the separate two-root identity/recovery store helper with the same
+installed Intel toolchain, then run its focused test in fresh owned children of
+one fresh run:
+
+```sh
+f28-sync-prototype/build-identity-helper.sh /tmp/f28-identity-store-helper-x86_64
+F28_IDENTITY_HELPER=/tmp/f28-identity-store-helper-x86_64 \
+F28_RUN_NAME=<fresh-owned-run> F28_OWNER_TOKEN=<64-hex-token> \
+F28_CASE_SUFFIX=<new-case-suffix> \
+node --test f28-sync-prototype/tests/persistent-identity.test.js
+```
+
+This helper is the only one anchored to two compile-time roots: the approved
+`Logseq Test` root and the new `Logseq OG F28 IdentityExp` profile root. It
+creates the profile root if it is absent and touches no other profile. See
+[PERSISTENT_IDENTITY_DESIGN.md](./PERSISTENT_IDENTITY_DESIGN.md) for the schemas,
+write ordering and recovery table, and `CONTRACT.md` for its guarantees and
+limits. Set `F28_SANITIZE=1` when building it for the
+AddressSanitizer/UndefinedBehaviorSanitizer pass; that build is several times
+slower, so give it a longer wall-clock budget.
+
+The test creates only explicit graph and profile directory names below that run
+and never lists the shared root. Generated graphs, sidecars, device records,
+retained evidence and the experimental profile are not Git artifacts.
