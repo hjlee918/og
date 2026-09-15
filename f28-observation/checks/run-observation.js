@@ -70,17 +70,15 @@ async function api(page, method, ...args) {
   }, {method, args});
 }
 
-async function flushPageThroughOg(page, pageName) {
-  return page.evaluate(async name => {
-    const pageValue = window.logseq?.api?.get_page?.(name);
-    const repo = window.frontend?.state?.get_current_repo?.();
-    const write = window.frontend?.modules?.outliner?.file?.do_write_file_BANG_;
-    if (!pageValue?.id || !repo || typeof write !== 'function') {
-      throw new Error('OG immediate outliner writer is unavailable');
-    }
-    await Promise.resolve(write(repo, pageValue.id, 'observation-save'));
-    return {pageId: pageValue.id, repo};
-  }, pageName);
+async function editBlockThroughUi(session, pageName, blockUuid, content) {
+  await session.goTo(pageName);
+  const block = session.page.locator(`#main-content-container [blockid="${blockUuid}"] .block-content`).first();
+  await block.click({timeout: 20000});
+  const editor = session.page.locator('textarea[aria-label="editing block"]').first();
+  await editor.waitFor({state: 'visible', timeout: 10000});
+  await editor.fill(content);
+  await session.page.keyboard.press('Escape');
+  return {editorOpened: true, page: pageName, blockUuid};
 }
 
 async function pageContains(session, pageName, expected) {
@@ -188,8 +186,7 @@ async function run() {
        resumedAfterVerifiedInitialApiCreation: !!prior});
 
     const beforeEdit = (await readEvents(session.page)).length;
-    await api(session.page, 'update_block', englishBlock.uuid, englishEdit, {});
-    const englishFlush = await flushPageThroughOg(session.page, english);
+    const englishUi = await editBlockThroughUi(session, english, englishBlock.uuid, englishEdit);
     await waitForEventCount(session.page, beforeEdit + 2);
     let events = await readEvents(session.page);
     const editTail = events.slice(beforeEdit);
@@ -204,7 +201,7 @@ async function run() {
       pending.cause['graph-id'] === completed.cause['graph-id'] && englishBytes.includes(englishEdit),
       {causeId: pending.cause['cause-id'], pending: pending.sequence, completed: completed.sequence,
        graphId: pending.cause['graph-id'], path: englishPath, bytesSha256: sha256(englishBytes),
-       ogPageId: englishFlush.pageId});
+       uiEditorOpened: englishUi.editorOpened});
     record('normal-english-display', await pageContains(session, english, englishEdit), {page: english});
 
     const beforeRename = events.length;
@@ -226,8 +223,7 @@ async function run() {
     record('normal-korean-renamed-display', await pageContains(session, renamed, koreanCreate), {page: renamed});
 
     const beforeRenamedEdit = events.length;
-    await api(session.page, 'update_block', koreanBlock.uuid, koreanEdit, {});
-    await flushPageThroughOg(session.page, renamed);
+    await editBlockThroughUi(session, renamed, koreanBlock.uuid, koreanEdit);
     await waitForEventCount(session.page, beforeRenamedEdit + 2);
     events = await readEvents(session.page);
     const renamedSaves = events.slice(beforeRenamedEdit).filter(event => event.cause?.path === intent.cause['new-path']);
