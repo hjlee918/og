@@ -296,7 +296,9 @@ fs.writeFileSync(path.join(STATIC, 'package.json'), JSON.stringify(pkg, null, 2)
 log(`package.json: name=${pkg.name} productName="${pkg.productName}" main=${pkg.main}`);
 
 try {
-  execFileSync(process.execPath, [path.join(REPO, 'f27-pilot', 'scripts', 'make-icon.js')],
+  execFileSync(process.execPath, [path.join(REPO,
+    OBSERVATION ? 'f28-observation' : 'f27-pilot', 'scripts',
+    OBSERVATION ? 'make-observation-icon.js' : 'make-icon.js')],
                { stdio: 'inherit' });
 } catch (e) {
   if (!fs.existsSync(PRESERVED_ICON) || sha256(fs.readFileSync(PRESERVED_ICON)) !== PRESERVED_ICON_SHA256) {
