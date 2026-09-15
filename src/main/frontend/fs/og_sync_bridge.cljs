@@ -159,20 +159,45 @@
              (cond-> (select-keys observation
                                   [:type :graph-id :dir :path :global-dir])
                (string? (:content observation))
+               ;; `.encode` returns a Uint8Array, which is not an `array?` and
+               ;; implements no ICounted, so cljs `count` throws on it. Read the
+               ;; typed array's own length instead: an exception here escapes
+               ;; into `invoke-sync-port`, which latches `:blocked` and silently
+               ;; ends all further recording.
                (assoc :content-hash (cause-hash (:content observation))
-                      :content-bytes (count (.encode (js/TextEncoder.)
-                                                     (:content observation))))
+                      :content-bytes (.-length (.encode (js/TextEncoder.)
+                                                        (:content observation))))
                (map? (:stat observation))
                (assoc :stat (select-keys (:stat observation) [:mtime :size]))))
 
       (contains? event :error) (assoc :error (str (:error event)))
       (contains? event :result) (assoc :result-present true))))
 
-(defn- make-observation-runtime
+(defn- new-instance-id
+  []
+  (str "observation-runtime-"
+       (.toString (js/Math.floor (* (js/Math.random) 0x100000000)) 16)))
+
+(defn- note-hook-entry!
+  "Count that a seam was entered, before any blocked check can skip recording.
+
+  Comparing these counts with the recorded-event count is what separates a hook
+  that never ran from a hook that ran and failed to record."
+  [runtime kind]
+  (when-let [state (runtime-state runtime)]
+    (swap! state update-in [:hook-entries kind] (fnil inc 0))))
+
+(defn make-observation-runtime
+  "Build the exact runtime the observation build installs.
+
+  Public only so tests can exercise this sanitizer and recorder rather than a
+  stand-in adapter. Constructing a runtime installs nothing: a default build
+  still has no `enabled-runtime*` atom and never reaches `install-runtime!`."
   []
   (let [state (atom {:writes {} :causes {} :observation-sequence 0
                      :observation-events []})]
     {:state state
+     :instance-id (new-instance-id)
      :next-id! (fn [kind]
                  (str "observation-" (name kind) "-"
                       (inc (count (:causes @state)))))
@@ -194,6 +219,34 @@
                          (.stringify js/JSON (clj->js @recorded))))))
      :rename-content-hash! (fn [_graph-id _old-path] nil)}))
 
+(defn observation-health
+  "Sanitized observer health for the owned harness.
+
+  Reports only fixed internal names and counts: whether a runtime is installed,
+  whether it has latched `:blocked`, the fixed stage/code of that latch, the
+  runtime instance the reader holds versus the one the seams resolve live, and
+  hook-entry versus recorded-event counts. It never exposes note content, a
+  path, a cause payload or the underlying error text, and it never clears the
+  latch — a blocked observer stays blocked and visibly so."
+  [runtime]
+  (let [state (some-> (runtime-state runtime) deref)
+        blocked (:blocked state)
+        current (current-runtime)]
+    {:schema observation-schema
+     :mode "observation-only"
+     :instance-id (:instance-id runtime)
+     :current-instance-id (:instance-id current)
+     :instance-matches-reader (= (:instance-id runtime) (:instance-id current))
+     :enabled (some? current)
+     :blocked (some? blocked)
+     ;; A fixed internal event name, never an arbitrary error string.
+     :blocked-stage (some-> (:phase blocked) name)
+     :blocked-code (when blocked "sync-port-exception")
+     :hook-entries {:save (get-in state [:hook-entries :save] 0)
+                    :rename (get-in state [:hook-entries :rename] 0)
+                    :watcher (get-in state [:hook-entries :watcher] 0)}
+     :recorded-events (count (:observation-events state))}))
+
 (defn- install-observation-runtime!
   []
   (when (and ENABLE-OG-SYNC-BRIDGE ENABLE-OG-BRIDGE-OBSERVATION
@@ -206,7 +259,9 @@
         {:schema observation-schema
          :mode "observation-only"
          :read (fn []
-                 (clj->js (:observation-events @(runtime-state runtime))))}))
+                 (clj->js (:observation-events @(runtime-state runtime))))
+         :health (fn []
+                   (clj->js (observation-health runtime)))}))
       runtime)))
 
 (defonce ^:private observation-runtime (install-observation-runtime!))
@@ -216,6 +271,7 @@
   [graph-id path content]
   (when (enabled?)
     (let [runtime (current-runtime)]
+      (note-hook-entry! runtime :save)
       (when-not (blocked? runtime)
         (when-let [cause-id (next-id! runtime :save)]
           (let [cause {:runtime runtime :cause-id cause-id :origin :local
@@ -254,6 +310,7 @@
   [graph-id old-path new-path]
   (when (enabled?)
     (let [runtime (current-runtime)]
+      (note-hook-entry! runtime :rename)
       (when-not (blocked? runtime)
         (when-let [cause-id (next-id! runtime :rename)]
           (let [content-hash (invoke-sync-port runtime :rename-content-hash!
@@ -582,6 +639,7 @@
   ([type dir path content stat global-dir graph-id]
    (when (enabled?)
      (let [runtime (current-runtime)
+           _ (note-hook-entry! runtime :watcher)
            observation (cond-> {:type type :dir dir :path path :content content
                                 :stat stat :global-dir global-dir}
                          (not= ::unbound-graph graph-id) (assoc :graph-id graph-id))]

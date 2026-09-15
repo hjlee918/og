@@ -56,6 +56,44 @@ async function readEvents(page) {
   }, API);
 }
 
+// Observer health, not just its event list. A latched `blocked` observer
+// records nothing while still answering `read()` with a plausible short list,
+// which is exactly how the 2026-09-15 run reported a gap it could not explain.
+async function readHealth(page) {
+  return page.evaluate(name => {
+    const api = window[name];
+    if (!api || typeof api.health !== 'function') return null;
+    return api.health();
+  }, API);
+}
+
+function healthSummary(health) {
+  if (!health) return {available: false};
+  return {
+    available: true,
+    enabled: health.enabled,
+    blocked: health.blocked,
+    blockedStage: health['blocked-stage'] ?? null,
+    blockedCode: health['blocked-code'] ?? null,
+    instanceMatchesReader: health['instance-matches-reader'],
+    hookEntries: health['hook-entries'],
+    recordedEvents: health['recorded-events']
+  };
+}
+
+// Distinguishes "hook never called" from "recording failed" without guessing.
+function healthVerdict(health) {
+  const s = healthSummary(health);
+  if (!s.available) return {ok: false, verdict: 'observation-health-unavailable', ...s};
+  if (!s.enabled) return {ok: false, verdict: 'observation-runtime-not-installed', ...s};
+  if (s.blocked) return {ok: false, verdict: 'recording-failed-observer-blocked', ...s};
+  if (!s.instanceMatchesReader) return {ok: false, verdict: 'reader-and-seams-on-different-runtime-instances', ...s};
+  const entries = s.hookEntries || {};
+  const total = (entries.save || 0) + (entries.rename || 0) + (entries.watcher || 0);
+  if (total === 0) return {ok: false, verdict: 'hooks-never-entered', ...s};
+  return {ok: true, verdict: 'observer-healthy', ...s};
+}
+
 async function waitForEventCount(page, count) {
   await page.waitForFunction(({name, count}) => {
     const api = window[name];
@@ -183,6 +221,10 @@ async function run() {
     record('pre-navigation-network-refusal', network?.active && network.sessions >= 1, network);
     const initialEvents = await readEvents(session.page);
     record('observation-runtime-only', Array.isArray(initialEvents), {schema: 'frontend.fs.og-sync-bridge.observation/1', initialCount: initialEvents?.length});
+    const initialHealth = await readHealth(session.page);
+    out.initialHealth = healthSummary(initialHealth);
+    const initialVerdict = healthVerdict(initialHealth);
+    record('observer-healthy-at-startup', initialVerdict.ok, initialVerdict);
 
     if (verifyReopenOnly) {
       assert(prior?.operation?.english && prior?.operation?.renamed,
@@ -266,6 +308,14 @@ async function run() {
     await OP.sleep(2500);
     let events = await readEvents(session.page);
     out.preQuitEvents = events;
+    // Health before the quit flush: a missing event now means "OG did not route
+    // through this seam", and no longer "the observer may have died silently".
+    const preQuitHealth = await readHealth(session.page);
+    out.preQuitHealth = healthSummary(preQuitHealth);
+    const preQuitVerdict = healthVerdict(preQuitHealth);
+    record('observer-healthy-after-live-operations', preQuitVerdict.ok, preQuitVerdict);
+    assert(preQuitVerdict.ok,
+      `the observer was not healthy after the live operations: ${preQuitVerdict.verdict}`);
     out.rejectedOperation = {liveExercised: false,
       reason: 'No existing safe OG operation reliably produces a post-intent filesystem rejection without changing permissions or manufacturing a broad path/filesystem failure; failure remains synthetic-suite coverage.'};
     save(evidenceFile, out);
@@ -341,6 +391,8 @@ async function run() {
     out.status = 'failed';
     out.failure = {message: String(error && error.message), stack: String(error && error.stack)};
     if (session) out.eventsAtFailure = await readEvents(session.page).catch(() => null);
+    // Retain the recording error rather than losing it with the renderer.
+    if (session) out.healthAtFailure = healthSummary(await readHealth(session.page).catch(() => null));
     out.streamedEventsAtFailure = streamedEvents;
     throw error;
   } finally {

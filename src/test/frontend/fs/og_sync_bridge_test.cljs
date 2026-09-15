@@ -1,5 +1,6 @@
 (ns frontend.fs.og-sync-bridge-test
   (:require [cljs.test :refer [deftest is]]
+            [clojure.string :as string]
             [electron.ipc :as ipc]
             [frontend.config :as config]
             [frontend.db :as db]
@@ -1537,3 +1538,96 @@
       (is (= saves-before @save-count))
       (is (= transaction-id
              (get-in @(:state runtime) [:uncertain-clear :transaction-id]))))))
+
+;; The observation build installs `make-observation-runtime`, whose adapter
+;; sanitizes and records every event. The suite above binds a stand-in adapter,
+;; so these tests exercise the real recorder the packaged build actually runs.
+
+(defn- observation-events
+  [runtime]
+  (:observation-events @(:state runtime)))
+
+(deftest observation-runtime-records-a-watcher-observation
+  (let [runtime (bridge/make-observation-runtime)]
+    (binding [bridge/*test-runtime* runtime]
+      (bridge/observe-watcher! "change" "/synthetic" "pages/관찰.md"
+                               "한국어 test" {:mtime 1 :size 14} false))
+    (let [events (observation-events runtime)
+          watcher-event (first (filter #(= :raw-watcher-observation (:event %)) events))]
+      (is (= 1 (count events))
+          "the raw watcher observation must be recorded, not dropped")
+      (is (some? watcher-event))
+      ;; "한국어 test" is 3 three-byte characters plus 5 ASCII bytes.
+      (is (= 14 (get-in watcher-event [:observation :content-bytes]))
+          "UTF-8 byte counting must survive multi-byte content")
+      (is (nil? (:content (:observation watcher-event)))
+          "sanitized watcher records keep the path but never the note content")
+      (is (not (:blocked @(:state runtime)))
+          "recording a watcher observation must not block the runtime"))))
+
+(deftest observation-runtime-keeps-recording-after-a-watcher-observation
+  ;; Regression for the live gap: a single watcher observation latched
+  ;; `:blocked`, so every later graph save and rename was silently dropped
+  ;; while the public reader still reported a healthy-looking event list.
+  (let [runtime (bridge/make-observation-runtime)]
+    (binding [bridge/*test-runtime* runtime]
+      (bridge/observe-watcher! "change" "/synthetic" "pages/관찰.md"
+                               "한국어 test" {:mtime 1 :size 14} false)
+      (let [cause (bridge/save-pending! "graph-a" "pages/english.md" "English")]
+        (is (some? cause) "a graph save after a watcher observation must register")
+        (bridge/save-completed! cause {:mtime 2})
+        (let [rename (bridge/rename-intent! "graph-a" "pages/관찰.md"
+                                            "pages/관찰-이름변경.md")]
+          (is (some? rename) "a rename after a watcher observation must register")
+          (bridge/rename-completed! rename {:mtime 3}))))
+    (let [events (observation-events runtime)]
+      (is (not (:blocked @(:state runtime))))
+      (is (= [:raw-watcher-observation :save-pending :save-completed
+              :rename-intent :rename-completed]
+             (mapv :event events))))))
+
+(deftest observation-health-reports-a-healthy-observer
+  (let [runtime (bridge/make-observation-runtime)]
+    (binding [bridge/*test-runtime* runtime]
+      (bridge/observe-watcher! "change" "/synthetic" "pages/관찰.md"
+                               "한국어 test" {:mtime 1 :size 14} false)
+      (let [cause (bridge/save-pending! "graph-a" "pages/english.md" "English")]
+        (bridge/save-completed! cause {:mtime 2}))
+      (let [health (bridge/observation-health runtime)]
+        (is (true? (:enabled health)))
+        (is (false? (:blocked health)))
+        (is (nil? (:blocked-stage health)))
+        (is (nil? (:blocked-code health)))
+        (is (true? (:instance-matches-reader health))
+            "the seams and the reader must resolve the same runtime instance")
+        (is (= {:save 1 :rename 0 :watcher 1} (:hook-entries health)))
+        (is (= 3 (:recorded-events health)))))))
+
+(deftest observation-health-distinguishes-blocked-from-never-called
+  ;; A runtime whose adapter throws records nothing, exactly as the live gap
+  ;; behaved. Health must say the seams DID run and recording failed, and must
+  ;; expose only fixed names -- never the underlying error text.
+  (let [runtime (assoc (bridge/make-observation-runtime)
+                       :adapter! (fn [_] (throw (js/Error. "secret note body"))))]
+    (binding [bridge/*test-runtime* runtime]
+      (bridge/observe-watcher! "change" "/synthetic" "pages/관찰.md"
+                               "한국어 test" {:mtime 1 :size 14} false)
+      (is (nil? (bridge/save-pending! "graph-a" "pages/english.md" "English")))
+      (let [health (bridge/observation-health runtime)]
+        (is (true? (:blocked health)))
+        (is (= "raw-watcher-observation" (:blocked-stage health)))
+        (is (= "sync-port-exception" (:blocked-code health)))
+        (is (= 0 (:recorded-events health)))
+        (is (= {:save 1 :rename 0 :watcher 1} (:hook-entries health))
+            "hook entries prove the seams ran, so recording failed rather than never running")
+        (is (not (string/includes? (pr-str health) "secret note body"))
+            "health must never carry the underlying error text")))))
+
+(deftest observation-health-reports-seams-that-never-ran
+  (let [runtime (bridge/make-observation-runtime)
+        health (bridge/observation-health runtime)]
+    (is (= {:save 0 :rename 0 :watcher 0} (:hook-entries health)))
+    (is (= 0 (:recorded-events health)))
+    (is (false? (:blocked health)))
+    (is (false? (:enabled health))
+        "no runtime is bound, so no seam could have run")))
