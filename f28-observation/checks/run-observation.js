@@ -70,6 +70,19 @@ async function api(page, method, ...args) {
   }, {method, args});
 }
 
+async function flushPageThroughOg(page, pageName) {
+  return page.evaluate(async name => {
+    const pageValue = window.logseq?.api?.get_page?.(name);
+    const repo = window.frontend?.state?.get_current_repo?.();
+    const write = window.frontend?.modules?.outliner?.file?.do_write_file_BANG_;
+    if (!pageValue?.id || !repo || typeof write !== 'function') {
+      throw new Error('OG immediate outliner writer is unavailable');
+    }
+    await Promise.resolve(write(repo, pageValue.id, 'observation-save'));
+    return {pageId: pageValue.id, repo};
+  }, pageName);
+}
+
 async function pageContains(session, pageName, expected) {
   await session.goTo(pageName);
   return session.page.evaluate(value => document.body.innerText.includes(value), expected);
@@ -176,6 +189,7 @@ async function run() {
 
     const beforeEdit = (await readEvents(session.page)).length;
     await api(session.page, 'update_block', englishBlock.uuid, englishEdit, {});
+    const englishFlush = await flushPageThroughOg(session.page, english);
     await waitForEventCount(session.page, beforeEdit + 2);
     let events = await readEvents(session.page);
     const editTail = events.slice(beforeEdit);
@@ -189,7 +203,8 @@ async function run() {
     record('save-pending-before-completion-and-bytes', pending.sequence < completed.sequence &&
       pending.cause['graph-id'] === completed.cause['graph-id'] && englishBytes.includes(englishEdit),
       {causeId: pending.cause['cause-id'], pending: pending.sequence, completed: completed.sequence,
-       graphId: pending.cause['graph-id'], path: englishPath, bytesSha256: sha256(englishBytes)});
+       graphId: pending.cause['graph-id'], path: englishPath, bytesSha256: sha256(englishBytes),
+       ogPageId: englishFlush.pageId});
     record('normal-english-display', await pageContains(session, english, englishEdit), {page: english});
 
     const beforeRename = events.length;
@@ -212,6 +227,7 @@ async function run() {
 
     const beforeRenamedEdit = events.length;
     await api(session.page, 'update_block', koreanBlock.uuid, koreanEdit, {});
+    await flushPageThroughOg(session.page, renamed);
     await waitForEventCount(session.page, beforeRenamedEdit + 2);
     events = await readEvents(session.page);
     const renamedSaves = events.slice(beforeRenamedEdit).filter(event => event.cause?.path === intent.cause['new-path']);
