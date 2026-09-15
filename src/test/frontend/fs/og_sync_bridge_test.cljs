@@ -1078,10 +1078,11 @@
       (is (= 1 @save-count)))))
 
 (deftest-async uncertain-clear-rejection-is-resolved-by-validated-recovery
-  ;; The clear port removes the record and then rejects. Ownership stays
-  ;; installed after the uncertain clear, and validated recovery — the
-  ;; authoritative durable store — reconciles the orphaned in-memory owner
-  ;; so later work proceeds consistently.
+  ;; The clear port removes the record and then rejects. The exact accepted
+  ;; envelope is retained as transaction-bound uncertain-clear evidence, and
+  ;; validated recovery — the authoritative durable store — confirms the clear,
+  ;; resolves the reservation and reconciles the orphaned in-memory owner so
+  ;; later work proceeds consistently.
   (let [stored (atom nil)
         clear-count (atom 0)
         runtime (test-runtime
@@ -1102,12 +1103,16 @@
                   :checkpoint-match true :binding-match true}))
             refused (binding [bridge/*test-runtime* runtime]
                      (bridge/finish-active! transaction-id))
-            _ (is (= :clear-active-failed (:code refused)))
+            _ (is (= :clear-active-uncertain (:code refused)))
             _ (is (= :identity-accepted (get-in @(:state runtime) [:active :phase])))
+            _ (is (= transaction-id
+                     (get-in @(:state runtime) [:uncertain-clear :transaction-id])))
             recovery (binding [bridge/*test-runtime* runtime]
                        (bridge/recover-active!))
             _ (is (= :none (:status recovery)))
+            _ (is (= :uncertain-clear (:resolved recovery)))
             _ (is (nil? (:active @(:state runtime))))
+            _ (is (nil? (:uncertain-clear @(:state runtime))))
             restarted (binding [bridge/*test-runtime* runtime]
                         (bridge/start-active!
                          (assoc (active-inputs) :target-generation "generation-3")))]
@@ -1231,3 +1236,302 @@
       (is (= :incompatible-active (:code incompatible)))
       (is (= 2 @save-count))
       (is (= reservation-id (:transaction-id (bridge/deserialize-active @stored)))))))
+
+(deftest-async missing-persisted-record-preserves-the-installed-owner-and-blocks
+  ;; The durable store holds no record for an unfinished transaction that is
+  ;; installed in memory, and no uncertain clear explains the absence.
+  ;; Absence is not proof of completed work: recovery preserves the in-memory
+  ;; owner and evidence, latches the runtime blocked, and admits no other
+  ;; transaction over the forgotten record.
+  (let [stored (atom nil)
+        save-count (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :save-active! (fn [_]
+                                  (swap! save-count inc)
+                                  (p/resolved nil))})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            _ (is (= :active (:status started)))
+            _ (is (some? (:active @(:state runtime))))
+            recovery (binding [bridge/*test-runtime* runtime]
+                       (bridge/recover-active!))
+            blocked-start (binding [bridge/*test-runtime* runtime]
+                            (bridge/start-active!
+                             (assoc (active-inputs)
+                                    :target-generation "generation-3")))]
+      (is (= :missing-active-record (:code recovery)))
+      (is (= transaction-id (get-in @(:state runtime) [:active :transaction-id])))
+      (is (= :active (get-in @(:state runtime) [:active :phase])))
+      (is (= :recover-active (get-in @(:state runtime) [:blocked :phase])))
+      (let [evidence (:recovery-evidence @(:state runtime))]
+        (is (= transaction-id (get-in evidence [:envelope :transaction-id])))
+        (is (= :missing-active-record (:code evidence))))
+      (is (nil? @stored))
+      (is (= 1 @save-count))
+      (is (= :coordination-blocked (:code blocked-start))))))
+
+(deftest-async verified-absence-resolves-an-uncertain-initial-save
+  ;; The unproven initial save never became durable: recovery's verified
+  ;; empty load resolves the reservation instead of keeping it, and later
+  ;; work is admitted rather than staying blocked on evidence the store
+  ;; disproves.
+  (let [stored (atom nil)
+        runtime (test-runtime
+                 {:stored stored
+                  :save-active! #(p/rejected (js/Error. "plain rejection"))})]
+    (p/let [refused (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            _ (is (= :active-save-uncertain (:code refused)))
+            _ (is (some? (:uncertain-active @(:state runtime))))
+            recovery (binding [bridge/*test-runtime* runtime]
+                       (bridge/recover-active!))]
+      (is (= :none (:status recovery)))
+      (is (= :uncertain-save (:resolved recovery)))
+      (is (nil? (:uncertain-active @(:state runtime))))
+      (is (nil? (:active @(:state runtime))))
+      ;; The next transaction is admitted with a fresh working save port;
+      ;; the resolved reservation no longer blocks it.
+      (p/let [started (binding [bridge/*test-runtime*
+                               (assoc runtime :save-active! #(reset! stored %))]
+                        (bridge/start-active!
+                         (assoc (active-inputs)
+                                :target-generation "generation-3")))]
+        (is (= :active (:status started)))
+        (is (= (get-in started [:envelope :transaction-id])
+               (:transaction-id (bridge/deserialize-active @stored))))))))
+
+(deftest-async uncertain-clear-then-finish-retry-requires-validated-recovery
+  ;; The clear port removes the record and then rejects. The exact accepted
+  ;; envelope is retained as transaction-bound uncertain-clear evidence; a
+  ;; direct finish retry refuses to repeat the clear before a validated
+  ;; readback, and only recovery confirms the clear and admits new work.
+  (let [stored (atom nil)
+        clear-count (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :clear-active! (fn [_]
+                                   (swap! clear-count inc)
+                                   (reset! stored nil)
+                                   (p/rejected (js/Error. "acknowledge lost after clear")))})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/mark-files-applied! transaction-id))
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/accept-identity!
+                 transaction-id
+                 {:files-match true :identity-bytes-match true
+                  :checkpoint-match true :binding-match true}))
+            refused (binding [bridge/*test-runtime* runtime]
+                      (bridge/finish-active! transaction-id))
+            _ (is (= :clear-active-uncertain (:code refused)))
+            _ (is (= :identity-accepted (get-in @(:state runtime) [:active :phase])))
+            reservation (:uncertain-clear @(:state runtime))
+            _ (is (some? reservation))
+            _ (is (= transaction-id (:transaction-id reservation)))
+            _ (is (= transaction-id
+                     (when reservation
+                       (:transaction-id (bridge/deserialize-active
+                                        (:serialized reservation))))))
+            retried (binding [bridge/*test-runtime* runtime]
+                      (bridge/finish-active! transaction-id))
+            _ (is (= :clear-active-uncertain (:code retried)))
+            _ (is (= 1 @clear-count))
+            incompatible (binding [bridge/*test-runtime* runtime]
+                           (bridge/start-active!
+                            (assoc (active-inputs)
+                                   :target-generation "generation-3")))
+            _ (is (= :incompatible-active (:code incompatible)))
+            recovery (binding [bridge/*test-runtime* runtime]
+                       (bridge/recover-active!))
+            _ (is (= :none (:status recovery)))
+            _ (is (= :uncertain-clear (:resolved recovery)))
+            _ (is (nil? (:active @(:state runtime))))
+            _ (is (nil? (:uncertain-clear @(:state runtime))))
+            restarted (binding [bridge/*test-runtime* runtime]
+                        (bridge/start-active!
+                         (assoc (active-inputs)
+                                :target-generation "generation-3")))]
+      (is (= :active (:status restarted)))
+      (is (= 1 @clear-count)))))
+
+(deftest-async proven-no-write-clear-refusal-stays-separately-retryable
+  ;; A clear refusal that proves nothing was cleared (the port function was
+  ;; never invoked) mutates nothing: no uncertain-clear reservation is
+  ;; recorded, the accepted record is retained untouched, and finish
+  ;; remains retryable without a recovery in between.
+  (let [stored (atom nil)
+        clear-count (atom 0)
+        runtime (dissoc (test-runtime {:stored stored}) :clear-active!)]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/mark-files-applied! transaction-id))
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/accept-identity!
+                 transaction-id
+                 {:files-match true :identity-bytes-match true
+                  :checkpoint-match true :binding-match true}))
+            refused (binding [bridge/*test-runtime* runtime]
+                      (bridge/finish-active! transaction-id))]
+      (is (= :missing-port (:code refused)))
+      (is (= :identity-accepted (get-in @(:state runtime) [:active :phase])))
+      (is (nil? (:uncertain-clear @(:state runtime))))
+      (is (= transaction-id (:transaction-id (bridge/deserialize-active @stored))))
+      (p/let [retried (binding [bridge/*test-runtime*
+                               (assoc runtime
+                                      :clear-active!
+                                      (fn [_]
+                                        (swap! clear-count inc)
+                                        (reset! stored nil)))]
+                      (bridge/finish-active! transaction-id))]
+        (is (= :complete (:status retried)))
+        (is (= 1 @clear-count))
+        (is (nil? @stored))
+        (is (nil? (:active @(:state runtime))))))))
+
+(deftest-async unexpected-different-record-during-uncertain-clear-recovery-is-preserved
+  ;; After an uncertain clear, the durable store unexpectedly holds a
+  ;; different transaction's record. Recovery preserves the stored record,
+  ;; the in-memory accepted owner and the uncertain-clear evidence instead
+  ;; of installing over them, and latches the runtime blocked.
+  (let [stored (atom nil)
+        clear-count (atom 0)
+        runtime (test-runtime
+                 {:stored stored
+                  :clear-active! (fn [_]
+                                   (swap! clear-count inc)
+                                   (reset! stored nil)
+                                   (p/rejected (js/Error. "acknowledge lost after clear")))})
+        replacement (test-runtime {:stored stored})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/mark-files-applied! transaction-id))
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/accept-identity!
+                 transaction-id
+                 {:files-match true :identity-bytes-match true
+                  :checkpoint-match true :binding-match true}))
+            refused (binding [bridge/*test-runtime* runtime]
+                      (bridge/finish-active! transaction-id))
+            _ (is (= :clear-active-uncertain (:code refused)))
+            replacement-started (binding [bridge/*test-runtime* replacement]
+                                 (bridge/start-active!
+                                  (assoc (active-inputs)
+                                         :target-generation "generation-3")))
+            replacement-id (get-in replacement-started [:envelope :transaction-id])
+            _ (is (= :active (:status replacement-started)))
+            recovery (binding [bridge/*test-runtime* runtime]
+                       (bridge/recover-active!))
+            blocked-finish (binding [bridge/*test-runtime* runtime]
+                             (bridge/finish-active! transaction-id))]
+      (is (= :unexpected-active-record (:code recovery)))
+      (is (= transaction-id (get-in @(:state runtime) [:active :transaction-id])))
+      (is (= :identity-accepted (get-in @(:state runtime) [:active :phase])))
+      (is (= transaction-id
+             (get-in @(:state runtime) [:uncertain-clear :transaction-id])))
+      (is (= :recover-active (get-in @(:state runtime) [:blocked :phase])))
+      ;; The unexpected stored record is preserved untouched.
+      (is (= replacement-id (:transaction-id (bridge/deserialize-active @stored))))
+      (is (= :unexpected-active-record
+             (get-in @(:state runtime) [:recovery-evidence :code])))
+      (is (= :coordination-blocked (:code blocked-finish))))))
+
+(deftest-async blocked-latch-during-the-empty-load-preserves-ownership
+  ;; A callback reenters from the awaited load port and latches the runtime
+  ;; blocked while the empty load is pending. The recovery turn must recheck
+  ;; the latch after the load settles and change no ownership through the
+  ;; blocked runtime; the first latch reason is preserved.
+  (let [stored (atom nil)
+        {load-promise :promise resolve-load! :resolve!} (deferred)
+        base (test-runtime
+              {:stored stored
+               :adapter! (fn [event]
+                           (when (= :save-pending (:event event))
+                             (throw (js/Error. "adapter latched during the load"))))})
+        runtime (assoc base
+                       :save-active! (fn [_] (p/resolved nil))
+                       :load-active! (fn []
+                                       (p/then load-promise
+                                               (fn [_]
+                                                 ;; Reenter the bridge from the
+                                                 ;; awaited load port's settlement
+                                                 ;; and latch the runtime blocked
+                                                 ;; before the empty-store branch
+                                                 ;; runs.
+                                                 (binding [bridge/*test-runtime* base]
+                                                   (bridge/save-pending!
+                                                    "graph-a" "pages/a.md" "local"))
+                                                 nil))))]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])]
+      (is (= :active (:status started)))
+      (is (some? (:active @(:state base))))
+      (let [recovery (binding [bridge/*test-runtime* runtime]
+                       (bridge/recover-active!))]
+        ;; The load settles empty only after the runtime latched blocked.
+        (resolve-load! nil)
+        (p/let [recovery-result recovery]
+          (is (= :coordination-blocked (:code recovery-result)))
+          (is (= :save-pending (get-in @(:state base) [:blocked :phase])))
+          (is (= transaction-id (get-in @(:state base) [:active :transaction-id])))
+          (is (nil? (:recovery-evidence @(:state base))))
+          (is (nil? @stored)))))))
+
+(deftest-async uncertain-clear-refuses-reconciliation-publication-until-recovery
+  ;; While an accepted transaction's clear outcome is unknown, no progress
+  ;; write may resurrect the record the clear may have removed. The
+  ;; reconciliation settles as retryable evidence and the store stays
+  ;; untouched until validated recovery resolves the reservation.
+  (let [stored (atom nil)
+        clear-count (atom 0)
+        save-count (atom 0)
+        complete {:graph-id "graph-a" :new-path "pages/late.md" :new-present true
+                  :new-content-hash "hash-late"}
+        runtime (test-runtime
+                 {:stored stored
+                  :complete-state! (constantly complete)
+                  :save-active! (fn [serialized]
+                                  (swap! save-count inc)
+                                  (reset! stored serialized))
+                  :clear-active! (fn [_]
+                                   (swap! clear-count inc)
+                                   (reset! stored nil)
+                                   (p/rejected (js/Error. "acknowledge lost after clear")))})]
+    (p/let [started (binding [bridge/*test-runtime* runtime]
+                      (bridge/start-active! (active-inputs)))
+            transaction-id (get-in started [:envelope :transaction-id])
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/mark-files-applied! transaction-id))
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/accept-identity!
+                 transaction-id
+                 {:files-match true :identity-bytes-match true
+                  :checkpoint-match true :binding-match true}))
+            refused (binding [bridge/*test-runtime* runtime]
+                      (bridge/finish-active! transaction-id))
+            _ (is (= :clear-active-uncertain (:code refused)))
+            saves-before @save-count
+            _ (binding [bridge/*test-runtime* runtime]
+                (bridge/register-incoming-cause!
+                 {:cause-id "late-1" :operation-id "op-late" :graph-id "graph-a"
+                  :kind :update :path "pages/late.md" :content-hash "hash-late"}))
+            observation (binding [bridge/*test-runtime* runtime]
+                          (bridge/observe-watcher! "change" "/synthetic"
+                                                   "pages/late.md" "late" {} false))
+            settled (:settled observation)]
+      (is (= :reconciliation-failed (:status settled)))
+      (is (= :clear-active-uncertain (:code settled)))
+      (is (= :reconcile-pending
+             (get-in @(:state runtime) [:causes "late-1" :status])))
+      (is (nil? @stored))
+      (is (= saves-before @save-count))
+      (is (= transaction-id
+             (get-in @(:state runtime) [:uncertain-clear :transaction-id]))))))

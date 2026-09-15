@@ -263,7 +263,21 @@ assertions against the prior behavior, then passed 38/38 after every turn
 rechecked the blocked latch at section start and after every awaited port, and
 after unproven save failures reserved the exact attempted envelope as
 recovery-required evidence that only the exact transaction retry or validated
-recovery may resolve. The reentrancy claim is qualified to the supported
+recovery may resolve. The recovery-evidence correction then added regressions
+for a persisted record disappearing under an installed unfinished transaction,
+a verified-empty store resolving an uncertain initial save, an uncertain
+clear requiring validated readback before any repeat clear or new
+transaction, a proven no-write clear refusal staying separately retryable, an
+unexpected different record during uncertain-clear recovery, and a blocked
+latch set while the empty load was pending; those produced 36 expected
+failures in 45 tests/280 assertions against the prior behavior, then passed
+45/45 after unproven clears reserved the exact accepted transaction as an
+outstanding `:uncertain-clear` reservation and `recover-active!` settled an
+empty store only where the retained evidence supports it — idle, resolved
+uncertain save, or confirmed uncertain clear — while preserving an installed
+owner whose record vanished and a stored record that belongs to a different
+transaction, with the blocked latch rechecked after the awaited load before
+any ownership change. The reentrancy claim is qualified to the supported
 non-awaiting callback contract: the boundary does not detect or refuse a
 callback that awaits the nested turn, and no general deadlock-freedom claim is
 made. The accepted pure

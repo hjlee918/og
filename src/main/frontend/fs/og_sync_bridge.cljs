@@ -300,12 +300,13 @@
   latched blocked at a publication boundary. The cause returns to
   reconcile-pending and nothing is installed or emitted; durable progress the
   save may already have written is revalidated by recovery. Emission is
-  omitted because a blocked runtime suppresses adapter events anyway."
+  omitted because a blocked runtime suppresses adapter events anyway. The
+  typed failure code comes from the error's ex-data."
   [runtime cause error]
   (let [pending (assoc cause :status :reconcile-pending)]
     (swap! (runtime-state runtime) assoc-in [:causes (:cause-id cause)] pending)
     {:status :reconciliation-failed :cause pending
-     :code :coordination-blocked :error error}))
+     :code (:code (ex-data error) :coordination-blocked) :error error}))
 
 (defn- proven-no-write?
   "True only when a save failure proves nothing was persisted: the write
@@ -323,6 +324,22 @@
   [runtime envelope error]
   (swap! (runtime-state runtime)
          assoc :uncertain-active
+         {:transaction-id (:transaction-id envelope)
+          :serialized (serialize-active envelope)
+          :envelope envelope
+          :error (str error)})
+  nil)
+
+(defn- reserve-uncertain-clear!
+  "Preserve exact transaction-bound evidence that an accepted transaction's
+  clear was attempted with an unproven durable outcome. While the reservation
+  stands no clear is repeated and no other transaction is admitted: repeating
+  the clear could remove a record this transaction no longer owns, and only a
+  validated readback can confirm or refute the outstanding one. The retained
+  envelope is the exact accepted record whose clear outcome is unknown."
+  [runtime envelope error]
+  (swap! (runtime-state runtime)
+         assoc :uncertain-clear
          {:transaction-id (:transaction-id envelope)
           :serialized (serialize-active envelope)
           :envelope envelope
@@ -391,13 +408,26 @@
                                    (let [current (:active @(runtime-state runtime))]
                                      (if (and owner current
                                               (= owner (:transaction-id current)))
-                                       (let [entry {:transaction-id owner
-                                                    :cause-id (:cause-id cause)
-                                                    :operation-id (:operation-id cause)
-                                                    :receipt (canonical receipt)}
-                                             updated (assoc-in current
-                                                              [:progress :reconciled (:cause-id cause)]
-                                                              entry)]
+                                       (if (:uncertain-clear @(runtime-state runtime))
+                                         ;; An accepted transaction's clear is
+                                         ;; outstanding with an unproven durable
+                                         ;; outcome: no progress write may
+                                         ;; resurrect the record that clear may
+                                         ;; have removed. Settle as retryable
+                                         ;; evidence; only validated recovery
+                                         ;; resolves the reservation first.
+                                         (reconcile-blocked-settlement!
+                                          runtime cause
+                                          (ex-info
+                                           "uncertain clear is outstanding for this transaction"
+                                           {:code :clear-active-uncertain}))
+                                         (let [entry {:transaction-id owner
+                                                      :cause-id (:cause-id cause)
+                                                      :operation-id (:operation-id cause)
+                                                      :receipt (canonical receipt)}
+                                               updated (assoc-in current
+                                                                [:progress :reconciled (:cause-id cause)]
+                                                                entry)]
                                          (-> (invoke-async-port runtime :save-active!
                                                                 (serialize-active updated))
                                              ;; Persist the transaction-bound progress
@@ -439,7 +469,7 @@
                                                           :cause pending :status :failure
                                                           :error (str error)})
                                                   {:status :reconciliation-failed :cause pending
-                                                   :error error})))))
+                                                   :error error}))))))
                                        ;; The reserved transaction no longer owns the
                                        ;; active slot. Settle in memory only and never
                                        ;; publish into a record this reconciliation
@@ -685,7 +715,8 @@
                 (if (blocked? runtime)
                   (blocked-result :coordination-blocked nil)
                   (let [prior (:active @(runtime-state runtime))
-                        uncertain (:uncertain-active @(runtime-state runtime))]
+                        uncertain (:uncertain-active @(runtime-state runtime))
+                        uncertain-clear (:uncertain-clear @(runtime-state runtime))]
                     (cond
                       (and prior (not= (:transaction-id prior) (:transaction-id envelope)))
                       (blocked-result :incompatible-active nil)
@@ -701,6 +732,14 @@
                       (and uncertain
                            (not= (:transaction-id uncertain) (:transaction-id envelope)))
                       (blocked-result :uncertain-active nil)
+
+                      ;; An accepted transaction's clear was attempted with an
+                      ;; unproven durable outcome. Until validated recovery
+                      ;; confirms or refutes that clear, no transaction —
+                      ;; including a retry of this one — may publish into a
+                      ;; lifecycle whose record state is unknown.
+                      uncertain-clear
+                      (blocked-result :clear-active-uncertain nil)
 
                       :else
                       (-> (p/let [binding-valid? (invoke-async-port
@@ -769,8 +808,13 @@
   recovery runs as one coordination turn, so it cannot race a start or install a
   recovered record over a newer active lifecycle. A validated load is direct
   evidence of the durable store's current record: it resolves an outstanding
-  uncertain-save reservation, and an empty store reconciles an in-memory owner
-  orphaned by an uncertain clear instead of keeping it installed."
+  uncertain-save reservation, and a verified-empty store confirms an
+  outstanding uncertain clear. But a missing record is not itself proof of
+  completed work: an installed unfinished transaction whose persisted record
+  is gone — with no outstanding uncertain clear explaining the absence — is
+  preserved together with its evidence and blocks the runtime instead of being
+  forgotten, and a record that belongs to a different transaction than an
+  outstanding uncertain clear is preserved rather than installed over."
   []
   (when (enabled?)
     (let [runtime (current-runtime)
@@ -786,42 +830,91 @@
             (if (blocked? runtime)
               (blocked-result :coordination-blocked nil)
               (-> (p/let [serialized (invoke-async-port runtime :load-active!)]
+                   ;; Recheck after the awaited load: a callback reentering
+                   ;; from the port may have latched the runtime blocked, and
+                   ;; ownership must not change through a blocked runtime.
+                   (refuse-when-blocked! runtime)
                    (reset! serialized* serialized)
                    (if-not serialized
-                     ;; Nothing is persisted: the durable store is
-                     ;; authoritative for lifecycle ownership, so a leftover
-                     ;; in-memory active record and any stale reservation are
-                     ;; reconciled here rather than kept installed.
-                     (do (swap! (runtime-state runtime)
-                                #(dissoc % :active :uncertain-active))
-                         {:status :none})
-                     (let [envelope (validate-envelope! runtime (deserialize-active serialized))]
+                     ;; Verified current absence. Absence alone is not proof
+                     ;; of completed work: only an idle memory, a resolved
+                     ;; uncertain save, or a confirmed uncertain clear may
+                     ;; settle ownership here; anything else is preserved.
+                     (let [state @(runtime-state runtime)
+                           active (:active state)
+                           uncertain (:uncertain-active state)
+                           uncertain-clear (:uncertain-clear state)]
+                       (cond
+                         (and (nil? active) (nil? uncertain))
+                         {:status :none}
+
+                         ;; The unproven initial save never became durable:
+                         ;; verified absence resolves its reservation.
+                         (and (nil? active) uncertain)
+                         (do (swap! (runtime-state runtime) dissoc :uncertain-active)
+                             {:status :none :resolved :uncertain-save})
+
+                         ;; The accepted transaction's uncertain clear is
+                         ;; confirmed: nothing remains for it, and the empty
+                         ;; store also proves no other reserved save landed.
+                         (and active uncertain-clear
+                              (= (:transaction-id active)
+                                 (:transaction-id uncertain-clear)))
+                         (do (swap! (runtime-state runtime)
+                                    dissoc :active :uncertain-clear :uncertain-active)
+                             {:status :none :resolved :uncertain-clear})
+
+                         ;; An installed transaction whose record is gone with
+                         ;; no uncertain clear explaining the absence is not
+                         ;; completed work: preserve the in-memory owner and
+                         ;; evidence, and refuse through the blocked latch.
+                         :else
+                         (do (reset! envelope* active)
+                             (throw (ex-info
+                                     "installed ACTIVE disappeared from the durable store"
+                                     {:code :missing-active-record})))))
+                     (let [envelope (deserialize-active serialized)]
                        (reset! envelope* envelope)
-                       (p/let [safe-envelope (recovered-envelope runtime envelope)]
-                         ;; Recheck after the awaited validation ports before
-                         ;; publishing the recovered record.
-                         (refuse-when-blocked! runtime)
-                         (swap! (runtime-state runtime)
-                                (fn [state]
-                                  (-> (reduce (fn [result cause]
-                                                (let [reconciled? (contains?
-                                                                   (set (keys (get-in safe-envelope
-                                                                                      [:progress :reconciled])))
-                                                                   (:cause-id cause))]
-                                                  (assoc-in result [:causes (:cause-id cause)]
-                                                            (assoc cause :origin :incoming
-                                                                   :status (if reconciled?
-                                                                             :reconciled
-                                                                             :reconcile-pending)))))
-                                              state
-                                              (get-in envelope [:inputs :causes]))
-                                      (assoc :active safe-envelope
-                                             :recovery-envelope envelope)
-                                      ;; The validated record proves the
-                                      ;; store's actual content, resolving any
-                                      ;; outstanding uncertain-save reservation.
-                                      (dissoc :uncertain-active))))
-                         {:status :recovery-pending :envelope safe-envelope}))))
+                       (let [uncertain-clear (:uncertain-clear @(runtime-state runtime))]
+                         (when (and uncertain-clear
+                                    (not= (:transaction-id uncertain-clear)
+                                          (:transaction-id envelope)))
+                           ;; The store holds a different record than the
+                           ;; accepted transaction whose clear outcome is
+                           ;; unknown: preserve the stored record and the
+                           ;; in-memory claims rather than installing over
+                           ;; them.
+                           (throw (ex-info
+                                   "durable store holds a different record than the uncertain clear"
+                                   {:code :unexpected-active-record}))))
+                       (let [validated (validate-envelope! runtime envelope)]
+                         (p/let [safe-envelope (recovered-envelope runtime validated)]
+                           ;; Recheck after the awaited validation ports before
+                           ;; publishing the recovered record.
+                           (refuse-when-blocked! runtime)
+                           (swap! (runtime-state runtime)
+                                  (fn [state]
+                                    (-> (reduce (fn [result cause]
+                                                  (let [reconciled? (contains?
+                                                                     (set (keys (get-in safe-envelope
+                                                                                        [:progress :reconciled])))
+                                                                     (:cause-id cause))]
+                                                    (assoc-in result [:causes (:cause-id cause)]
+                                                              (assoc cause :origin :incoming
+                                                                     :status (if reconciled?
+                                                                               :reconciled
+                                                                               :reconcile-pending)))))
+                                                state
+                                                (get-in envelope [:inputs :causes]))
+                                        (assoc :active safe-envelope
+                                               :recovery-envelope validated)
+                                        ;; The validated record proves the
+                                        ;; store's actual content, resolving any
+                                        ;; outstanding uncertain-save reservation
+                                        ;; and — when the record survived its own
+                                        ;; uncertain clear — that reservation too.
+                                        (dissoc :uncertain-active :uncertain-clear))))
+                           {:status :recovery-pending :envelope safe-envelope})))))
                  (p/catch
                   (fn [error]
                     ;; Preserve the first latch: a blocked recheck that already
@@ -829,7 +922,8 @@
                     ;; by a generic recovery failure.
                     (when-not (:already-blocked (ex-data error))
                       (swap! (runtime-state runtime) assoc :recovery-evidence
-                             {:serialized @serialized* :envelope @envelope*})
+                             {:serialized @serialized* :envelope @envelope*
+                              :code (:code (ex-data error))})
                       (block-runtime! runtime :recover-active error))
                     (blocked-result (or (:code (ex-data error)) :recovery-refused)
                                     error)))))))))))
@@ -984,25 +1078,54 @@
             ;; the runtime blocked.
             (if (blocked? runtime)
               (blocked-result :coordination-blocked nil)
-              (let [active (:active @(runtime-state runtime))]
+              (let [active (:active @(runtime-state runtime))
+                    uncertain-clear (:uncertain-clear @(runtime-state runtime))]
                 (if-not (and (= transaction-id (:transaction-id active))
                              (= :identity-accepted (:phase active)))
                   (blocked-result :acceptance-pending nil)
-                  (-> (p/let [_ (invoke-async-port runtime :clear-active!)]
-                        ;; Recheck after the awaited clear port: a callback
-                        ;; reentering from the port may have latched the runtime
-                        ;; blocked; a blocked runtime never clears or installs
-                        ;; ownership. A throw here settles through the catch
-                        ;; below with the typed coordination-blocked code.
-                        (refuse-when-blocked! runtime)
-                        ;; Revalidation after the asynchronous clear: a stale
-                        ;; completion must never clear an active slot that a
-                        ;; newer lifecycle now owns.
-                        (if-not (= transaction-id (active-transaction-id runtime))
-                          (blocked-result :acceptance-pending nil)
-                          (do (swap! (runtime-state runtime) dissoc :active)
-                              {:status :complete})))
-                      (p/catch (fn [error]
-                                 (blocked-result (or (:code (ex-data error))
-                                                     :clear-active-failed)
-                                                 error)))))))))))))
+                  (if uncertain-clear
+                    ;; A clear was already attempted for this lifecycle with an
+                    ;; unproven durable outcome. Repeating it before a validated
+                    ;; readback could clear a record this transaction no longer
+                    ;; owns, and discarding the reservation would destroy
+                    ;; retained evidence. Only validated recovery resolves it.
+                    (blocked-result :clear-active-uncertain nil)
+                    (-> (p/let [_ (invoke-async-port runtime :clear-active!)]
+                          ;; Recheck after the awaited clear port: a callback
+                          ;; reentering from the port may have latched the runtime
+                          ;; blocked; a blocked runtime never clears or installs
+                          ;; ownership. A throw here settles through the catch
+                          ;; below with the typed coordination-blocked code.
+                          (refuse-when-blocked! runtime)
+                          ;; Revalidation after the asynchronous clear: a stale
+                          ;; completion must never clear an active slot that a
+                          ;; newer lifecycle now owns.
+                          (if-not (= transaction-id (active-transaction-id runtime))
+                            (blocked-result :acceptance-pending nil)
+                            (do (swap! (runtime-state runtime) dissoc :active)
+                                {:status :complete})))
+                        (p/catch
+                         (fn [error]
+                           (let [data (ex-data error)]
+                             (cond
+                               ;; The clear port settled but the runtime latched
+                               ;; blocked before publication: the durable outcome
+                               ;; stays unverified in memory, so the exact
+                               ;; transaction-bound evidence is retained.
+                               (:already-blocked data)
+                               (do (reserve-uncertain-clear! runtime active error)
+                                   (blocked-result (:code data) error))
+
+                               ;; A proven no-write refusal cleared nothing and
+                               ;; records no reservation: this finish stays
+                               ;; separately retryable.
+                               (proven-no-write? error)
+                               (blocked-result (or (:code data) :clear-active-failed)
+                                               error)
+
+                               ;; Any other rejection leaves the clear outcome
+                               ;; unknown: retain the exact accepted envelope
+                               ;; as transaction-bound recovery evidence.
+                               :else
+                               (do (reserve-uncertain-clear! runtime active error)
+                                   (blocked-result :clear-active-uncertain error)))))))))))))))))

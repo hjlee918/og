@@ -433,11 +433,18 @@ attempted envelope — transaction ID, serialized bytes and the failure — as
 recovery-required evidence and refuses every incompatible start with
 `:uncertain-active`. Only the exact same transaction may retry through the
 reservation, and a successful republication of that transaction or validated
-recovery clears it; there is no permanent dead end. An uncertain clear
-rejection retains the installed identity-accepted owner so incompatible work
-is still refused, and validated recovery reconciles the orphan: a validated
-load is direct evidence of the durable store's current record — it resolves an
-outstanding reservation, and an empty store clears a leftover in-memory owner.
+recovery clears it; there is no permanent dead end. An uncertain clear is
+treated the same way: a clear-active rejection without proven-no-write
+evidence reserves the exact accepted transaction — transaction ID, serialized
+envelope and the failure — as an outstanding `:uncertain-clear` reservation and
+returns `:clear-active-uncertain`. While that reservation stands no clear is
+repeated and no other transaction is admitted: a repeat `finish-active!` and
+every start are refused, and reconciliation publication cannot resurrect the
+record the outstanding clear may already have removed. Only validated recovery
+resolves it — a verified-empty store confirms the clear, while a validated
+record that survives proves the clear failed and installs normally — and a
+proven no-write clear refusal (missing port or explicit `:proven-no-write`)
+remains separately retryable with no reservation at all.
 Progress-save rejections in `mark-files-applied!`, `accept-identity!` and
 reconciliation publication need no reservation of their own: the installed
 owning ACTIVE record already refuses incompatible work and an exact retry
@@ -446,6 +453,23 @@ converges, so their typed failure results (`:progress-recording-failed`,
 `:clear-active-failed`) preserve the exact installed record and receipt
 evidence for retry. Failed recovery retains the envelope/evidence and latches
 the runtime blocked before any queued turn can perform operational work.
+
+A missing ACTIVE record is not automatically proof of completed work.
+`recover-active!` rechecks the blocked latch after its awaited load before
+changing any ownership, and settles a verified-empty store only where the
+retained evidence supports it: an idle runtime reports `:none`; verified
+absence resolves an outstanding uncertain-save reservation
+(`:resolved :uncertain-save`); and verified absence confirms an accepted
+transaction's outstanding uncertain clear (`:resolved :uncertain-clear`).
+Anything else installed in memory is preserved rather than forgotten: an
+unfinished transaction whose persisted record disappeared with no uncertain
+clear explaining the absence fails with `:missing-active-record`, retaining
+the in-memory owner and typed evidence and latching the runtime blocked, and a
+durable record that belongs to a different transaction than an outstanding
+uncertain clear fails with `:unexpected-active-record`, preserving the stored
+record, the in-memory owner and the reservation rather than installing over
+them. Recovery evidence records the failure's typed code alongside its
+serialized and envelope material.
 
 This contract implements only tested infrastructure. It creates no sidecar,
 chooses no copied-graph policy, enrolls no graph, invokes no native helper,

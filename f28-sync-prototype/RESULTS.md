@@ -748,3 +748,80 @@ acknowledgement is addressed only by future validated recovery designs. The
 bridge remains disabled in every package. No graph, sidecar, helper,
 application, profile, account or network integration was accessed or enabled;
 the native-helper integration tests were deliberately not run in this batch.
+
+## OG bridge recovery-evidence and uncertain-clear correction
+
+The preceding 38-test/212-assertion result remains historical evidence for the
+blocked-recheck correction, but its recovery path still conflated two distinct
+kinds of unknown. First, `recover-active!` treated a missing persisted record as
+proof of completed work: its empty-store branch unconditionally removed the
+in-memory `:active` owner and any `:uncertain-active` reservation, so an
+unfinished installed transaction whose record disappeared was silently
+forgotten instead of preserved — the same branch also cleared ownership without
+rechecking the blocked latch after its awaited load. Second, an uncertain clear
+was not reserved: `finish-active!` returned a plain `:clear-active-failed`
+after a clear rejection while retaining the accepted ACTIVE, so a direct
+finish retry re-invoked the clear without any verified durable state and
+reconciliation publication could republish the record that clear may already
+have removed.
+
+The regressions were added first. Against the prior behavior the focused run
+had 36 failures in 45 tests/280 assertions: a missing persisted record while
+an installed unfinished transaction was active still cleared ownership and
+admitted other work; a verified-empty store did not resolve an uncertain
+initial save's reservation; a clear-then-reject followed by a direct finish
+retry repeated the clear with no recovery; an unexpected different record
+during uncertain-clear recovery was installed over; a blocked latch set while
+the empty load was pending was not rechecked before ownership changed; and
+reconciliation publication resurrected the record an outstanding clear may
+have removed. One new regression — a proven no-write clear refusal staying
+separately retryable — passed before the change and guards that preservation.
+One existing assertion was updated because it encoded the corrected-away
+orphan-clear behavior.
+
+The corrected bridge applies the uncertain-save rule to clears and the
+evidence rule to empty stores. A clear rejection without proven-no-write
+evidence reserves the exact accepted transaction (ID, serialized envelope,
+failure) as an outstanding `:uncertain-clear` reservation and returns
+`:clear-active-uncertain`; a proven no-write clear refusal remains separately
+retryable with no reservation. While the reservation stands a repeat finish
+and every start are refused, and reconciliation publication settles its cause
+as retryable reconcile-pending evidence instead of writing progress.
+`recover-active!` rechecks the blocked latch after its awaited load and settles
+an empty store only where the retained evidence supports it: an idle runtime
+reports `:none`; verified absence resolves an uncertain-save reservation
+(`:resolved :uncertain-save`); verified absence confirms a matching
+outstanding uncertain clear (`:resolved :uncertain-clear`); anything else
+installed in memory fails with `:missing-active-record`, preserving the owner,
+the typed evidence and the blocked latch. A loaded record matching an
+outstanding reservation clears that reservation on install; a different
+record fails with `:unexpected-active-record`, preserving the stored record,
+the in-memory owner and the reservation rather than installing over them.
+Recovery evidence now records the failure's typed code.
+
+Correction verification:
+
+- Focused production-hook bridge tests: 45/45 tests, 280 assertions.
+- Gap-demonstration run before correction: 45 tests, 280 assertions, 36
+  expected failures (six new regression tests plus the updated
+  validated-recovery assertion; the seventh new regression passed before the
+  change as an intentional preservation guard).
+- Accepted pure core/planner/executor/comparison/response/identity regressions:
+  75/75.
+- Full ClojureScript test-build compilation succeeded; no new bridge warning.
+- Production browser app compilation: 1,381 files, 148 compiled, zero warnings.
+- Changed-file ClojureScript lint (`og_sync_bridge.cljs`,
+  `og_sync_bridge_test.cljs`): zero warnings, zero errors.
+
+The new fixtures use controlled deferred synthetic ports, counting ports and a
+shared fake store, and assert returned typed results, operational call counts,
+runtime state, blocked-latch phase, reservation contents and deserialized
+fake-store records together. The uncertain-clear reservation and the
+missing-record evidence are in-memory runtime semantics over synthetic ports:
+they are not cross-process locking, not crash durability and not a power-loss
+guarantee — a real crash between a durable clear and its acknowledgement, or
+a store whose record vanishes for reasons outside this process, is addressed
+only by future reviewed recovery designs. The bridge remains disabled in
+every package. No graph, sidecar, helper, application, profile, account or
+network integration was accessed or enabled; the native-helper integration
+tests were deliberately not run in this batch.
