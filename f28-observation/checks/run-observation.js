@@ -78,8 +78,13 @@ async function editBlockThroughUi(session, pageName, blockUuid, content) {
   const editor = session.page.locator('textarea[aria-label="editing block"]').first();
   await editor.waitFor({state: 'visible', timeout: 10000});
   await editor.fill(content);
+  const editorValueMatched = await editor.inputValue() === content;
   await session.page.keyboard.press('Escape');
-  return {editorOpened: true, page: pageName, blockUuid};
+  const displayedAfterEscape = await session.page.waitForFunction(({blockUuid, content}) => {
+    const element = document.querySelector(`#main-content-container [blockid="${blockUuid}"] .block-content`);
+    return element && element.innerText.includes(content);
+  }, {blockUuid, content}, {timeout: 10000}).then(() => true).catch(() => false);
+  return {editorOpened: true, editorValueMatched, displayedAfterEscape, page: pageName, blockUuid};
 }
 
 async function pageContains(session, pageName, expected) {
@@ -105,6 +110,7 @@ async function run() {
   let profile;
   let session;
   let reopened;
+  let streamedEvents = [];
   try {
     const built = APP.resolve(BUILD);
     assert(built.preflight.ok, 'observation package preflight failed');
@@ -145,7 +151,6 @@ async function run() {
     session = await APP.open({built, graph, bad, errors, say: console.log,
       record: (id, title, ok, detail) => record(`launch-${id}`, ok, {title, detail}),
       phase: () => {}, deps: {launch}});
-    const streamedEvents = [];
     session.page.on('console', message => {
       const value = message.text();
       if (!value.startsWith(CONSOLE_PREFIX)) return;
@@ -166,7 +171,12 @@ async function run() {
     const nameDate = (prior ? prior.stamp : stamp).slice(0, 10);
     const english = `Observation English ${nameDate}`;
     const korean = `관찰 한국어 ${nameDate}`;
-    const renamed = `관찰 이름변경 ${nameDate}`;
+    const baseRenamed = `관찰 이름변경 ${nameDate}`;
+    const priorRenamed = prior?.operation?.renamed;
+    const sourceCandidates = [priorRenamed, baseRenamed, korean].filter(Boolean);
+    const koreanSource = sourceCandidates.find(name =>
+      fs.existsSync(path.join(graph, 'pages', `${name}.md`))) || korean;
+    const renamed = `관찰 이름변경 ${nameDate} ${stamp.slice(11, 19).replace(/-/g, '')}`;
     const englishCreate = 'Synthetic English note created through OG.';
     const koreanCreate = 'OG를 통해 만든 합성 한국어 노트입니다.';
     const englishEdit = prior
@@ -179,7 +189,7 @@ async function run() {
     let englishBlock, koreanBlock;
     if (prior) {
       const englishTree = await api(session.page, 'get_page_blocks_tree', english);
-      const koreanTree = await api(session.page, 'get_page_blocks_tree', korean);
+      const koreanTree = await api(session.page, 'get_page_blocks_tree', koreanSource);
       englishBlock = englishTree && englishTree[0];
       koreanBlock = koreanTree && koreanTree[0];
     } else {
@@ -192,37 +202,30 @@ async function run() {
       englishBlock && englishBlock.uuid && koreanBlock && koreanBlock.uuid,
       {englishBlock: englishBlock.uuid, koreanBlock: koreanBlock.uuid,
        resumedAfterVerifiedInitialApiCreation: !!prior});
+    const koreanBeforeRename = koreanBlock.content;
 
     const englishPath = `pages/${english}.md`;
-    const oldKoreanPath = `pages/${korean}.md`;
+    const oldKoreanPath = `pages/${koreanSource}.md`;
     const renamedPath = `pages/${renamed}.md`;
+    const expectedGraphId = `logseq_local_${graph}`;
+    out.operation = {english, koreanSource, renamed, englishPath, oldKoreanPath, renamedPath,
+      expectedGraphId};
     const englishUi = await editBlockThroughUi(session, english, englishBlock.uuid, englishEdit);
     record('normal-english-display', await pageContains(session, english, englishEdit), {page: english});
 
-    const beforeRename = (await readEvents(session.page)).length;
-    await api(session.page, 'rename_page', korean, renamed);
-    await waitForEventCount(session.page, beforeRename + 2);
-    let events = await readEvents(session.page);
-    const renameTail = events.slice(beforeRename);
-    const intent = renameTail.find(event => event.event === 'rename-intent');
-    const renameCompleted = intent && renameTail.find(event => event.event === 'rename-completed' &&
-      event.cause?.['cause-id'] === intent.cause['cause-id']);
-    assert(intent && renameCompleted, 'Korean rename did not yield paired evidence');
+    await api(session.page, 'rename_page', koreanSource, renamed);
     const oldAbsolute = B.assertInsideAllowedRoot('old Korean note', path.join(graph, oldKoreanPath));
     const newAbsolute = B.assertInsideAllowedRoot('renamed Korean note', path.join(graph, renamedPath));
-    record('korean-rename-intent-before-completion', intent.sequence < renameCompleted.sequence &&
-      intent.cause['graph-id'] === renameCompleted.cause['graph-id'] &&
-      intent.cause['graph-id'] === graph && intent.cause['old-path'] === oldKoreanPath &&
-      intent.cause['new-path'] === renamedPath && !fs.existsSync(oldAbsolute) && fs.existsSync(newAbsolute),
-      {causeId: intent.cause['cause-id'], intent: intent.sequence, completed: renameCompleted.sequence,
-       graphId: intent.cause['graph-id'], oldPath: intent.cause['old-path'], newPath: intent.cause['new-path']});
-    record('normal-korean-renamed-display', await pageContains(session, renamed, koreanCreate), {page: renamed});
+    record('normal-korean-renamed-display', await pageContains(session, renamed, koreanBeforeRename),
+      {page: renamed});
 
-    await editBlockThroughUi(session, renamed, koreanBlock.uuid, koreanEdit);
-    record('normal-renamed-edit-display', await pageContains(session, renamed, koreanEdit), {page: renamed});
+    const koreanUi = await editBlockThroughUi(session, renamed, koreanBlock.uuid, koreanEdit);
+    record('normal-renamed-edit-display', koreanUi.editorValueMatched && koreanUi.displayedAfterEscape,
+      {page: renamed, editorValueMatched: koreanUi.editorValueMatched,
+       displayedAfterEscape: koreanUi.displayedAfterEscape});
 
     await OP.sleep(2500);
-    events = await readEvents(session.page);
+    let events = await readEvents(session.page);
     out.preQuitEvents = events;
     out.rejectedOperation = {liveExercised: false,
       reason: 'No existing safe OG operation reliably produces a post-intent filesystem rejection without changing permissions or manufacturing a broad path/filesystem failure; failure remains synthetic-suite coverage.'};
@@ -246,28 +249,41 @@ async function run() {
     };
     const englishPair = findPair('save', englishPath);
     const renamedPair = findPair('save', renamedPath);
+    const renamePair = findPair('rename', renamedPath);
     assert(englishPair.pending && englishPair.completed, 'English quit flush lacked paired save evidence');
     assert(renamedPair.pending && renamedPair.completed, 'renamed Korean quit flush lacked paired save evidence');
+    assert(renamePair.pending && renamePair.completed, 'Korean quit flush lacked paired rename evidence');
     const englishAbsolute = B.assertInsideAllowedRoot('English note', path.join(graph, englishPath));
     const englishBytes = fs.readFileSync(englishAbsolute, 'utf8');
     const renamedBytes = fs.readFileSync(newAbsolute, 'utf8');
     record('save-pending-before-completion-and-bytes', englishPair.pending.sequence < englishPair.completed.sequence &&
-      englishPair.pending.cause['graph-id'] === graph && englishPair.completed.cause['graph-id'] === graph &&
+      englishPair.pending.cause['graph-id'] === expectedGraphId &&
+      englishPair.completed.cause['graph-id'] === expectedGraphId &&
       englishBytes.includes(englishEdit),
       {causeId: englishPair.pending.cause['cause-id'], pending: englishPair.pending.sequence,
-       completed: englishPair.completed.sequence, graphId: graph, path: englishPath,
+       completed: englishPair.completed.sequence, graphId: expectedGraphId, path: englishPath,
        bytesSha256: sha256(englishBytes), uiEditorOpened: englishUi.editorOpened,
        persistedDuringOwnedQuit: true});
+    record('korean-rename-intent-before-completion', renamePair.pending.sequence < renamePair.completed.sequence &&
+      renamePair.pending.cause['graph-id'] === expectedGraphId &&
+      renamePair.completed.cause['graph-id'] === expectedGraphId &&
+      renamePair.pending.cause['old-path'] === oldKoreanPath &&
+      renamePair.pending.cause['new-path'] === renamedPath &&
+      !fs.existsSync(oldAbsolute) && fs.existsSync(newAbsolute),
+      {causeId: renamePair.pending.cause['cause-id'], intent: renamePair.pending.sequence,
+       completed: renamePair.completed.sequence, graphId: expectedGraphId,
+       oldPath: oldKoreanPath, newPath: renamedPath, persistedDuringOwnedQuit: true});
     record('edit-after-rename', renamedPair.pending.sequence < renamedPair.completed.sequence &&
-      renamedPair.pending.cause['graph-id'] === graph && renamedPair.completed.cause['graph-id'] === graph &&
+      renamedPair.pending.cause['graph-id'] === expectedGraphId &&
+      renamedPair.completed.cause['graph-id'] === expectedGraphId &&
       renamedBytes.includes(koreanEdit) && !fs.existsSync(oldAbsolute) && fs.existsSync(newAbsolute),
       {causeId: renamedPair.pending.cause['cause-id'], pending: renamedPair.pending.sequence,
-       completed: renamedPair.completed.sequence, graphId: graph, path: renamedPath,
+       completed: renamedPair.completed.sequence, graphId: expectedGraphId, path: renamedPath,
        bytesSha256: sha256(renamedBytes), persistedDuringOwnedQuit: true});
     const raw = streamedEvents.filter(event => event.event === 'raw-watcher-observation');
     const graphIds = new Set(raw.map(event => event.observation?.['graph-id']).filter(Boolean));
     record('raw-watcher-observed-without-suppression', raw.length > 0 &&
-      [...graphIds].every(id => id === graph),
+      [...graphIds].every(id => id === expectedGraphId),
       {count: raw.length, types: [...new Set(raw.map(event => event.observation?.type))], graphIds: [...graphIds],
        paths: [...new Set(raw.map(event => event.observation?.path).filter(Boolean))]});
 
@@ -283,9 +299,13 @@ async function run() {
     out.status = 'failed';
     out.failure = {message: String(error && error.message), stack: String(error && error.stack)};
     if (session) out.eventsAtFailure = await readEvents(session.page).catch(() => null);
+    out.streamedEventsAtFailure = streamedEvents;
     throw error;
   } finally {
-    if (session) out.emergencyClose = await APP.close(session).catch(error => ({error: String(error)}));
+    if (session) {
+      out.emergencyClose = await APP.close(session).catch(error => ({error: String(error)}));
+      out.streamedEventsAfterEmergencyClose = streamedEvents;
+    }
     if (reopened) out.emergencyReopenClose = await APP.close(reopened).catch(error => ({error: String(error)}));
     if (profile) out.profileCleanup = FP.restore(profile, {label: 'f28-observation'});
     save(evidenceFile, out);

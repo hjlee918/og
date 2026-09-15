@@ -52,8 +52,7 @@
   "Observation-build wrapper for the actual File System Access write. The
   disabled path invokes the existing operation directly and adds no promise."
   [repo path content save!]
-  (if (or (not (og-sync-bridge/enabled?))
-          (og-sync-bridge/observation-only?))
+  (if-not (og-sync-bridge/enabled?)
     (save!)
     (let [cause (og-sync-bridge/save-pending! repo path content)]
       (try
