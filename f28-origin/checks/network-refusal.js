@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const VERSION = require('../src/network-bootstrap').VERSION;
-function assertReady(executablePath) {
-  const built = require('../../f28-refpath/checks/packaged-app').resolve('Logseq-OG-F28-OriginExp');
+function assertReady(executablePath, preferredBuild = 'Logseq-OG-F28-OriginExp') {
+  const built = require('../../f28-refpath/checks/packaged-app').resolve(preferredBuild);
   if (executablePath && path.resolve(executablePath) !== built.exe) throw Error('activation blocked: wrong executable');
   const m = built.preflight.manifest;
   if (!built.preflight.ok || m.builtFrom.dirty || !m.artifacts['network-bootstrap.js'])
@@ -17,10 +17,10 @@ function assertReady(executablePath) {
   }
   return built;
 }
-function launchWith(launch) {
+function launchWith(launch, preferredBuild = 'Logseq-OG-F28-OriginExp') {
   return async opts => {
     if (!opts || !opts.executablePath) throw Error('activation blocked: explicit executable required');
-    assertReady(opts.executablePath);
+    assertReady(opts.executablePath, preferredBuild);
     const app = await launch(opts);
     try {
       const evidence = await read(app);

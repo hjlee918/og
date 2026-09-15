@@ -58,7 +58,13 @@
 
 (defn handle-changed!
   [type {:keys [dir path content stat global-dir] :as payload}]
-  (og-sync-bridge/observe-watcher! type dir path content stat global-dir)
+  (og-sync-bridge/observe-watcher!
+   type dir path content stat global-dir
+   (when (og-sync-bridge/enabled?)
+     (cond
+       global-dir (state/get-current-repo)
+       (and dir (string/starts-with? dir "memory://")) "local"
+       dir (config/get-local-repo dir))))
   (when dir
     (let [;; Global directory events don't know their originating repo so we rely
           ;; on the client to correctly identify it

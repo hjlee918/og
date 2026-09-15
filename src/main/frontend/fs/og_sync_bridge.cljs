@@ -9,9 +9,11 @@
             [clojure.set :as set]
             [goog.crypt :as crypt]
             [goog.crypt.Sha256]
+            [goog.object :as gobj]
             [promesa.core :as p]))
 
 (goog-define ENABLE-OG-SYNC-BRIDGE false)
+(goog-define ENABLE-OG-BRIDGE-OBSERVATION false)
 
 (def ^:dynamic *test-runtime* nil)
 (defonce ^:private enabled-runtime*
@@ -130,6 +132,71 @@
 (defn- cause-hash
   [content]
   (when (string? content) (sha256 content)))
+
+(def ^:private observation-api-name "__LOGSEQ_OG_BRIDGE_OBSERVATION__")
+(def ^:private observation-schema "frontend.fs.og-sync-bridge.observation/1")
+
+(defn- observation-event
+  [sequence event]
+  (let [cause (:cause event)
+        observation (:observation event)]
+    (cond-> {:schema observation-schema
+             :sequence sequence
+             :recorded-at-ms (.now js/Date)
+             :event (:event event)}
+      cause
+      (assoc :cause (select-keys cause
+                                 [:cause-id :origin :kind :graph-id :path
+                                  :old-path :new-path :content-hash :status]))
+
+      observation
+      (assoc :observation
+             (cond-> (select-keys observation
+                                  [:type :graph-id :dir :path :global-dir])
+               (string? (:content observation))
+               (assoc :content-hash (cause-hash (:content observation))
+                      :content-bytes (count (.encode (js/TextEncoder.)
+                                                     (:content observation))))
+               (map? (:stat observation))
+               (assoc :stat (select-keys (:stat observation) [:mtime :size]))))
+
+      (contains? event :error) (assoc :error (str (:error event)))
+      (contains? event :result) (assoc :result-present true))))
+
+(defn- make-observation-runtime
+  []
+  (let [state (atom {:writes {} :causes {} :observation-sequence 0
+                     :observation-events []})]
+    {:state state
+     :next-id! (fn [kind]
+                 (str "observation-" (name kind) "-"
+                      (inc (count (:causes @state)))))
+     :adapter! (fn [event]
+                 (swap! state
+                        (fn [current]
+                          (let [sequence (inc (:observation-sequence current))]
+                            (-> current
+                                (assoc :observation-sequence sequence)
+                                (update :observation-events conj
+                                        (observation-event sequence event)))))))
+     :rename-content-hash! (fn [_graph-id _old-path] nil)}))
+
+(defn- install-observation-runtime!
+  []
+  (when (and ENABLE-OG-SYNC-BRIDGE ENABLE-OG-BRIDGE-OBSERVATION
+             enabled-runtime*)
+    (let [runtime (make-observation-runtime)]
+      (install-runtime! runtime)
+      (gobj/set
+       js/globalThis observation-api-name
+       (clj->js
+        {:schema observation-schema
+         :mode "observation-only"
+         :read (fn []
+                 (clj->js (:observation-events @(runtime-state runtime))))}))
+      runtime)))
+
+(defonce ^:private observation-runtime (install-observation-runtime!))
 
 (defn save-pending!
   "Register an exact save cause. Returns an opaque token for completion/failure."
@@ -496,39 +563,43 @@
 (defn observe-watcher!
   "Record a raw watcher event and match it only against a unique complete
   retained cause. Zero/multiple matches remain ordinary."
-  [type dir path content stat global-dir]
-  (when (enabled?)
-    (let [runtime (current-runtime)
-          observation {:type type :dir dir :path path :content content
-                       :stat stat :global-dir global-dir}]
-      (emit! runtime {:event :raw-watcher-observation :observation observation})
-      (if (blocked? runtime)
-        {:status :ordinary :code :coordination-blocked}
-        (let [complete (invoke-sync-port runtime :complete-state!
-                                         :watcher-complete-state observation)
-              matches (when complete
-                        (->> (:causes @(runtime-state runtime))
-                             vals
-                             (filter #(contains? #{:completed :reconcile-pending
-                                                  :reconciling :reconciled}
-                                                 (:status %)))
-                             (filter #(complete-state-matches? % complete))
-                             vec))]
-          (cond
-            (not= 1 (count matches))
-            {:status :ordinary :match-count (count matches)}
+  ([type dir path content stat global-dir]
+   (when (enabled?)
+     (observe-watcher! type dir path content stat global-dir ::unbound-graph)))
+  ([type dir path content stat global-dir graph-id]
+   (when (enabled?)
+     (let [runtime (current-runtime)
+           observation (cond-> {:type type :dir dir :path path :content content
+                                :stat stat :global-dir global-dir}
+                         (not= ::unbound-graph graph-id) (assoc :graph-id graph-id))]
+       (emit! runtime {:event :raw-watcher-observation :observation observation})
+       (if (blocked? runtime)
+         {:status :ordinary :code :coordination-blocked}
+         (let [complete (invoke-sync-port runtime :complete-state!
+                                          :watcher-complete-state observation)
+               matches (when complete
+                         (->> (:causes @(runtime-state runtime))
+                              vals
+                              (filter #(contains? #{:completed :reconcile-pending
+                                                   :reconciling :reconciled}
+                                                  (:status %)))
+                              (filter #(complete-state-matches? % complete))
+                              vec))]
+           (cond
+             (not= 1 (count matches))
+             {:status :ordinary :match-count (count matches)}
 
-            (= :local (:origin (first matches)))
-            {:status :completed-local :cause (public-cause (first matches))}
+             (= :local (:origin (first matches)))
+             {:status :completed-local :cause (public-cause (first matches))}
 
-            (= :reconciled (:status (first matches)))
-            {:status :echo :cause (first matches)}
+             (= :reconciled (:status (first matches)))
+             {:status :echo :cause (first matches)}
 
-            (= :reconciling (:status (first matches)))
-            {:status :reconciliation-pending :cause (first matches)}
+             (= :reconciling (:status (first matches)))
+             {:status :reconciliation-pending :cause (first matches)}
 
-            :else
-            (reconcile-incoming! runtime (first matches) observation complete)))))))
+             :else
+             (reconcile-incoming! runtime (first matches) observation complete))))))))
 
 (defn- exact-active-input?
   [inputs]

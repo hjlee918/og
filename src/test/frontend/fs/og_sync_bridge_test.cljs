@@ -275,7 +275,9 @@
                    "change" {:dir "/synthetic" :path "pages/a.md"
                              :content "ordinary local edit" :stat {:mtime 7}}))))
       (is (= 1 (count @calls)))
-      (is (= :raw-watcher-observation (:event (last @(:events runtime))))))))
+      (is (= :raw-watcher-observation (:event (last @(:events runtime)))))
+      (is (= "graph-a"
+             (get-in (last @(:events runtime)) [:observation :graph-id]))))))
 
 (deftest pending-success-failure-and-incoming-write-block
   (let [runtime (test-runtime)]

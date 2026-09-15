@@ -19,9 +19,10 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..', '..');
+const OBSERVATION = process.argv.slice(2).includes('--observation');
 const STATIC = path.join(REPO, 'static');
-const ID = require(path.join(REPO, 'f28-origin', 'src', 'experiment-identity.js'));
-const EXPECTED_OUT = path.resolve(REPO, '..', 'out-originexp');
+const ID = require(path.join(REPO, OBSERVATION ? 'f28-observation' : 'f28-origin', 'src', 'experiment-identity.js'));
+const EXPECTED_OUT = path.resolve(REPO, '..', OBSERVATION ? 'out-f28-observation' : 'out-originexp');
 const PLATFORM = 'darwin';
 const ARCH = process.arch;
 const FORGE_CLI = path.join(STATIC, 'node_modules', '@electron-forge', 'cli', 'dist',
@@ -70,9 +71,6 @@ execFileSync(process.execPath,
   [FORGE_CLI, 'package', `--platform=${PLATFORM}`, `--arch=${ARCH}`],
   { cwd: STATIC, stdio: 'inherit' });
 
-// @electron/packager names the bundle after packagerConfig.name, not
-// productName, so the .app is Logseq-OG-F28-RefPath.app while the display name
-// inside Info.plist (CFBundleName) is "Logseq OG F28 RefPath".
 const appPath = path.join(forge.outDir, `${forge.packagerConfig.name}-${PLATFORM}-${ARCH}`,
                           `${forge.packagerConfig.name}.app`);
 if (!fs.existsSync(appPath)) {

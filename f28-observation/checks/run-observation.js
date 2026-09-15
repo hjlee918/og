@@ -1,0 +1,233 @@
+#!/usr/bin/env node
+'use strict';
+
+// One coherent, owned, observation-only OG runtime batch. Evidence is local
+// beside the development checkout; note text, screenshots, graph data,
+// profiles and binaries are never Git inputs.
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const APP = require('../../f28-refpath/checks/packaged-app');
+const FP = require('../../f28-refpath/checks/fresh-profile');
+const B = require('../../f27-pilot/checks/allowed-root');
+const OP = require('../../f27-pilot/checks/owned-process');
+const NET = require('../../f28-origin/checks/network-refusal');
+const {_electron} = require('../../node_modules/playwright');
+
+const REPO = path.resolve(__dirname, '..', '..');
+const EVIDENCE = path.resolve(REPO, '..', '..', 'evidence');
+const BUILD = 'Logseq-OG-F28-Observation';
+const API = '__LOGSEQ_OG_BRIDGE_OBSERVATION__';
+const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+const assert = (value, message) => { if (!value) throw new Error(message); };
+const save = (file, value) => {
+  fs.mkdirSync(path.dirname(file), {recursive: true});
+  const temporary = `${file}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
+  fs.renameSync(temporary, file);
+};
+
+function ownedProcesses(executable) {
+  const name = path.basename(executable);
+  return require('child_process').execFileSync('ps', ['-axo', 'pid=,comm='], {encoding: 'utf8'})
+    .split('\n').filter(line => line.includes(name));
+}
+
+function graphPath(stamp) {
+  const root = B.allowedRootReal();
+  const child = path.join(root, `f28-og-observation-${stamp}-${crypto.randomBytes(4).toString('hex')}`);
+  assert(path.dirname(child) === root, 'synthetic graph is not a direct child of the approved root');
+  fs.mkdirSync(child, {recursive: false});
+  return B.assertInsideAllowedRoot('owned observation graph', child);
+}
+
+function causeEvents(events, kind, pathValue) {
+  return events.filter(event => event.cause && event.cause.kind === kind &&
+    [event.cause.path, event.cause['old-path'], event.cause['new-path']].includes(pathValue));
+}
+
+async function readEvents(page) {
+  return page.evaluate(name => {
+    const api = window[name];
+    if (!api || api.schema !== 'frontend.fs.og-sync-bridge.observation/1' ||
+        api.mode !== 'observation-only' || typeof api.read !== 'function') return null;
+    return api.read();
+  }, API);
+}
+
+async function waitForEventCount(page, count) {
+  await page.waitForFunction(({name, count}) => {
+    const api = window[name];
+    return api && typeof api.read === 'function' && api.read().length >= count;
+  }, {name: API, count}, {timeout: 30000});
+}
+
+async function api(page, method, ...args) {
+  return page.evaluate(({method, args}) => {
+    const fn = window.logseq && window.logseq.api && window.logseq.api[method];
+    if (typeof fn !== 'function') throw new Error(`missing Logseq API ${method}`);
+    return fn(...args);
+  }, {method, args});
+}
+
+async function pageContains(session, pageName, expected) {
+  await session.goTo(pageName);
+  return session.page.evaluate(value => document.body.innerText.includes(value), expected);
+}
+
+async function run() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const evidenceFile = path.join(EVIDENCE, `f28-observation-${stamp}.json`);
+  const out = {schema: 'f28-og-live-observation/1', stamp, status: 'preparing', checks: [],
+    simulation: false, synchronizationEnabled: false, contentRecorded: false};
+  const record = (id, ok, detail) => {
+    out.checks.push({id, ok, detail});
+    save(evidenceFile, out);
+    console.log(`${ok ? 'PASS' : 'FAIL'} ${id}`);
+    assert(ok, id);
+  };
+  let profile;
+  let session;
+  let reopened;
+  try {
+    const built = APP.resolve(BUILD);
+    assert(built.preflight.ok, 'observation package preflight failed');
+    const manifest = built.preflight.manifest;
+    assert(manifest.builtFrom && !manifest.builtFrom.dirty, 'observation package is not from clean source');
+    assert(manifest.experiment?.bridge?.mode === 'observation-only', 'manifest lacks observation-only bridge mode');
+    assert(manifest.experiment?.bridge?.persistence === false &&
+           manifest.experiment?.bridge?.synchronizationPorts === false,
+           'manifest does not refuse persistence/synchronization ports');
+    assert(!ownedProcesses(built.exe).length, 'an observation package process is already running');
+    out.build = {id: manifest.pilotBuildId, source: manifest.builtFrom, productName: manifest.productName,
+      bundleId: manifest.bundleId, packageName: manifest.packageName, architecture: manifest.host.arch,
+      bridge: manifest.experiment.bridge, executable: built.exe};
+    record('identity-clean-observation-build', true, out.build);
+
+    profile = FP.swapAside(built.identity, {stamp});
+    out.profile = {root: profile.root, preExisting: profile.preExisting, preserved: profile.preserved};
+    const graph = graphPath(stamp);
+    out.graph = graph;
+    record('canonical-owned-live-target', fs.realpathSync(graph) === graph && graph !== B.allowedRootReal(), {graph});
+
+    const launch = NET.launchWith(options => _electron.launch(options), BUILD);
+    const bad = path.join(path.dirname(B.allowedRootReal()), 'f28-observation-inert-probe');
+    const errors = {record() {}, phase() {}, endPhase() {}, entries() { return []; }, phases() { return []; }};
+    session = await APP.open({built, graph, bad, errors, say: console.log,
+      record: (id, title, ok, detail) => record(`launch-${id}`, ok, {title, detail}),
+      phase: () => {}, deps: {launch}});
+    const isolation = await session.app.evaluate(({app}) => ({userData: app.getPath('userData'),
+      sessionData: app.getPath('sessionData'), home: app.getPath('home')}));
+    record('fresh-isolated-profile', Object.values(isolation).every(value => value.startsWith(profile.root + path.sep)), isolation);
+    const plugins = FP.pluginsDirIn(profile.root);
+    const pluginNames = fs.existsSync(plugins) ? fs.readdirSync(plugins).filter(name => name !== '.DS_Store') : [];
+    record('no-plugins-or-credentials', pluginNames.length === 0, {pluginCount: pluginNames.length});
+    const network = await NET.read(session.app);
+    record('pre-navigation-network-refusal', network?.active && network.sessions >= 1, network);
+    const initialEvents = await readEvents(session.page);
+    record('observation-runtime-only', Array.isArray(initialEvents), {schema: 'frontend.fs.og-sync-bridge.observation/1', initialCount: initialEvents?.length});
+
+    const english = `Observation English ${stamp.slice(0, 10)}`;
+    const korean = `관찰 한국어 ${stamp.slice(0, 10)}`;
+    const renamed = `관찰 이름변경 ${stamp.slice(0, 10)}`;
+    const englishCreate = 'Synthetic English note created through OG.';
+    const koreanCreate = 'OG를 통해 만든 합성 한국어 노트입니다.';
+    const englishEdit = 'Synthetic English note edited and saved through OG.';
+    const koreanEdit = '이름을 바꾼 뒤 OG에서 다시 편집하고 저장했습니다.';
+
+    const beforeCreate = (await readEvents(session.page)).length;
+    await api(session.page, 'create_page', english, {}, {redirect: false, createFirstBlock: false, format: 'markdown'});
+    const englishBlock = await api(session.page, 'insert_block', english, englishCreate, {focus: false});
+    await api(session.page, 'create_page', korean, {}, {redirect: false, createFirstBlock: false, format: 'markdown'});
+    const koreanBlock = await api(session.page, 'insert_block', korean, koreanCreate, {focus: false});
+    await waitForEventCount(session.page, beforeCreate + 4);
+    record('created-english-and-korean-via-og',
+      englishBlock && englishBlock.uuid && koreanBlock && koreanBlock.uuid,
+      {englishBlock: englishBlock.uuid, koreanBlock: koreanBlock.uuid});
+
+    const beforeEdit = (await readEvents(session.page)).length;
+    await api(session.page, 'update_block', englishBlock.uuid, englishEdit, {});
+    await waitForEventCount(session.page, beforeEdit + 2);
+    let events = await readEvents(session.page);
+    const editTail = events.slice(beforeEdit);
+    const pending = editTail.find(event => event.event === 'save-pending');
+    const completed = pending && editTail.find(event => event.event === 'save-completed' &&
+      event.cause?.['cause-id'] === pending.cause['cause-id']);
+    assert(pending && completed, 'English edit did not yield paired save evidence');
+    const englishPath = pending.cause.path;
+    const englishAbsolute = B.assertInsideAllowedRoot('English note', path.join(graph, englishPath));
+    const englishBytes = fs.readFileSync(englishAbsolute, 'utf8');
+    record('save-pending-before-completion-and-bytes', pending.sequence < completed.sequence &&
+      pending.cause['graph-id'] === completed.cause['graph-id'] && englishBytes.includes(englishEdit),
+      {causeId: pending.cause['cause-id'], pending: pending.sequence, completed: completed.sequence,
+       graphId: pending.cause['graph-id'], path: englishPath, bytesSha256: sha256(englishBytes)});
+    record('normal-english-display', await pageContains(session, english, englishEdit), {page: english});
+
+    const beforeRename = events.length;
+    await api(session.page, 'rename_page', korean, renamed);
+    await waitForEventCount(session.page, beforeRename + 2);
+    events = await readEvents(session.page);
+    const renameTail = events.slice(beforeRename);
+    const intent = renameTail.find(event => event.event === 'rename-intent');
+    const renameCompleted = intent && renameTail.find(event => event.event === 'rename-completed' &&
+      event.cause?.['cause-id'] === intent.cause['cause-id']);
+    assert(intent && renameCompleted, 'Korean rename did not yield paired evidence');
+    const oldAbsolute = B.assertInsideAllowedRoot('old Korean note', path.join(graph, intent.cause['old-path']));
+    const newAbsolute = B.assertInsideAllowedRoot('renamed Korean note', path.join(graph, intent.cause['new-path']));
+    record('korean-rename-intent-before-completion', intent.sequence < renameCompleted.sequence &&
+      intent.cause['graph-id'] === renameCompleted.cause['graph-id'] &&
+      !fs.existsSync(oldAbsolute) && fs.existsSync(newAbsolute),
+      {causeId: intent.cause['cause-id'], intent: intent.sequence, completed: renameCompleted.sequence,
+       graphId: intent.cause['graph-id'], oldPath: intent.cause['old-path'], newPath: intent.cause['new-path']});
+    record('normal-korean-renamed-display', await pageContains(session, renamed, koreanCreate), {page: renamed});
+
+    const beforeRenamedEdit = events.length;
+    await api(session.page, 'update_block', koreanBlock.uuid, koreanEdit, {});
+    await waitForEventCount(session.page, beforeRenamedEdit + 2);
+    events = await readEvents(session.page);
+    const renamedSaves = events.slice(beforeRenamedEdit).filter(event => event.cause?.path === intent.cause['new-path']);
+    const renamedBytes = fs.readFileSync(newAbsolute, 'utf8');
+    record('edit-after-rename', renamedSaves.some(event => event.event === 'save-pending') &&
+      renamedSaves.some(event => event.event === 'save-completed') && renamedBytes.includes(koreanEdit),
+      {path: intent.cause['new-path'], bytesSha256: sha256(renamedBytes)});
+    record('normal-renamed-edit-display', await pageContains(session, renamed, koreanEdit), {page: renamed});
+
+    await OP.sleep(2500);
+    events = await readEvents(session.page);
+    const raw = events.filter(event => event.event === 'raw-watcher-observation');
+    const graphIds = new Set(raw.map(event => event.observation?.['graph-id']).filter(Boolean));
+    record('raw-watcher-observed-without-suppression', raw.length > 0 &&
+      [...graphIds].every(id => id === pending.cause['graph-id']),
+      {count: raw.length, types: [...new Set(raw.map(event => event.observation?.type))], graphIds: [...graphIds],
+       paths: [...new Set(raw.map(event => event.observation?.path).filter(Boolean))]});
+    out.liveEvents = events;
+    out.rejectedOperation = {liveExercised: false,
+      reason: 'No existing safe OG operation reliably produces a post-intent filesystem rejection without changing permissions or manufacturing a broad path/filesystem failure; failure remains synthetic-suite coverage.'};
+    save(evidenceFile, out);
+
+    out.firstClose = await APP.close(session); session = null;
+    record('first-owned-quit-clean', out.firstClose.stillAlive.length === 0, out.firstClose);
+    assert(!ownedProcesses(built.exe).length, 'owned observation process remained before reopen');
+
+    reopened = await APP.open({built, graph, bad, errors, say: console.log,
+      record: (id, title, ok, detail) => record(`reopen-${id}`, ok, {title, detail}),
+      phase: () => {}, deps: {launch}});
+    record('reopen-saved-english', await pageContains(reopened, english, englishEdit), {page: english});
+    record('reopen-saved-renamed-korean', await pageContains(reopened, renamed, koreanEdit), {page: renamed});
+    out.finalClose = await APP.close(reopened); reopened = null;
+    record('final-owned-quit-clean', out.finalClose.stillAlive.length === 0 && !ownedProcesses(built.exe).length, out.finalClose);
+    out.status = 'passed';
+  } catch (error) {
+    out.status = 'failed';
+    out.failure = {message: String(error && error.message), stack: String(error && error.stack)};
+    throw error;
+  } finally {
+    if (session) out.emergencyClose = await APP.close(session).catch(error => ({error: String(error)}));
+    if (reopened) out.emergencyReopenClose = await APP.close(reopened).catch(error => ({error: String(error)}));
+    if (profile) out.profileCleanup = FP.restore(profile, {label: 'f28-observation'});
+    save(evidenceFile, out);
+    console.log(`Evidence: ${evidenceFile}`);
+  }
+}
+
+run().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

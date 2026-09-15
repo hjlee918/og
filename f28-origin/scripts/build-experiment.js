@@ -33,11 +33,13 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..', '..');
+const OBSERVATION = process.argv.slice(2).includes('--observation');
 const STATIC = path.join(REPO, 'static');
-const SRC = path.join(REPO, 'f28-origin', 'src');
+const SRC = path.join(REPO, OBSERVATION ? 'f28-observation' : 'f28-origin', 'src');
+const ORIGIN_SRC = path.join(REPO, 'f28-origin', 'src');
 const PILOT_SRC = path.join(REPO, 'f27-pilot', 'src');
 const ID = require(path.join(SRC, 'experiment-identity.js'));
-const TRANSFORM = require(path.join(SRC, 'lsplugin-transform.js'));
+const TRANSFORM = require(path.join(ORIGIN_SRC, 'lsplugin-transform.js'));
 const PLUGIN_HOST_BUNDLE = path.join('js', 'lsplugin.core.js');
 const PRESERVED_ICON = path.resolve(REPO, '..', 'out-originexp-preserved-20260911-7e719ea-dracula-predecessor',
   'Logseq-OG-F28-OriginExp-darwin-x64', 'Logseq-OG-F28-OriginExp.app', 'Contents', 'Resources', 'electron.icns');
@@ -100,6 +102,7 @@ function hashStaticAssets() {
 
 // ---------------------------------------------------------------- preconditions
 log('repo', REPO);
+log('mode', OBSERVATION ? 'isolated observation-only' : 'origin experiment');
 
 for (const name of PROTECTED_CHECKOUTS) {
   if (path.basename(REPO) === name || REPO.split(path.sep).includes(name)) {
@@ -166,10 +169,16 @@ try {
     "for (const key of ['openExternal', 'openPath', 'showItemInFolder']) { Object.defineProperty(shell, key, {value: () => { return ipcRenderer.invoke('origin-experiment-refuse'); }, writable: false, configurable: false}); }\n" + anchor));
 }
 
+const APP_CONFIG_MERGE = OBSERVATION
+  ? '{:closure-defines {frontend.fs.og-sync-bridge/ENABLE-OG-SYNC-BRIDGE true '
+    + 'frontend.fs.og-sync-bridge/ENABLE-OG-BRIDGE-OBSERVATION true}}'
+  : null;
 log('compiling :app (compile, local assets, telemetry defines absent)');
 let started = Date.now();
 try {
-  execFileSync('clojure', ['-M:cljs', 'compile', 'app'],
+  const args = ['-M:cljs', 'compile', 'app'];
+  if (APP_CONFIG_MERGE) args.push('--config-merge', APP_CONFIG_MERGE);
+  execFileSync('clojure', args,
                { cwd: REPO, stdio: 'inherit', env: buildEnv() });
 } catch (e) {
   die('the renderer build failed (see output above)');
@@ -187,6 +196,11 @@ if (/sentry|posthog/i.test(defines)) {
   die(`the renderer carries an instrumentation define: ${defines}`);
 }
 log('telemetry defines absent from the renderer');
+if (OBSERVATION &&
+    (!defines.includes('frontend.fs.og-sync-bridge/ENABLE-OG-SYNC-BRIDGE') ||
+     !defines.includes('frontend.fs.og-sync-bridge/ENABLE-OG-BRIDGE-OBSERVATION'))) {
+  die(`the renderer does not carry both observation closure defines: ${defines}`);
+}
 
 const basePathMatch = mainJsHead.match(/CLOSURE_BASE_PATH = '([^']*)'/);
 const closureBasePath = basePathMatch ? basePathMatch[1] : null;
@@ -257,8 +271,8 @@ log('main bundle carries the experimental application origin lsp://logseq.com/')
 for (const f of PILOT_ENTRY_FILES) {
   fs.copyFileSync(path.join(PILOT_SRC, f), path.join(STATIC, f));
 }
-fs.copyFileSync(path.join(SRC, 'experiment-main.js'), path.join(STATIC, 'pilot-main.js'));
-fs.copyFileSync(path.join(SRC, 'network-bootstrap.js'), path.join(STATIC, 'network-bootstrap.js'));
+fs.copyFileSync(path.join(ORIGIN_SRC, 'experiment-main.js'), path.join(STATIC, 'pilot-main.js'));
+fs.copyFileSync(path.join(ORIGIN_SRC, 'network-bootstrap.js'), path.join(STATIC, 'network-bootstrap.js'));
 // The feature's identity, under the name the pilot entry requires.
 fs.copyFileSync(path.join(SRC, 'experiment-identity.js'), path.join(STATIC, IDENTITY_TARGET));
 log('entry files copied:', ENTRY_FILES.join(', '));
@@ -270,9 +284,11 @@ const basePkg = JSON.parse(fs.readFileSync(path.join(REPO, 'resources', 'package
 const pkg = Object.assign({}, basePkg, {
   name: ID.PACKAGE_NAME,
   productName: ID.PRODUCT_NAME,
-  version: `${basePkg.version}-f28originexp.1`,
+  version: `${basePkg.version}-${OBSERVATION ? 'f28observation' : 'f28originexp'}.1`,
   main: 'pilot-main.js',
-  description: 'Isolated local ORIGIN EXPERIMENT build of Logseq OG. Not for distribution.',
+  description: OBSERVATION
+    ? 'Isolated observation-only bridge build of Logseq OG. Not for distribution.'
+    : 'Isolated local ORIGIN EXPERIMENT build of Logseq OG. Not for distribution.',
 });
 // `make`/`publish` must not be reachable from the packaged application.
 delete pkg.scripts;
@@ -320,11 +336,17 @@ const manifest = {
     rendererRevision,
     describedAtBuild: describedNow,
   },
-  closureDefines: { 'electron.pilot/PILOT': true,
-                    'electron.origin-experiment/ORIGIN_EXPERIMENT': true },
+  closureDefines: Object.assign({ 'electron.pilot/PILOT': true,
+                                  'electron.origin-experiment/ORIGIN_EXPERIMENT': true },
+                                OBSERVATION ? {
+                                  'frontend.fs.og-sync-bridge/ENABLE-OG-SYNC-BRIDGE': true,
+                                  'frontend.fs.og-sync-bridge/ENABLE-OG-BRIDGE-OBSERVATION': true,
+                                } : {}),
   buildCommands: [
     'yarn gulp:build',
-    'clojure -M:cljs compile app',
+    APP_CONFIG_MERGE
+      ? `clojure -M:cljs compile app --config-merge '${APP_CONFIG_MERGE}'`
+      : 'clojure -M:cljs compile app',
     `clojure -M:cljs release electron --config-merge '${CONFIG_MERGE}'`,
   ],
   rendererBuild: {
@@ -348,6 +370,12 @@ const manifest = {
       sha256: sha256(fs.readFileSync(path.join(STATIC, PLUGIN_HOST_BUNDLE))),
       productionSha256: sha256(fs.readFileSync(path.join(REPO, 'resources', 'js', 'lsplugin.core.js'))),
     },
+    bridge: OBSERVATION ? {
+      mode: 'observation-only',
+      schema: 'frontend.fs.og-sync-bridge.observation/1',
+      persistence: false,
+      synchronizationPorts: false,
+    } : { mode: 'disabled' },
     note: 'CANDIDATE ONLY. Not an accepted architecture, not an installation, ' +
           'and not a migration of any existing profile.',
   },
