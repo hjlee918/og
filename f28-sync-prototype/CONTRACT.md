@@ -507,6 +507,13 @@ they synchronize nothing between two devices or two processes. The design,
 schemas, orderings and recovery table are in
 [PERSISTENT_IDENTITY_DESIGN.md](./PERSISTENT_IDENTITY_DESIGN.md).
 
+The second anchored root was approved by the user for testing on 2026-09-15,
+after this implementation had already been built and committed. The preceding
+batch had been instructed to stop and explain rather than implement it, and did
+not stop; the later approval is forward-looking and does not retroactively make
+that a compliant sequence. Any further root, authority expansion or weakened
+guard requires a separate user decision.
+
 The existing verified helpers could not perform this stage. Both are anchored to
 one compile-time root and address every directory as a single component inside
 one `<run>/<case>` beneath it, so neither can reach a profile under
@@ -538,13 +545,37 @@ enforces its exact key set and refuses any replica, device, binding, cursor,
 lock, lease, token, secret, credential or absolute-path material at any depth.
 The device record (`f28-device-record/1`) is the only place a replica ID, device
 ID and the exact transaction/graph/replica binding — run, graph directory, device
-and inode — are stored, and it never travels with the graph.
+and inode — are stored, and it never travels with the graph. It also binds the
+profile it lives in by run, profile directory, device and inode, so a device
+record copied or moved into another owned profile is refused rather than accepted.
+
+Each owned run/profile pair carries one cooperative lock at `<profileDir>/LOCK`,
+opened relative to the anchored profile directory with `O_NOFOLLOW`, required to
+be an ordinary file, taken shared for reads and exclusively for mutations, and
+held for the whole command. It serializes participating helper invocations only:
+OG, Finder, cloud agents and external editors do not honour it, it is not a
+durability mechanism, and end-to-end serialization of two concurrent adapter
+processes has not been tested. Every command also records the device/inode of the
+anchored graph and profile directories and re-verifies both before reporting
+success, which detects a directory replaced between open and completion without
+preventing it.
+
+The unchanged-note claim is a hash over Markdown/Org notes only, by exact
+relative path and exact bytes. Any other regular file in the graph tree is
+counted and reported separately and never mixed into that hash, so an
+operating-system file written beside the notes neither changes the hash nor is
+silently absorbed.
 
 Cross-directory atomicity does not exist here and is not claimed. Each record
-write refuses a non-regular destination, stages under a fresh per-attempt
-unpredictable `.pending` name with `O_CREAT|O_EXCL|O_NOFOLLOW`, `F_FULLFSYNC`s,
-renames within that one directory, syncs it, then reopens the installed file with
-`O_NOFOLLOW`, matches the staged inode and compares exact bytes. One record write
+write states the exact state it requires its destination to be in — absent, an
+exact content hash, or `any` for a fixture write — and the helper rechecks that
+expectation immediately before the rename, under the lock, rather than trusting
+the caller's earlier read; a publication derived from a stale read refuses and
+preserves what is actually there. Each write refuses a non-regular destination,
+stages under a fresh per-attempt unpredictable `.pending` name with
+`O_CREAT|O_EXCL|O_NOFOLLOW`, `F_FULLFSYNC`s, renames within that one directory,
+syncs it, then reopens the installed file with `O_NOFOLLOW`, matches the staged
+inode and compares exact bytes. One record write
 is atomic for a reader of that one directory; a two-tree batch is not. A pending
 file retained from an interrupted attempt is never reopened, truncated or reused:
 it stays as evidence while the retry stages under a new name.
@@ -584,12 +615,15 @@ retained and reported as evidence rather than treated as a read error, and every
 writing entry point refuses while any record is malformed.
 
 Unreleased limits are unchanged and inherited. Anchored component-by-component
-opens with `O_NOFOLLOW` refuse traversal, symlinked notes, symlinked ancestors and
-a symlinked sidecar container, and refuse the substitutions visible at those
-checks; they do not make the sequence race-free against a process that relocates
-an already-open ancestor between checks, and this is not an OS sandbox. Injected
-failures establish ordering and recovery classification only — they do not
-establish storage-hardware or power-loss durability. Nothing here runs a watcher,
+opens with `O_NOFOLLOW` refuse traversal, symlinked notes, symlinked ancestors, a
+symlinked sidecar container and a symlinked lock, and the destination
+precondition refuses the substitutions visible at those checks; none of this
+makes the sequence race-free against a process that relocates an already-open
+ancestor between checks, which is at best detected afterwards by the identity
+re-verification and is never prevented. This is not an OS sandbox, and no
+cross-process or cloud-storage guarantee is claimed. Injected failures establish
+ordering and recovery classification only — they do not establish
+storage-hardware or power-loss durability, and no real power-loss test was run. Nothing here runs a watcher,
 launches an application, contacts a network, account or service, imports anything,
 or is enabled in any package. Real OG enrollment, a sidecar in a real graph and
 any enabled build remain separate future approvals.

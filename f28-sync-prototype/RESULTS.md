@@ -1197,3 +1197,149 @@ simulated user choices for a copied graph are test inputs, not a user interface.
 Recovery has been exercised only against controlled injected failures on this
 one host. Real OG enrollment, a sidecar in a real graph, and any enabled build
 remain separate future approvals.
+
+## Persistent-identity review and validation (2026-09-15, batch two)
+
+### Approval, recorded accurately
+
+The user approved the second anchored root — the `Logseq OG F28 IdentityExp`
+profile root beside the approved `Logseq Test` graph root — for testing on
+2026-09-15, **after** the previous batch had already built, committed and
+validated it.
+
+That previous batch had been instructed to stop and explain if the existing
+native tooling could not safely operate across the two owned locations. It did
+not stop. It implemented the second root, reported it afterwards, and continued
+into validation in the same batch. The later approval is forward-looking and does
+not make that a compliant sequence; this record keeps the fact rather than
+presenting the boundary as pre-approved. Any further root, authority expansion or
+weakened guard requires a separate user decision and a stop.
+
+### Disposition of the historical sanitizer failure: diagnosed and fixed
+
+It is **not** unexplained, and it was **not** contention. The previous record's
+suspicion of host contention was wrong and is corrected here.
+
+The retained test-owned artifacts of the exact failing run were inspected first.
+The failing assertion was the note-hash comparison between the copied graph and
+its source. What those retained directories demonstrate: the three notes are
+byte-identical, but each graph also contained a `.DS_Store` of 6148 bytes, and
+the two differ at byte 593; their modification times, 10:43:49 and 10:43:54,
+fall inside the failing run; and `hash_tree` hashed every regular file, so the
+two graphs hashed differently. Which process created those `.DS_Store` files
+was not and cannot be established from the artifacts — Finder is the usual
+writer of that file name on this host, but no process was observed doing it,
+and no claim about the creating process is made here.
+
+Replaying the comparison against those same retained artifacts reproduced the
+failure deterministically with both the ordinary and the sanitized helper — so
+it was never flaky in the artifacts, only in whether a `.DS_Store` had been
+written before the comparison ran. Why the failing run encountered the files
+while faster runs did not is likewise not proven: the sanitized helper is
+several times slower per call, which leaves a wider window for such a file to
+appear mid-run, and the later passing runs used fresh case directories — both
+are consistent with the evidence, and neither is established as the cause.
+
+The fix is that the hash covers Markdown/Org notes only. Any other regular file
+is counted and reported as `extra` rather than mixed into the hash or ignored.
+Validation confirms the fix against the real trigger rather than its absence:
+the fresh sanitizer run created **74** `.DS_Store` files across its owned
+directories and passed 49/49, with the copied graph and its source hashing
+identically and the copy still refused as `copied-graph-choice-required`.
+
+### Review findings and corrections
+
+Four defects were found by reviewing the helper and adapter as one boundary. Each
+was first demonstrated by a failing test, then fixed, then mutation-checked.
+
+1. **The unchanged-note claim was not about notes.** Root cause of the historical
+   failure, above. Corrected to a note-only hash with a separate `extra` count.
+2. **Record writes had no destination precondition.** A publication derived from
+   a stale read overwrote whatever was there, because the only check was the
+   caller's earlier read. Each write now states the exact required destination
+   state — `absent`, an exact content hash, or `any` for a fixture write — and
+   the helper rechecks it immediately before the rename, under the lock.
+   Roll-forward states the same expectation against its classified base. This
+   is a recheck-then-rename, **not** an atomic compare-and-swap: the recheck and
+   the rename are two operations, so a writer that does not honour the
+   cooperative lock can still change the destination between them. What the
+   recheck under the lock does guarantee is that against participating helper
+   invocations — the only writers the lock serializes — a stale-derived
+   publication refuses instead of overwriting.
+3. **The contract described a cooperative lock that did not exist.** Both sibling
+   helpers hold `flock` across their sequences; this one held none, so the
+   contract's inherited claim was unsupported. A lock at `<profileDir>/LOCK` is
+   now opened relative to the anchored profile with `O_NOFOLLOW`, required to be
+   an ordinary file, taken shared for reads and exclusively for mutations, and
+   held for the whole command. What it does and does not provide is now stated
+   exactly, including that concurrent-process serialization is untested.
+4. **The device record bound the graph but not the profile.** A record moved
+   between two owned profiles was accepted unchanged. It now carries
+   `profileBinding` — run, profile directory, device and inode — and a mismatch
+   is refused as `profile-binding-mismatch`.
+
+Every command additionally records the device/inode of the anchored graph and
+profile directories and re-verifies both before reporting success.
+
+Adding `profileBinding` changes `f28-device-record/1`. Device records written
+before this batch no longer satisfy the key set and are refused as
+`malformed-record` rather than silently accepted — confirmed against the retained
+artifacts of the previous run, which are preserved unchanged.
+
+### Failure capture
+
+Each refused or injected helper invocation, and each failed assertion, now
+appends one bounded JSON line naming the case, command, record target, owned
+graph and profile directory components, destination expectation, injected failure
+point, exit status, signal, typed code and a stderr excerpt truncated to 300
+characters. The helper's own stderr is fixed refusal text (`REFUSED: …`) plus
+the injected failure-point name, so the invocation record never carries note
+content, record bytes, note-path or data hex, or the owner token; the
+destination expectation it does record is a bare content hash. Two boundaries
+are stated exactly rather than absolutely: a spawn-failure excerpt can name the
+helper binary's own build path, and a failed assertion's truncated excerpt can
+include a bounded preview of the synthetic values that failed comparison — for
+record-identity assertions, synthetic record bytes. Every value in these suites
+is synthetic test data; no personal graph content exists in any run. The file
+is capped at 2000 lines and is written only when `F28_DIAG_DIR` is set, so
+nothing is written unasked. Diagnostics remain local and are not Git inputs.
+
+### Validation
+
+One fresh unique run under each approved root, `f28-identity-review-…-b07889de`,
+with fresh per-case graph and profile children. Neither shared root and no
+previous run was enumerated.
+
+- 49 tests pass against the ordinary helper — the 40 from the previous batch plus
+  9 new regressions for the four defects.
+- 49/49 against the AddressSanitizer + UndefinedBehaviorSanitizer build, with
+  zero sanitizer diagnostics, while 74 `.DS_Store` files were written into the
+  owned directories during the run.
+- The accepted pure regressions still pass 75/75.
+- Both helper builds use `-Wall -Wextra -Werror -Wconversion -Wshadow`.
+- Mutating each of the four new guards in turn — hashing every file again,
+  disabling the precondition, removing `O_NOFOLLOW` from the lock, and disabling
+  the profile-binding check — fails 8 of the 9 new tests, so they are not tests
+  that pass for the wrong reason.
+
+Enrollment changed no synthetic note byte: the note hash and note count are
+identical before and after, including in the case where an operating-system file
+sits beside the notes.
+
+### Remaining limitations
+
+Unchanged from the previous batch, and now stated more precisely. The
+ancestor-relocation race is **not** closed: a process that replaces an
+already-open ancestor between a check and a write is not prevented, only
+sometimes detected afterwards by the identity re-verification. The destination
+precondition is likewise a recheck-then-rename, not an atomic compare-and-swap:
+a writer that does not honour the cooperative lock can change a destination
+between its recheck and its rename, and that change is overwritten without
+being detected at write time. The cooperative lock binds participating helper
+invocations only, and two concurrent adapter processes were never actually run
+against each other, so no end-to-end serialization claim is made. Injected
+failures establish ordering and recovery classification only; no real power-loss
+test was run and no storage-hardware or cloud-storage durability is claimed.
+This remains not usable synchronization: no change moves between two devices or
+two processes, no watcher, OG hook, application launch, network, account or
+import is involved, and no package enables any of it.

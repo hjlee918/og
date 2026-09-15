@@ -11,6 +11,8 @@
  */
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const nodePath = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { applyOperation, createState, stableStringify } = require('./core');
 const {
@@ -30,15 +32,71 @@ const SIDECAR_KEYS = [
 ];
 const DEVICE_KEYS = [
   'acceptedSnapshotFingerprint', 'acceptedTransactionId', 'deviceId', 'graphBinding',
-  'graphId', 'metadataRevision', 'replica', 'replicaId', 'schema', 'selectedGeneration',
-  'sidecarHash',
+  'graphId', 'metadataRevision', 'profileBinding', 'replica', 'replicaId', 'schema',
+  'selectedGeneration', 'sidecarHash',
 ];
 /* Key names and substrings that must never reach the portable sidecar. */
 const DEVICE_LOCAL_KEYS = [
   'replicaId', 'deviceId', 'graphBinding', 'sidecarHash', 'cursor', 'cursors',
   'lock', 'locks', 'lease', 'token', 'secret', 'credential', 'credentials',
-  'hostname', 'profilePath', 'absolutePath', 'pendingObservations',
+  'hostname', 'profilePath', 'profileBinding', 'absolutePath', 'pendingObservations',
 ];
+
+/*
+ * Bounded local failure capture. Every refused or injected helper invocation,
+ * and every failed assertion the caller reports, is appended as one JSON line
+ * naming the case, the command, the exit status and a truncated diagnostic.
+ *
+ * It records synthetic case and directory component names and helper refusal
+ * text only. Note content, record bytes, hex payloads, owner tokens and
+ * absolute paths are never written. The file is capped, and the directory is
+ * chosen by the caller through F28_DIAG_DIR so nothing is written unasked.
+ */
+const DIAGNOSTIC_LIMIT = 2000;
+const STDERR_LIMIT = 300;
+let diagnosticCase = null;
+let diagnosticCount = 0;
+
+function diagnosticDirectory() {
+  return process.env.F28_DIAG_DIR || null;
+}
+
+function setDiagnosticCase(name) {
+  diagnosticCase = name;
+}
+
+function recordDiagnostic(kind, entry) {
+  const directory = diagnosticDirectory();
+  if (!directory || diagnosticCount >= DIAGNOSTIC_LIMIT) return;
+  diagnosticCount += 1;
+  const line = JSON.stringify({
+    schema: 'f28-identity-diagnostic/1',
+    at: new Date().toISOString(),
+    case: diagnosticCase,
+    kind,
+    ...entry,
+  });
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.appendFileSync(nodePath.join(directory, 'failures.jsonl'), `${line}\n`);
+  } catch (_error) {
+    /* Diagnostics must never mask the failure they describe. */
+  }
+}
+
+function boundedText(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > STDERR_LIMIT ? `${text.slice(0, STDERR_LIMIT)}…` : text;
+}
+
+function recordAssertionFailure(name, error) {
+  recordDiagnostic('assertion', {
+    case: name,
+    errorName: error && error.name,
+    errorCode: error && error.code,
+    message: boundedText(error && error.message),
+  });
+}
 
 class PersistentIdentityError extends Error {
   constructor(code, message) {
@@ -64,6 +122,21 @@ function bytesHash(buffer) {
   return `sha256:${digest(buffer)}`;
 }
 
+/*
+ * The exact state a record write requires its destination to be in, rechecked
+ * by the helper immediately before the rename: `absent`, a bare content hash,
+ * or `any` for fixture writes that deliberately install arbitrary bytes.
+ */
+function expectField(expect) {
+  if (expect === undefined || expect === 'any') return 'any';
+  if (expect === null || expect === 'absent') return 'absent';
+  const bare = String(expect).replace(/^sha256:/, '');
+  if (!/^[0-9a-f]{64}$/.test(bare)) {
+    throw new PersistentIdentityError('invalid-expectation', 'destination expectation is malformed');
+  }
+  return bare;
+}
+
 function encode(request) {
   return [
     'MAGIC\tF28ID1', `COMMAND\t${request.command}`,
@@ -72,6 +145,7 @@ function encode(request) {
     `GRAPHDIR\t${request.graphDirectory}`, `PROFILEDIR\t${request.profileDirectory}`,
     `TX\t${request.transactionId || NO_TRANSACTION}`,
     `ATTEMPT\t${request.attempt || crypto.randomBytes(16).toString('hex')}`,
+    `EXPECT\t${expectField(request.expect)}`,
     `TARGET\t${request.target || 'none'}`,
     `FAILURE\t${request.failurePoint || 'none'}`,
     `NOTEPATHHEX\t${request.notePath ? hex(request.notePath) : ''}`,
@@ -86,15 +160,31 @@ function invoke(context, request) {
     input: encode(merged), encoding: 'utf8', timeout: 10000, maxBuffer: 24 * 1024 * 1024,
   });
   if (result.error) {
+    recordDiagnostic('invocation', {
+      command: merged.command, target: merged.target || 'none',
+      graphDirectory: merged.graphDirectory, profileDirectory: merged.profileDirectory,
+      failurePoint: merged.failurePoint || 'none', exitCode: null,
+      signal: result.signal || null, execError: boundedText(result.error.message),
+    });
     throw new PersistentIdentityError('helper-execution-failed', result.error.message);
   }
   if (result.status !== 0) {
+    const message = (result.stderr || 'identity helper refused').trim();
     const error = new PersistentIdentityError(
-      result.status === 25 ? 'injected-failure' : 'helper-refused',
-      (result.stderr || 'identity helper refused').trim(),
+      result.status === 25 ? 'injected-failure'
+        : /destination precondition failed/.test(message) ? 'destination-precondition-failed'
+          : 'helper-refused',
+      message,
     );
     error.exitCode = result.status;
     error.failurePoint = merged.failurePoint || 'none';
+    recordDiagnostic('invocation', {
+      command: merged.command, target: merged.target || 'none',
+      graphDirectory: merged.graphDirectory, profileDirectory: merged.profileDirectory,
+      expect: expectField(merged.expect), failurePoint: error.failurePoint,
+      exitCode: result.status, signal: result.signal || null,
+      stderr: boundedText(result.stderr), code: error.code,
+    });
     throw error;
   }
   const output = {};
@@ -134,7 +224,7 @@ function initializeOwnedRun(context) {
 function putNote(context, notePath, content) {
   invoke(context, {
     command: 'put-note', notePath, data: Buffer.from(content, 'utf8'),
-    transactionId: digest(`note\0${notePath}\0${content}`),
+    transactionId: digest(`note\0${notePath}\0${content}`), expect: 'any',
   });
 }
 
@@ -144,9 +234,14 @@ function readNote(context, notePath) {
   return data === null ? null : data.toString('utf8');
 }
 
+/*
+ * Hash of the graph's Markdown/Org notes only. `extra` counts other regular
+ * files (a Finder .DS_Store, an editor swap file) so they are visible rather
+ * than silently mixed into a claim about note bytes.
+ */
 function hashGraphNotes(context) {
   const output = invoke(context, { command: 'hash-graph' });
-  return { hash: output.hash, count: Number(output.count) };
+  return { hash: output.hash, count: Number(output.count), extra: Number(output.extra) };
 }
 
 function readRecords(context, transactionId = NO_TRANSACTION) {
@@ -178,6 +273,12 @@ function readRecords(context, transactionId = NO_TRANSACTION) {
       graphDirectory: context.graphDirectory,
       graphDevice: Number(output.graphdevice),
       graphInode: Number(output.graphinode),
+    },
+    profileBinding: {
+      runName: context.runName,
+      profileDirectory: context.profileDirectory,
+      profileDevice: Number(output.profiledevice),
+      profileInode: Number(output.profileinode),
     },
   };
 }
@@ -246,8 +347,8 @@ function buildSidecar({ graphId, metadataRevision, transactionId, snapshot, iden
 }
 
 function buildDeviceRecord({
-  deviceId, replicaId, graphId, graphBinding, transactionId, metadataRevision,
-  snapshot, sidecarHash, replica,
+  deviceId, replicaId, graphId, graphBinding, profileBinding, transactionId,
+  metadataRevision, snapshot, sidecarHash, replica,
 }) {
   return {
     schema: DEVICE_RECORD_SCHEMA,
@@ -255,6 +356,7 @@ function buildDeviceRecord({
     replicaId,
     graphId,
     graphBinding,
+    profileBinding,
     acceptedTransactionId: transactionId,
     metadataRevision,
     acceptedSnapshotFingerprint: snapshot.snapshotFingerprint,
@@ -324,6 +426,17 @@ function openGraph(context, options = {}) {
     if (device.acceptedTransactionId !== sidecar.acceptedTransactionId) {
       throw new PersistentIdentityError('record-mismatch', 'records name different transactions');
     }
+    const profileBinding = device.profileBinding || {};
+    const actualProfile = records.profileBinding;
+    if (profileBinding.runName !== actualProfile.runName
+        || profileBinding.profileDirectory !== actualProfile.profileDirectory
+        || profileBinding.profileDevice !== actualProfile.profileDevice
+        || profileBinding.profileInode !== actualProfile.profileInode) {
+      return {
+        ...base, outcome: 'refused', code: 'profile-binding-mismatch',
+        sidecar, device, recordedBinding: profileBinding, observedBinding: actualProfile,
+      };
+    }
     const binding = device.graphBinding;
     const actual = records.graphBinding;
     if (binding.runName !== actual.runName || binding.graphDirectory !== actual.graphDirectory
@@ -381,14 +494,20 @@ function publish(context, {
     // reconstructs them from a phase flag or from the graph.
     staged: { sidecar: sidecarBytes.toString('utf8'), device: deviceBytes.toString('utf8') },
   };
-  const step = (name, target, data) => {
+  const step = (name, target, data, expect) => {
     try {
       invoke(context, {
-        command: 'write-record', target, transactionId, data,
+        command: 'write-record', target, transactionId, data, expect,
         failurePoint: failure.step === name ? failure.point : 'none',
       });
       return null;
     } catch (error) {
+      if (error.code === 'destination-precondition-failed') {
+        return {
+          outcome: 'refused', code: 'destination-precondition-failed',
+          step: name, transactionId, intent, detail: error.message,
+        };
+      }
       if (error.code !== 'injected-failure') throw error;
       const proven = error.failurePoint === 'before-stage';
       writeEvidence(context, transactionId, {
@@ -402,7 +521,7 @@ function publish(context, {
     }
   };
 
-  const intentResult = step('intent', 'intent', serialize(intent));
+  const intentResult = step('intent', 'intent', serialize(intent), 'absent');
   if (intentResult) return intentResult;
 
   const order = (ordering === 'graph-first'
@@ -410,7 +529,7 @@ function publish(context, {
     : [['device', 'device', deviceBytes], ['sidecar', 'sidecar', sidecarBytes]])
     .filter(([name, , data]) => intent.base[name] !== bytesHash(data));
   for (const [name, target, data] of order) {
-    const failed = step(name, target, data);
+    const failed = step(name, target, data, intent.base[name] || 'absent');
     if (failed) return failed;
   }
 
@@ -479,7 +598,7 @@ function enrollGraph(context, request, options = {}) {
   assertPortable(sidecar, sidecarBytes);
   const deviceBytes = serialize(buildDeviceRecord({
     deviceId: request.deviceId, replicaId: request.replicaId, graphId: request.graphId,
-    graphBinding: records.graphBinding, transactionId,
+    graphBinding: records.graphBinding, profileBinding: records.profileBinding, transactionId,
     metadataRevision: request.metadataRevision, snapshot,
     sidecarHash: bytesHash(sidecarBytes), replica,
   }));
@@ -542,7 +661,10 @@ function rollForward(context, transactionId, classification, staged, intent) {
   }
   for (const [target, data] of writes.filter(([name, data]) =>
     intent.base[name] !== bytesHash(data))) {
-    invoke(context, { command: 'write-record', target, transactionId, data });
+    invoke(context, {
+      command: 'write-record', target, transactionId, data,
+      expect: intent.base[target] || 'absent',
+    });
   }
   invoke(context, { command: 'clear-intent', transactionId });
 }
@@ -660,7 +782,8 @@ function updateIdentity(context, request, options = {}) {
   assertPortable(sidecar, sidecarBytes);
   const deviceBytes = serialize(buildDeviceRecord({
     deviceId: probe.device.deviceId, replicaId: probe.device.replicaId,
-    graphId: accepted.graphId, graphBinding: probe.graphBinding, transactionId,
+    graphId: accepted.graphId, graphBinding: probe.graphBinding,
+    profileBinding: probe.profileBinding, transactionId,
     metadataRevision: request.metadataRevision, snapshot,
     sidecarHash: bytesHash(sidecarBytes), replica,
   }));
@@ -737,7 +860,7 @@ function adoptCopy(context, request, options = {}) {
     });
     const deviceBytes = serialize(buildDeviceRecord({
       deviceId: request.deviceId, replicaId: request.replicaId, graphId: accepted.graphId,
-      graphBinding: probe.graphBinding,
+      graphBinding: probe.graphBinding, profileBinding: probe.profileBinding,
       transactionId: accepted.acceptedTransactionId,
       metadataRevision: accepted.metadataRevision, snapshot,
       sidecarHash: probe.sidecarHash, replica,
@@ -789,7 +912,7 @@ function adoptCopy(context, request, options = {}) {
   assertPortable(sidecar, sidecarBytes);
   const deviceBytes = serialize(buildDeviceRecord({
     deviceId: request.deviceId, replicaId: request.replicaId, graphId: request.graphId,
-    graphBinding: probe.graphBinding, transactionId,
+    graphBinding: probe.graphBinding, profileBinding: probe.profileBinding, transactionId,
     metadataRevision: request.metadataRevision, snapshot,
     sidecarHash: bytesHash(sidecarBytes), replica,
   }));
@@ -807,7 +930,12 @@ function adoptCopy(context, request, options = {}) {
  * callers never reach this; it is exported for the acceptance tests.
  */
 function writeRawRecordForTest(context, target, data, transactionId = NO_TRANSACTION) {
-  invoke(context, { command: 'write-record', target, transactionId, data });
+  invoke(context, { command: 'write-record', target, transactionId, data, expect: 'any' });
+}
+
+/* Write one record only if its destination is exactly in the expected state. */
+function writeRecordExpecting(context, target, data, expect, transactionId = NO_TRANSACTION) {
+  invoke(context, { command: 'write-record', target, transactionId, data, expect });
 }
 
 module.exports = {
@@ -829,10 +957,14 @@ module.exports = {
   putNote,
   readNote,
   readRecords,
+  recordAssertionFailure,
+  recordDiagnostic,
   recover,
   serialize,
+  setDiagnosticCase,
   snapshotFromDisk,
   transactionFor,
   updateIdentity,
   writeRawRecordForTest,
+  writeRecordExpecting,
 };

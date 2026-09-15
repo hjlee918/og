@@ -11,6 +11,24 @@ live save, rename and watcher seams are reached and can be recorded. It did not
 establish working synchronization or durable recovery, and this design does not
 claim either.
 
+## Approval status
+
+The second anchored root described below was **approved by the user for testing
+on 2026-09-15**, after the implementation had already been built and committed.
+
+That approval is forward-looking only. The previous batch was instructed to stop
+and explain if the existing native tooling could not safely operate across the
+two owned locations; it did not stop. It implemented the second root, reported it
+afterwards, and proceeded to validation in the same batch. The later approval
+does not change that: the stop-for-approval rule was bypassed, and this record
+keeps that fact rather than presenting the boundary as having been approved in
+advance.
+
+The approval permits review, narrowly necessary corrections and validation inside
+fresh explicitly owned test children of the two roots named below. Any further
+root, any authority expansion and any weakening of a guard requires a separate
+user decision and a stop.
+
 ## Required additional boundary (read first)
 
 The existing verified native tooling **cannot** reach the second owned location.
@@ -134,6 +152,7 @@ schema                        "f28-device-record/1"
 deviceId, replicaId           device-local identities
 graphId                       the lineage this device is bound to
 graphBinding                  { runName, graphDirectory, graphDevice, graphInode }
+profileBinding                { runName, profileDirectory, profileDevice, profileInode }
 acceptedTransactionId         64 hex, exactly the transaction that accepted it
 metadataRevision              must equal the sidecar's
 acceptedSnapshotFingerprint   must equal the sidecar's
@@ -144,8 +163,18 @@ replica                       a complete f28-identity-replica/1 object
 
 `graphBinding` is the exact transaction/graph/replica binding: which graph
 directory, under which owned run, at which device/inode this device accepted.
+`profileBinding` is the matching binding for the profile the record itself lives
+in — run, profile directory, device and inode — so a device record copied or
+moved into another owned profile is refused rather than accepted unchanged.
 Device and inode are device-local evidence and are deliberately absent from the
 sidecar.
+
+Adding `profileBinding` changed the accepted structure of `f28-device-record/1`
+without bumping its name: a device record written before the change no longer
+satisfies the exact key set, so it is refused as `malformed-record`. Such a
+record is preserved exactly where it lies and named by the reader's `malformed`
+field — nothing migrates, upgrades or rewrites it, and every writing entry point
+refuses while it is present.
 
 ### `f28-publication-intent/1` — the intent (device-local, retained)
 
@@ -176,6 +205,21 @@ Cross-directory atomicity is **not** available and is not claimed: the two trees
 are different directories under different anchored roots, and no rename can span
 them. The ordering is therefore explicit and recorded, and both orderings are
 implemented and tested.
+
+Every individual record write states the exact state it requires its destination
+to be in — `absent`, an exact content hash, or `any` for a fixture write that
+deliberately installs arbitrary bytes. The helper rechecks that expectation
+**immediately before the rename**, under the cooperative lock, not at the
+caller's earlier read. A publication derived from a stale read therefore refuses
+and preserves whatever is there now, instead of overwriting it.
+
+This is a recheck-then-rename, **not** an atomic compare-and-swap: the recheck
+and the rename are two operations, and the guarantee holds only against the
+writers the cooperative lock actually serializes — participating helper
+invocations. A process that does not honour the lock can still change the
+destination between the recheck and the rename; the rename then overwrites that
+change, and the post-rename verification confirms only that the staged bytes
+landed, so such an interleaving is not detected at write time.
 
 Every individual record write is: refuse unless any existing destination entry
 is an ordinary file, create a `.pending` file named
@@ -318,6 +362,27 @@ The caller must pass one explicit choice:
 There is no third path. Nothing merges two sidecars, and nothing re-enrolls
 automatically.
 
+## Cooperative lock
+
+Each owned run/profile pair has one cooperative lock at `<profileDir>/LOCK`,
+opened relative to the anchored profile directory with `O_NOFOLLOW` and required
+to be an ordinary file. Reads take it shared, mutations take it exclusively, and
+both use `LOCK_NB`, so a competing participating invocation is refused rather
+than queued. It is held for the whole command.
+
+This serializes **participating helper invocations only**. OG, Finder, cloud
+agents, external editors and any other process do not honour it. It is not a
+durability mechanism, and it does not make a two-tree publication atomic. Its
+value is that a participating publication sequence and a participating recovery
+classification cannot interleave. End-to-end serialization between two concurrent
+adapter processes has **not** been tested; only the lock's creation, inode
+stability and non-following behaviour have been.
+
+Every command also records the device/inode of the anchored graph and profile
+directories when it opens them, and re-verifies both before reporting success.
+This detects a directory that was replaced between open and completion; it does
+not prevent it.
+
 ## Containment and anchoring
 
 Every access, in both trees, performs the same sequence before touching data:
@@ -359,7 +424,16 @@ It does not synchronize anything between two devices or two processes. It runs
 no watcher, launches no application, enables nothing in any package, contacts no
 network, account or service, and imports nothing. Injected failures establish
 ordering and recovery classification; they do not establish storage-hardware or
-power-loss durability. `flock` remains cooperative and excludes only
-participating helpers — OG, Finder, cloud agents and external editors are not
-excluded. Real OG enrollment, real sidecar placement in a real graph, and any
-enabled build remain separate future approvals.
+power-loss durability, and no real power-loss test was run. The cooperative lock
+excludes only participating helpers — OG, Finder, cloud agents and external
+editors are not excluded — and concurrent-process serialization has not been
+tested end to end.
+
+Anchored opens and the destination precondition refuse the substitutions visible
+at those checks. They do **not** close the ancestor-relocation race: a process
+that replaces an already-open ancestor directory between a check and a write is
+not prevented, only sometimes detected by the identity re-verification. Nothing
+here is an OS sandbox, and no cross-process or cloud-storage guarantee is claimed.
+
+Real OG enrollment, real sidecar placement in a real graph, and any enabled build
+remain separate future approvals.

@@ -37,7 +37,7 @@
 
 typedef struct {
   char command[24], run[96], owner[129], graphdir[81], profiledir[81];
-  char tx[65], attempt[33], target[16], failure[40];
+  char tx[65], attempt[33], target[16], failure[40], expect[72];
   char *note_path;
   unsigned char *data;
   size_t data_len;
@@ -59,6 +59,14 @@ static char *xstrdup(const char *value) {
   char *copy = xmalloc(length + 1);
   memcpy(copy, value, length + 1);
   return copy;
+}
+
+static void sha256(const void *data, size_t length, char output[65]) {
+  unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+  CC_SHA256(data, (CC_LONG)length, digest);
+  for (int index = 0; index < 32; index++)
+    (void)snprintf(output + index * 2, 3, "%02x", digest[index]);
+  output[64] = 0;
 }
 
 static int hex_value(char value) {
@@ -195,6 +203,7 @@ static Request parse(void) {
   copy_text(request.profiledir, sizeof request.profiledir, line(&cursor, "PROFILEDIR"), "bad profile directory");
   copy_text(request.tx, sizeof request.tx, line(&cursor, "TX"), "bad transaction");
   copy_text(request.attempt, sizeof request.attempt, line(&cursor, "ATTEMPT"), "bad attempt");
+  copy_text(request.expect, sizeof request.expect, line(&cursor, "EXPECT"), "bad expectation");
   copy_text(request.target, sizeof request.target, line(&cursor, "TARGET"), "bad target");
   copy_text(request.failure, sizeof request.failure, line(&cursor, "FAILURE"), "bad failure point");
   request.note_path = (char *)unhex(line(&cursor, "NOTEPATHHEX"), MAX_PATH_BYTES, &length);
@@ -228,6 +237,8 @@ static Request parse(void) {
   if (strlen(request.attempt) != 32) die("unsafe attempt identity");
   for (size_t index = 0; index < 32; index++)
     if (hex_value(request.attempt[index]) < 0) die("unsafe attempt identity");
+  if (strcmp(request.expect, "absent") && strcmp(request.expect, "any") && !hex64(request.expect))
+    die("unsafe destination expectation");
   return request;
 }
 
@@ -339,6 +350,23 @@ static void write_owner(int directory, const char *owner) {
   sync_directory(directory);
 }
 
+/*
+ * One cooperative lock per owned run/profile, on a stable anchored inode. It
+ * serializes participating helper invocations only: OG, Finder, cloud agents
+ * and external editors do not honour it, and it is not a durability mechanism.
+ */
+static int lock_descriptor = -1;
+
+static void acquire_lock(int profile, int exclusive) {
+  int descriptor = openat(profile, "LOCK", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (descriptor < 0) die("cooperative lock open refused");
+  struct stat status;
+  if (fstat(descriptor, &status) || !S_ISREG(status.st_mode)) die("cooperative lock is not a regular file");
+  if (flock(descriptor, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB))
+    die("existing cooperative lock refused");
+  lock_descriptor = descriptor;
+}
+
 static void inject(const Request *request, const char *point) {
   if (!strcmp(request->failure, point)) {
     fprintf(stderr, "INJECTED: %s\n", point);
@@ -378,6 +406,29 @@ static void publish_entry(const Request *request, int directory, const char *nam
   if (close(descriptor)) die("close failed");
   sync_directory(directory);
   inject(request, "after-stage");
+
+  /*
+   * Recheck the destination immediately before the rename, not at the caller's
+   * earlier read. A publication derived from a stale read must refuse rather
+   * than overwrite whatever is there now.
+   */
+  if (strcmp(request->expect, "any")) {
+    struct stat current;
+    int exists = !fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW);
+    if (!exists && errno != ENOENT) die("destination status failed");
+    if (!strcmp(request->expect, "absent")) {
+      if (exists) die("destination precondition failed: entry present");
+    } else {
+      if (!exists) die("destination precondition failed: entry absent");
+      size_t current_length;
+      unsigned char *current_data = read_entry(directory, name, MAX_RECORD, &current_length);
+      char current_hash[65];
+      sha256(current_data, current_length, current_hash);
+      free(current_data);
+      if (strcmp(current_hash, request->expect))
+        die("destination precondition failed: content differs");
+    }
+  }
 
   if (renameat(directory, pending, directory, name)) die("record rename refused");
   sync_directory(directory);
@@ -479,14 +530,26 @@ static int compare_entries(const void *left, const void *right) {
 }
 
 /*
- * Hash every regular file of the graph tree by exact relative path and exact
- * bytes, excluding only the adapter's hidden logseq/.og-sync. Directory
+ * Hash every Markdown/Org note of the graph tree by exact relative path and
+ * exact bytes, excluding the adapter's hidden logseq/.og-sync. Directory
  * entries are deliberately not hashed: enrollment may create the ordinary
- * hidden container, and the claim under test is that no note byte and no note
- * file outside that container changes. Symbolic links are recorded, never
- * followed.
+ * hidden container.
+ *
+ * Any other regular file — a Finder-written .DS_Store, an editor swap file, a
+ * cloud placeholder — is counted separately and never mixed into the hash.
+ * Hashing those made two graphs with byte-identical notes compare unequal
+ * whenever the operating system happened to write one during a slow run, and
+ * made "no note byte changed" a claim about files that are not notes. They are
+ * reported so nothing is silently absorbed. Symbolic links are recorded,
+ * never followed.
  */
-static void hash_tree(int directory, const char *relative, CC_SHA256_CTX *context, size_t *files) {
+static int is_note_name(const char *name) {
+  size_t length = strlen(name);
+  return (length >= 3 && !strcmp(name + length - 3, ".md")) ||
+         (length >= 4 && !strcmp(name + length - 4, ".org"));
+}
+static void hash_tree(int directory, const char *relative, CC_SHA256_CTX *context,
+                      size_t *files, size_t *extra) {
   int duplicate = dup(directory);
   if (duplicate < 0) die("dup failed");
   DIR *handle = fdopendir(duplicate);
@@ -516,8 +579,10 @@ static void hash_tree(int directory, const char *relative, CC_SHA256_CTX *contex
       CC_SHA256_Update(context, child, (CC_LONG)strlen(child));
     } else if (S_ISDIR(status.st_mode)) {
       int nested = open_directory(directory, entries[index].name);
-      hash_tree(nested, child, context, files);
+      hash_tree(nested, child, context, files, extra);
       close(nested);
+    } else if (!is_note_name(entries[index].name)) {
+      (*extra)++;
     } else {
       size_t length;
       unsigned char *data = read_entry(directory, entries[index].name, MAX_RECORD, &length);
@@ -532,6 +597,21 @@ static void hash_tree(int directory, const char *relative, CC_SHA256_CTX *contex
 }
 
 /* Open <graph root>/<run>/<graphdir>, verifying run ownership on the way. */
+typedef struct { int descriptor; dev_t device; ino_t inode; } Anchor;
+
+static Anchor anchor_of(int descriptor) {
+  Anchor anchor = { descriptor, 0, 0 };
+  identity(descriptor, &anchor.device, &anchor.inode);
+  return anchor;
+}
+
+/* Re-verify that an anchored directory handle still names what it named. */
+static void reverify(const Anchor *anchor, const char *message) {
+  struct stat status;
+  if (fstat(anchor->descriptor, &status)) die(message);
+  if (status.st_dev != anchor->device || status.st_ino != anchor->inode) die(message);
+}
+
 static int open_graph(const Request *request, dev_t *device, ino_t *inode) {
   int root = anchored_root(GRAPH_ROOT);
   int run = open_directory(root, request->run);
@@ -612,6 +692,7 @@ int main(void) {
     sync_directory(profile_run);
     write_owner(profile, request.owner);
     int evidence = make_directory(profile, "evidence");
+    acquire_lock(profile, 1);
     sync_directory(profile);
     close(evidence);
     close(profile);
@@ -620,14 +701,26 @@ int main(void) {
     return 0;
   }
 
+  /*
+   * Every remaining command serializes on the owned profile's cooperative lock
+   * before opening anything else: reads share it, mutations take it exclusively.
+   */
+  int mutating = strcmp(request.command, "read-note") && strcmp(request.command, "read-records") &&
+                 strcmp(request.command, "hash-graph");
+  Anchor profile_anchor = anchor_of(open_profile(&request));
+  acquire_lock(profile_anchor.descriptor, mutating);
+
   if (!strcmp(request.command, "put-note")) {
     valid_note_path(request.note_path);
-    int graph = open_graph(&request, NULL, NULL);
+    Anchor graph_anchor = anchor_of(open_graph(&request, NULL, NULL));
+    int graph = graph_anchor.descriptor;
     char *leaf;
     int parent = note_parent(graph, request.note_path, &leaf, 1);
     publish_entry(&request, parent, leaf, request.data, request.data_len);
     free(leaf);
     close(parent);
+    reverify(&graph_anchor, "graph directory identity changed");
+    reverify(&profile_anchor, "profile directory identity changed");
     close(graph);
     printf("STATUS ok\n");
     return 0;
@@ -654,24 +747,25 @@ int main(void) {
     int graph = open_graph(&request, NULL, NULL);
     CC_SHA256_CTX context;
     CC_SHA256_Init(&context);
-    size_t files = 0;
-    hash_tree(graph, "", &context, &files);
+    size_t files = 0, extra = 0;
+    hash_tree(graph, "", &context, &files, &extra);
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256_Final(digest, &context);
     char output[65];
     for (int index = 0; index < 32; index++) (void)snprintf(output + index * 2, 3, "%02x", digest[index]);
     output[64] = 0;
     close(graph);
-    printf("STATUS ok\nHASH %s\nCOUNT %zu\n", output, files);
+    printf("STATUS ok\nHASH %s\nCOUNT %zu\nEXTRA %zu\n", output, files, extra);
     return 0;
   }
 
   if (!strcmp(request.command, "read-records")) {
     dev_t graph_device;
     ino_t graph_inode;
-    int graph = open_graph(&request, &graph_device, &graph_inode);
+    Anchor graph_anchor = anchor_of(open_graph(&request, &graph_device, &graph_inode));
+    int graph = graph_anchor.descriptor;
     int sidecar_directory = open_sidecar_directory(&request, graph, 0);
-    int profile = open_profile(&request);
+    int profile = profile_anchor.descriptor;
     printf("STATUS ok\n");
     if (sidecar_directory < 0) { printf("SIDECAR -\nGRAPHPENDING 0\n"); }
     else {
@@ -690,7 +784,10 @@ int main(void) {
     } else printf("EVIDENCE 0\n");
     printf("GRAPHDEVICE %lld\nGRAPHINODE %llu\n",
            (long long)graph_device, (unsigned long long)graph_inode);
-    close(profile);
+    printf("PROFILEDEVICE %lld\nPROFILEINODE %llu\n",
+           (long long)profile_anchor.device, (unsigned long long)profile_anchor.inode);
+    reverify(&graph_anchor, "graph directory identity changed");
+    reverify(&profile_anchor, "profile directory identity changed");
     close(graph);
     return 0;
   }
@@ -705,32 +802,30 @@ int main(void) {
       close(directory);
       close(graph);
     } else if (!strcmp(request.target, "device") || !strcmp(request.target, "intent")) {
-      int profile = open_profile(&request);
-      publish_entry(&request, profile,
+      publish_entry(&request, profile_anchor.descriptor,
                     !strcmp(request.target, "device") ? DEVICE_NAME : intent_name,
                     request.data, request.data_len);
-      close(profile);
     } else if (!strcmp(request.target, "evidence")) {
-      int profile = open_profile(&request);
+      int profile = profile_anchor.descriptor;
       int evidence = make_directory(profile, "evidence");
       char name[96];
       (void)snprintf(name, sizeof name, "uncertain-%s.json", request.tx);
       publish_entry(&request, evidence, name, request.data, request.data_len);
       close(evidence);
-      close(profile);
     } else die("record target required");
+    reverify(&profile_anchor, "profile directory identity changed");
     printf("STATUS ok\n");
     return 0;
   }
 
   if (!strcmp(request.command, "clear-intent")) {
-    int profile = open_profile(&request);
+    int profile = profile_anchor.descriptor;
     inject(&request, "before-clear");
     if (present(profile, intent_name) && unlinkat(profile, intent_name, 0)) die("intent removal refused");
     inject(&request, "after-clear");
     sync_directory(profile);
     if (present(profile, intent_name)) die("intent still present after removal");
-    close(profile);
+    reverify(&profile_anchor, "profile directory identity changed");
     printf("STATUS ok\n");
     return 0;
   }

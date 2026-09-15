@@ -3,23 +3,47 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const test = require('node:test');
+const nodeTest = require('node:test');
 const { APPROVED_TEST_ROOT } = require('../src/persistence');
 const {
   GRAPH_IDENTITY_SCHEMA,
+  PROFILE_ROOT,
   enrollGraph,
   hashGraphNotes,
   initializeOwnedRun,
   openGraph,
   adoptCopy,
+  publish,
+  writeRecordExpecting,
   putNote,
   readNote,
   readRecords,
   recover,
   serialize,
+  recordAssertionFailure,
+  setDiagnosticCase,
   updateIdentity,
   writeRawRecordForTest,
 } = require('../src/persistent-identity');
+
+/*
+ * Every case names itself in the diagnostics, so a failed assertion or a
+ * refused helper invocation is attributable to an exact case and its exact
+ * owned directories without re-running the suite.
+ */
+function test(name, body) {
+  return nodeTest(name, (context) => {
+    setDiagnosticCase(name);
+    try {
+      return body(context);
+    } catch (error) {
+      recordAssertionFailure(name, error);
+      throw error;
+    } finally {
+      setDiagnosticCase(null);
+    }
+  });
+}
 
 const helper = process.env.F28_IDENTITY_HELPER;
 const runName = process.env.F28_RUN_NAME;
@@ -40,6 +64,10 @@ const NOTES = [
 
 function graphPath(context, relative = '') {
   return path.join(APPROVED_TEST_ROOT, context.runName, context.graphDirectory, relative);
+}
+
+function profilePath(context, relative = '') {
+  return path.join(PROFILE_ROOT, context.runName, context.profileDirectory, relative);
 }
 
 function owned(caseName) {
@@ -670,4 +698,161 @@ test('an unknown run or graph directory is refused rather than created by a read
   assert.throws(() => readRecords({ ...context, profileDirectory: `p-absent${suffix}` }),
     (error) => error.code === 'helper-refused');
   assert.equal(fs.existsSync(graphPath({ ...context, graphDirectory: `g-absent${suffix}` })), false);
+});
+
+// ------------------------------- review regressions (2026-09-15, batch two)
+
+/*
+ * Reproduces the historical sanitizer failure. A Finder-written .DS_Store
+ * appeared inside two freshly created graph directories during the slow
+ * sanitized run; the tree hash covered every regular file, so two graphs with
+ * byte-identical notes hashed differently. The hash must cover note files only,
+ * and must report any other regular file rather than silently absorbing it.
+ */
+test('an operating-system file beside the notes does not change the note hash', () => {
+  const context = seeded('osfile');
+  const before = hashGraphNotes(context);
+  assert.equal(before.extra, 0);
+
+  fs.writeFileSync(graphPath(context, '.DS_Store'), Buffer.alloc(6148, 7));
+  fs.writeFileSync(graphPath(context, 'pages/.DS_Store'), Buffer.alloc(6148, 9));
+
+  const after = hashGraphNotes(context);
+  assert.equal(after.hash, before.hash, 'note hash must ignore non-note files');
+  assert.equal(after.count, before.count);
+  assert.equal(after.extra, 2, 'non-note files must be reported, not ignored');
+});
+
+test('two graphs with identical notes but different OS files hash identically', () => {
+  const left = seeded('osleft');
+  const right = seeded('osright');
+  fs.writeFileSync(graphPath(left, '.DS_Store'), Buffer.alloc(6148, 1));
+  fs.writeFileSync(graphPath(right, '.DS_Store'), Buffer.alloc(6148, 2));
+  assert.equal(hashGraphNotes(left).hash, hashGraphNotes(right).hash);
+});
+
+test('enrollment leaves the note hash unchanged even beside an OS file', () => {
+  const context = seeded('osenroll');
+  fs.writeFileSync(graphPath(context, '.DS_Store'), Buffer.alloc(6148, 3));
+  const before = hashGraphNotes(context);
+  enrollGraph(context, enrollmentRequest());
+  const after = hashGraphNotes(context);
+  assert.equal(after.hash, before.hash);
+  assert.equal(after.count, NOTES.length);
+  assert.equal(after.extra, 1);
+});
+
+/*
+ * A record write must state what it expects the destination to be, and that
+ * expectation must be rechecked immediately before the rename. Without it a
+ * publication derived from a stale read silently overwrites a record that
+ * changed after the read.
+ */
+test('a record write whose destination changed since the read is refused', () => {
+  const context = seeded('precondition');
+  enrollGraph(context, enrollmentRequest());
+  const accepted = readRecords(context);
+
+  // Something else installs different device bytes after the read.
+  const intruder = { ...accepted.device, deviceId: 'device-someone-else' };
+  writeRawRecordForTest(context, 'device', serialize(intruder));
+  const intruderBytes = readRecords(context).deviceBytes;
+
+  assert.throws(
+    () => writeRecordExpecting(context, 'device', accepted.deviceBytes, accepted.deviceHash),
+    (error) => error.code === 'destination-precondition-failed'
+      && /content differs/.test(error.message),
+  );
+  assert.deepEqual(readRecords(context).deviceBytes, intruderBytes,
+    'the intervening record must be preserved');
+});
+
+test('a create whose destination already exists is refused by its precondition', () => {
+  const context = seeded('preconditionnew');
+  enrollGraph(context, enrollmentRequest());
+  const accepted = readRecords(context);
+  assert.throws(
+    () => writeRecordExpecting(context, 'sidecar', accepted.sidecarBytes, null),
+    (error) => error.code === 'destination-precondition-failed'
+      && /entry present/.test(error.message),
+  );
+  assert.deepEqual(readRecords(context).sidecarBytes, accepted.sidecarBytes);
+});
+
+test('a publication derived from a stale read refuses instead of overwriting', () => {
+  const context = seeded('stalepublish');
+  enrollGraph(context, enrollmentRequest());
+  const stale = readRecords(context);
+
+  putNote(context, 'pages/기준 대상 페이지.md', UPDATED_KOREAN);
+  const pending = updateIdentity(context, updateRequest());
+  assert.equal(pending.outcome, 'accepted');
+  const current = readRecords(context);
+
+  // Replay the original enrollment publication, which believed both records
+  // were absent, against the newer state that now holds metadata-2.
+  const replay = publish(context, {
+    kind: 'enroll',
+    transactionId: 'c'.repeat(64),
+    graphId: 'graph-persist-1',
+    replicaId: 'replica-persist-1',
+    deviceId: 'device-persist-1',
+    base: { sidecarHash: null, deviceHash: null },
+    sidecarBytes: stale.sidecarBytes,
+    deviceBytes: stale.deviceBytes,
+  });
+  assert.equal(replay.outcome, 'refused');
+  assert.equal(replay.code, 'destination-precondition-failed');
+  assert.equal(replay.step, 'sidecar');
+
+  assert.deepEqual(readRecords(context).sidecarBytes, current.sidecarBytes);
+  assert.deepEqual(readRecords(context).deviceBytes, current.deviceBytes);
+  assert.equal(readRecords(context, 'c'.repeat(64)).outstandingIntents.length, 1,
+    'the refused publication leaves its intent as evidence');
+});
+
+/*
+ * The device record must bind the profile it lives in, not only the graph.
+ * Otherwise a record moved between owned profiles is accepted unchanged.
+ */
+test('a device record moved to another owned profile is refused', () => {
+  const context = seeded('profilebind');
+  enrollGraph(context, enrollmentRequest());
+  const moved = { ...context, profileDirectory: `p-profilebind2${suffix}` };
+  initializeOwnedRun(moved);
+  writeRawRecordForTest(moved, 'device', readRecords(context).deviceBytes);
+
+  const opened = openGraph(moved);
+  assert.equal(opened.outcome, 'refused');
+  assert.equal(opened.code, 'profile-binding-mismatch');
+  assert.equal(openGraph(context).outcome, 'accepted');
+});
+
+test('the device record names the profile it was accepted in', () => {
+  const context = seeded('profilenamed');
+  enrollGraph(context, enrollmentRequest());
+  const device = openGraph(context).device;
+  assert.equal(device.profileBinding.profileDirectory, context.profileDirectory);
+  assert.equal(device.profileBinding.runName, context.runName);
+  assert.equal(typeof device.profileBinding.profileInode, 'number');
+});
+
+/*
+ * The cooperative lock the contract describes must actually exist, be anchored
+ * in the owned profile, and never be followed through a link.
+ */
+test('the cooperative lock is created in the owned profile and is not followed', () => {
+  const context = seeded('lockanchor');
+  enrollGraph(context, enrollmentRequest());
+  const lockPath = profilePath(context, 'LOCK');
+  assert.equal(fs.statSync(lockPath).isFile(), true);
+  const before = fs.statSync(lockPath).ino;
+  readRecords(context);
+  assert.equal(fs.statSync(lockPath).ino, before, 'the lock inode must be stable');
+
+  fs.unlinkSync(lockPath);
+  fs.symlinkSync(graphPath(context, 'pages/Anchor Page.md'), lockPath);
+  assert.throws(() => readRecords(context), (error) => error.code === 'helper-refused');
+  assert.equal(fs.readFileSync(graphPath(context, 'pages/Anchor Page.md'), 'utf8'),
+    NOTES[0].content, 'the link target must be untouched');
 });
