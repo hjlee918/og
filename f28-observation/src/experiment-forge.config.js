@@ -9,6 +9,7 @@ module.exports = {
     appBundleId: 'com.logseq.logseq-og.f28observation',
     appCategoryType: 'public.app-category.productivity',
     prune: false,
+    electronZipDir: process.env.F28_OBSERVATION_ELECTRON_ZIP_DIR,
     ignore: [
       '^/out/',
       '^/node_modules/electron($|/)',

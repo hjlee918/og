@@ -15,6 +15,7 @@
 // so nothing is downloaded implicitly.
 //
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
@@ -67,9 +68,27 @@ console.log(`[package-experiment] outDir ${forge.outDir}`);
 console.log(`[package-experiment] build ${v.manifest.pilotBuildId}`);
 console.log(`[package-experiment] packaging ${PLATFORM}/${ARCH} (unsigned, local only)`);
 
-execFileSync(process.execPath,
-  [FORGE_CLI, 'package', `--platform=${PLATFORM}`, `--arch=${ARCH}`],
-  { cwd: STATIC, stdio: 'inherit' });
+let offlineElectron = null;
+let packageEnv = process.env;
+if (OBSERVATION) {
+  const installed = path.join(REPO, 'node_modules', 'electron', 'dist');
+  const version = fs.readFileSync(path.join(installed, 'version'), 'utf8').trim();
+  const packageVersion = require(path.join(REPO, 'node_modules', 'electron', 'package.json')).version;
+  if (version !== packageVersion) die(`installed Electron ${version} does not match package ${packageVersion}`);
+  offlineElectron = fs.mkdtempSync(path.join(os.tmpdir(), 'f28-observation-electron-'));
+  const zip = path.join(offlineElectron, `electron-v${version}-${PLATFORM}-${ARCH}.zip`);
+  execFileSync('/usr/bin/zip', ['-qry', zip, '.'], {cwd: installed, stdio: 'inherit'});
+  packageEnv = Object.assign({}, process.env, {F28_OBSERVATION_ELECTRON_ZIP_DIR: offlineElectron});
+  console.log(`[package-experiment] using local Electron ${version} archive; no download`);
+}
+
+try {
+  execFileSync(process.execPath,
+    [FORGE_CLI, 'package', `--platform=${PLATFORM}`, `--arch=${ARCH}`],
+    { cwd: STATIC, stdio: 'inherit', env: packageEnv });
+} finally {
+  if (offlineElectron) fs.rmSync(offlineElectron, {recursive: true, force: true});
+}
 
 const appPath = path.join(forge.outDir, `${forge.packagerConfig.name}-${PLATFORM}-${ARCH}`,
                           `${forge.packagerConfig.name}.app`);
