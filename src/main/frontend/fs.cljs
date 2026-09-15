@@ -97,9 +97,10 @@
     (let [path (gp-util/path-normalize rpath)
           fs-record (get-fs dir)
           cause (when (and (og-sync-bridge/observation-only?)
-                           (og-sync-bridge/enabled?)
-                           (not (string/blank? repo)))
-                  (og-sync-bridge/save-pending! repo path content))]
+                           (og-sync-bridge/enabled?))
+                  (og-sync-bridge/save-pending!
+                   (if (string/blank? repo) (state/get-current-repo) repo)
+                   path content))]
       (->
        (p/let [opts (assoc opts
                            :error-handler
