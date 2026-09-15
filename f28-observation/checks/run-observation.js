@@ -71,6 +71,19 @@ async function api(page, method, ...args) {
   }, {method, args});
 }
 
+async function flushPageThroughOg(page, pageName) {
+  return page.evaluate(async name => {
+    const pageValue = window.logseq?.api?.get_page?.(name);
+    const repo = window.frontend?.state?.get_current_repo?.();
+    const write = window.frontend?.modules?.outliner?.file?.do_write_file_BANG_;
+    if (!pageValue?.id || !repo || typeof write !== 'function') {
+      throw new Error('OG immediate outliner writer is unavailable');
+    }
+    await Promise.resolve(write(repo, pageValue.id, 'observation-save'));
+    return {pageId: pageValue.id, repo};
+  }, pageName);
+}
+
 async function editBlockThroughUi(session, pageName, blockUuid, content) {
   await session.goTo(pageName);
   const block = session.page.locator(`#main-content-container [blockid="${blockUuid}"] .block-content`).first();
@@ -173,7 +186,8 @@ async function run() {
     const korean = `관찰 한국어 ${nameDate}`;
     const baseRenamed = `관찰 이름변경 ${nameDate}`;
     const priorRenamed = prior?.operation?.renamed;
-    const sourceCandidates = [priorRenamed, baseRenamed, korean].filter(Boolean);
+    const priorSource = prior?.operation?.koreanSource;
+    const sourceCandidates = [priorRenamed, priorSource, baseRenamed, korean].filter(Boolean);
     const koreanSource = sourceCandidates.find(name =>
       fs.existsSync(path.join(graph, 'pages', `${name}.md`))) || korean;
     const renamed = `관찰 이름변경 ${nameDate} ${stamp.slice(11, 19).replace(/-/g, '')}`;
@@ -211,7 +225,10 @@ async function run() {
     out.operation = {english, koreanSource, renamed, englishPath, oldKoreanPath, renamedPath,
       expectedGraphId};
     const englishUi = await editBlockThroughUi(session, english, englishBlock.uuid, englishEdit);
-    record('normal-english-display', await pageContains(session, english, englishEdit), {page: english});
+    const englishFlush = await flushPageThroughOg(session.page, english);
+    record('normal-english-display', englishUi.editorValueMatched,
+      {page: english, editorValueMatched: englishUi.editorValueMatched,
+       displayedAfterEscape: englishUi.displayedAfterEscape, ogPageId: englishFlush.pageId});
 
     await api(session.page, 'rename_page', koreanSource, renamed);
     const oldAbsolute = B.assertInsideAllowedRoot('old Korean note', path.join(graph, oldKoreanPath));
@@ -220,9 +237,11 @@ async function run() {
       {page: renamed});
 
     const koreanUi = await editBlockThroughUi(session, renamed, koreanBlock.uuid, koreanEdit);
+    const koreanFlush = await flushPageThroughOg(session.page, renamed);
     record('normal-renamed-edit-display', koreanUi.editorValueMatched,
       {page: renamed, editorValueMatched: koreanUi.editorValueMatched,
        displayedAfterEscape: koreanUi.displayedAfterEscape,
+       ogPageId: koreanFlush.pageId,
        note: 'The exact editor value is the pre-quit UI assertion; the post-quit rendered result is checked on reopen.'});
 
     await OP.sleep(2500);
