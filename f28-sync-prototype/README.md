@@ -9,14 +9,26 @@ slice is implemented in `src/incoming-application.js` and verified in
 [RESULTS.md](./RESULTS.md); creates and updates only, one host, synthetic data,
 with the test application closed during application.
 
-[APP_RUNNING_INCOMING_DESIGN.md](./APP_RUNNING_INCOMING_DESIGN.md) is a proposal
-only: it designs an **idle-app observation experiment** — writing one incoming
-file while the isolated test app is open but untouched, and measuring how OG's
-ordinary external-change path behaves. It explicitly does not address
-concurrent-edit safety. Nothing in it is implemented, approved or run.
+[APP_RUNNING_INCOMING_DESIGN.md](./APP_RUNNING_INCOMING_DESIGN.md) designs an
+**idle-app observation experiment** — writing one incoming file while the
+isolated test app is open but untouched, and measuring how OG's ordinary
+external-change path behaves. Its option A was implemented and run; the
+supervisor accepted the graph-binding correction and the **limited** observation
+findings, and independently ran the memory-only probe checks. The complete live
+observation matrix is **not** accepted as finished, and concurrent-edit safety
+remains unverified and unclaimed.
 
-Run its focused suite with the identity helper, in fresh owned children of one
-fresh run:
+[EDITING_PAUSE_DESIGN.md](./EDITING_PAUSE_DESIGN.md) is a **proposal only**: it
+designs that document's deferred option B — a short, explicit "Apply pending
+changes" pause that stops admitting new edits, drains queued and in-flight
+saves by awaiting real save causes, applies one approved transaction, verifies
+it and resumes. It preserves the editor buffer and never force-ends a Korean
+composition. It requires five new in-app seams behind a default-off define and
+is **not approved or implemented**. It does not design continuous concurrent
+editing or a general synchronization service.
+
+Run the incoming-application suite with the identity helper, in fresh owned
+children of one fresh run:
 
 ```sh
 F28_IDENTITY_HELPER=/tmp/f28-identity-store-helper-x86_64 \
