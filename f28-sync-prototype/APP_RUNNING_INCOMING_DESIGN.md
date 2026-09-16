@@ -149,7 +149,7 @@ Four source facts that the first draft got wrong or omitted:
 | Effect | When | Where |
 |---|---|---|
 | Database update and re-render | content differs after trimming | in memory |
-| Backup file | update only (`db-content` non-blank) | `logseq/bak/<page>/<ISO>.Desktop.md` — a `.md` the helper's `hash_tree` counts |
+| Backup file | **only when the diff contains a deletion** (`string-some-deleted?`, `electron/handler.cljs:89`), so an append-only change writes none | `logseq/bak/<page>/<ISO>.Desktop.md` — a `.md` the helper's `hash_tree` counts |
 | Backup pruning | more than six versions | deletes inside `logseq/bak` (`backup_file.cljs:27`) |
 | **`id::` property writes to other pages** | incoming content contains block refs to blocks lacking `id::` | ordinary note files anywhere in the graph |
 | Nothing at all | whitespace-only edge change | — |

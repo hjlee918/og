@@ -267,32 +267,34 @@ async function run() {
     }
 
     /*
-     * The gate's signal set. Where `*writes-finished?` cannot be read in this
-     * build, it is NOT assumed satisfied: the weaker bounded settle observation
-     * stands in for it, and the substitution is recorded in evidence so the
-     * narrowed claim is visible.
+     * The gate takes a FRESH reading at every boundary. It is async, so each
+     * call re-reads the live editor/composition/idle/queue signals and the
+     * graph-bound cause counts -- including between the first and second note
+     * write, and again at the completion boundary after an awaited
+     * reconciliation. Nothing is cached.
+     *
+     * A required signal that cannot be read REFUSES. The weaker bounded settle
+     * observation is reported alongside as its own field and is never
+     * substituted for the missing signal.
      */
-    const idleGate = makeIdleGate(() => {
-      const live = out.liveSignals || {};
-      const signals = {...live.signals,
-        pendingCauses: live.pending, failedCauses: live.failed};
-      if (signals.writesFinished === null || signals.writesFinished === undefined) {
-        signals.writesFinished = live.settledObservation === true ? true : null;
-        signals.writesFinishedSubstitute = live.settledObservation === true
-          ? 'bounded settle observation (weaker: the queue itself was not read)'
-          : 'unavailable';
-      }
-      return signals;
-    });
-    const refreshSignals = async () => {
-      const s = await PROBE.readIdleSignals(session.page, repo);
-      const c = await PROBE.pendingLocalCauses(session.page, null);
-      const settle = await PROBE.observeSettled(session.page, null);
-      out.liveSignals = {signals: s, pending: c === null ? null : c.pending,
-        failed: c === null ? null : c.failed, settledObservation: settle.settled,
-        settleDetail: settle};
-      return out.liveSignals;
+    let currentGraphId = null;
+    const gateReadings = [];
+    const readIdleNow = async (stage) => {
+      const signals = await PROBE.readIdleSignals(session.page, repo);
+      const causes = await PROBE.pendingLocalCauses(session.page, currentGraphId);
+      const reading = {
+        stage,
+        ...signals,
+        pendingCauses: causes === null ? null : causes.pending,
+        failedCauses: causes === null ? null : causes.failed,
+        causeTotal: causes === null ? null : causes.total,
+      };
+      gateReadings.push({stage, editing: reading.editing, composing: reading.composing,
+        inputIdle: reading.inputIdle, writesFinished: reading.writesFinished,
+        pendingCauses: reading.pendingCauses});
+      return reading;
     };
+    const idleGate = makeIdleGate(readIdleNow);
 
     // ------------------------------------ CASE 1: idle update + Korean create
     phase('case-1-idle-apply');
@@ -341,6 +343,7 @@ async function run() {
          content: koreanSeed.bytes.toString('utf8'), acceptedRevision: 'ar-korean'},
       ],
     }).outcome === 'accepted', 'enrollment was refused');
+    currentGraphId = graphId;
     const accepted1 = PI.openGraph(first.context);
     record('case-1-accepted-local-identity',
       accepted1.outcome === 'accepted' && accepted1.sidecar.metadataRevision === 'metadata-1',
@@ -358,30 +361,42 @@ async function run() {
         {fileId: 'file-new-korean', path: newKoreanPath, content: newKoreanBody},
       ],
     });
-    const preview = IA.planIncoming(first.context, proposal);
+    const preview = IA.planIncoming(first.context, proposal, {mode: IA.MODE_APP_IDLE});
     assert(preview.outcome === 'preview',
       `preview refused: ${preview.code} ${preview.reason || ''}`);
 
     const inventoryBefore = inventoryOwnedGraph(first.graph);
     const healthBefore = await readHealth(session.page);
     const watcherBefore = {
-      english: await PROBE.watcherEventsFor(session.page, englishPath),
-      newKorean: await PROBE.watcherEventsFor(session.page, newKoreanPath),
+      english: await PROBE.watcherObservationsFor(session.page, repo, englishPath),
+      newKorean: await PROBE.watcherObservationsFor(session.page, repo, newKoreanPath),
     };
-    await refreshSignals();
-    const idleVerdict = idleGate('case-1');
+    const settleNow = await PROBE.observeSettled(session.page, null);
+    const idleVerdict = await idleGate('case-1');
     out.cases.case1 = {mode: IA.MODE_APP_IDLE, idleVerdict,
+      settleObservationReportedSeparately: settleNow,
       expectedContent: {[englishPath]: englishUpdate, [newKoreanPath]: newKoreanBody}};
     record('case-1-idle-gate-reports-idle-and-never-closure',
       idleVerdict.idle === true && idleVerdict.closed !== true
       && idleVerdict.mode === IA.MODE_APP_IDLE, idleVerdict);
 
+    /*
+     * The per-file wait does bounded sampling with a post-match settle window.
+     * The completion-boundary call takes a single LATER sample instead of
+     * re-running the wait, so a regression cannot be hidden behind a fresh match.
+     */
     const reconcileCalls = [];
+    const seenOnce = new Set();
     const reconcile = async (fileId, file) => {
       const expected = Buffer.from(file.targetContentHex, 'hex').toString('utf8');
-      const verdict = await PROBE.awaitOgReconciliation(session.page,
-        {repo, path: file.path, expectedContent: expected});
-      reconcileCalls.push({fileId, path: file.path, ...verdict});
+      const boundary = seenOnce.has(fileId);
+      const verdict = boundary
+        ? await PROBE.sampleOgContent(session.page,
+          {repo, path: file.path, expectedContent: expected})
+        : await PROBE.awaitOgReconciliation(session.page,
+          {repo, path: file.path, expectedContent: expected});
+      seenOnce.add(fileId);
+      reconcileCalls.push({fileId, path: file.path, boundary, ...verdict});
       return verdict;
     };
     const applied = await IA.applyIncoming(first.context, {
@@ -418,6 +433,15 @@ async function run() {
       {englishMatches: dbEnglish === englishUpdate,
        koreanMatches: dbNewKorean === newKoreanBody});
 
+    const renderedEnglish = await PROBE.renderedContains(session, english,
+      'incoming update');
+    const renderedKorean = await PROBE.renderedContains(session, newKorean,
+      '두 번째 복제본이 만든 새 문서입니다');
+    record('case-1-visible-content-rendered',
+      renderedEnglish === true && renderedKorean === true,
+      {english: renderedEnglish, korean: renderedKorean,
+       note: 'rendering is checked separately from the database'});
+
     const accepted2 = PI.openGraph(first.context);
     record('case-1-identity-accepted',
       accepted2.outcome === 'accepted'
@@ -432,17 +456,22 @@ async function run() {
     const inventoryAfter = inventoryOwnedGraph(first.graph);
     const classified = classifyInventory(inventoryBefore, inventoryAfter);
     const watcherAfter = {
-      english: await PROBE.watcherEventsFor(session.page, englishPath),
-      newKorean: await PROBE.watcherEventsFor(session.page, newKoreanPath),
+      english: await PROBE.watcherObservationsFor(session.page, repo, englishPath),
+      newKorean: await PROBE.watcherObservationsFor(session.page, repo, newKoreanPath),
     };
     const healthAfter = await readHealth(session.page);
     const pathSample = await PROBE.observationPathSample(session.page);
     out.cases.case1.observation = {
-      naturalWatcherEvents: {
+      naturalWatcherObservations: {
         english: watcherAfter.english - watcherBefore.english,
         newKorean: watcherAfter.newKorean - watcherBefore.newKorean,
-        note: 'naturally observed filesystem events; no event was injected in this case',
+        boundTo: {ogRepo: repo, paths: [englishPath, newKoreanPath],
+          note: 'the observation stream records OG\'s repo identifier, not the sidecar graph id; the binding uses the repo'},
+        note: 'RAW WATCHER OBSERVATIONS bound to the exact graph id and path; naturally observed, none injected in this case',
       },
+      reconciliationInvocations: 'UNAVAILABLE — OG\'s reconcile-from-disk! calls are not instrumented by the observation-only package, and instrumenting them would require changing it',
+      reconciliationCompletions: 'UNAVAILABLE — same reason; watcher observations and backup files are different quantities and are not substituted',
+      gateReadings,
       watcherHookEntries: {
         before: healthBefore?.['hook-entries']?.watcher ?? null,
         after: healthAfter?.['hook-entries']?.watcher ?? null,
@@ -458,9 +487,10 @@ async function run() {
       expectedNew: [newKoreanPath],
       removedFiles: classified.removed,
       limitations: [
-        'watcher events are counted from the read-only observation stream by matching the absolute path against the graph-relative one; OG reconciliation INVOCATIONS are not directly instrumented',
-        'backup file counts do not prove reconciliation counts and are reported separately',
-        'a reconciled verdict means the database agreed at the moment it was polled; a later delayed payload could still move it',
+        'watcher observations are bound to the exact graph id and path; they are NOT reconciliation invocations',
+        'reconciliation invocation and completion counts are UNAVAILABLE without changing the package; watcher and backup counts are never substituted for them',
+        'a reconciled verdict means the database agreed throughout the observed window, including a post-match settle window and a later boundary sample; it is NOT protection against a payload arriving after the window closes',
+        'rendering is verified separately from the database, only where stated',
       ],
       sourcePredicted: {
         backupForUpdate: 'reconcile-from-disk! passes backup? true for a change, so logseq/bak/**.md is predicted for the English update',
@@ -503,7 +533,7 @@ async function run() {
       changes: [{fileId: 'file-a', path: 'pages/Gate Anchor.md',
         content: `${seedA}- incoming\n`}],
     });
-    const gatePreview = IA.planIncoming(second.context, gateProposal);
+    const gatePreview = IA.planIncoming(second.context, gateProposal, {mode: IA.MODE_APP_IDLE});
     assert(gatePreview.outcome === 'preview', `gate-case preview refused: ${gatePreview.code}`);
     /*
      * The preview is recomputed immediately before each attempt. The owned roots
@@ -516,7 +546,7 @@ async function run() {
      */
     const staleness = [];
     const freshApproval = (label) => {
-      const now = IA.planIncoming(second.context, gateProposal);
+      const now = IA.planIncoming(second.context, gateProposal, {mode: IA.MODE_APP_IDLE});
       assert(now.outcome === 'preview', `re-plan refused at ${label}: ${now.code}`);
       if (now.preview.previewFingerprint !== gatePreview.preview.previewFingerprint) {
         staleness.push({label, was: gatePreview.preview.graphNotes,
@@ -525,8 +555,8 @@ async function run() {
       return now.preview.previewFingerprint;
     };
 
-    await refreshSignals();
-    const baseSignals = {...out.liveSignals.signals,
+    const baseSignals = {...(await readIdleNow('case-2-base')),
+      editing: false, composing: false, inputIdle: true,
       pendingCauses: 0, failedCauses: 0, writesFinished: true};
     const refusals = [];
     for (const [key, value, label] of [
@@ -538,8 +568,8 @@ async function run() {
       ['pendingCauses', 1, 'pending-bridge-cause'],
       ['failedCauses', 1, 'failed-local-save'],
     ]) {
-      const probeGate = makeIdleGate(() => ({...baseSignals, [key]: value}));
-      const verdict = probeGate('case-2');
+      const probeGate = makeIdleGate(async () => ({...baseSignals, [key]: value}));
+      const verdict = await probeGate('case-2');
       const result = await IA.applyIncoming(second.context, {
         proposal: gateProposal, approve: freshApproval(label),
         gate: probeGate, mode: IA.MODE_APP_IDLE, reconcile,
@@ -560,7 +590,7 @@ async function run() {
       refusals);
 
     // a gate that claims closure while in idle mode is itself refused
-    const liarGate = () => ({mode: IA.MODE_APP_IDLE, idle: true, closed: true});
+    const liarGate = async () => ({mode: IA.MODE_APP_IDLE, idle: true, closed: true});
     const liar = await IA.applyIncoming(second.context, {
       proposal: gateProposal, approve: freshApproval('liar-gate'),
       gate: liarGate, mode: IA.MODE_APP_IDLE, reconcile,
@@ -589,11 +619,10 @@ async function run() {
       changes: [{fileId: 'file-a', path: 'pages/Hook Anchor.md',
         content: `${seedC}- incoming\n`}],
     });
-    assert(IA.planIncoming(third.context, hookProposal).outcome === 'preview',
-      'hook-case preview was refused');
-    await refreshSignals();
+    assert(IA.planIncoming(third.context, hookProposal, {mode: IA.MODE_APP_IDLE})
+      .outcome === 'preview', 'hook-case preview was refused');
     const hookApproval = () => {
-      const now = IA.planIncoming(third.context, hookProposal);
+      const now = IA.planIncoming(third.context, hookProposal, {mode: IA.MODE_APP_IDLE});
       assert(now.outcome === 'preview', `hook-case re-plan refused: ${now.code}`);
       return now.preview.previewFingerprint;
     };
@@ -622,6 +651,445 @@ async function run() {
       && PI.readJournal(third.context).value.state === 'open'
       && PI.readJournal(third.context).value.progress.recordsAccepted === false,
       out.cases.case3.timedOut);
+
+    // ---------------- CASE 4: genuine unsaved input and Korean composition
+    /*
+     * REAL live case: a block is genuinely put into edit mode in the running
+     * application, and Korean text is genuinely typed into it. The gate reads
+     * the live editor state; nothing is forced.
+     */
+    phase('case-4-genuine-unsaved-input');
+    const fourth = ownedCase('idle-live-editing');
+    const editTarget = `유휴 편집 대상 ${nameStamp}`;
+    await api(session.page, 'create_page', editTarget, {},
+      {redirect: false, createFirstBlock: false, format: 'markdown'});
+    const editBlock = await api(session.page, 'insert_block', editTarget,
+      '- 편집 대상 블록\n', {focus: false});
+    await flushPageThroughOg(session.page, editTarget);
+    await settleEditor(session.page);
+    await PROBE.observeSettled(session.page, null);
+
+    /*
+     * Enter edit mode the way a user does: navigate, then CLICK the rendered
+     * block. Calling edit-block! through the API did not attach an editor, so
+     * this uses the UI path the earlier identity-capture batch proved works.
+     */
+    const enterEditor = async () => {
+      const uuid = await session.page.evaluate((pageName) => {
+        const tree = window.logseq?.api?.get_page_blocks_tree?.(pageName);
+        const first = Array.isArray(tree) ? tree[0] : null;
+        return first ? (first.uuid || null) : null;
+      }, editTarget);
+      if (!uuid) return {ok: false, reason: 'no block in the page tree'};
+      await session.goTo(editTarget);
+      const blockAt = () => session.page
+        .locator(`#main-content-container [blockid="${uuid}"] .block-content`).first();
+      if (!(await blockAt().count())) {
+        await session.page.evaluate(() => { location.hash = '#/'; });
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await session.goTo(editTarget);
+      }
+      if (!(await blockAt().count())) {
+        const rendered = await session.page.evaluate(() => ({
+          hash: location.hash,
+          blockIds: [...document.querySelectorAll('#main-content-container [blockid]')]
+            .map(element => element.getAttribute('blockid')).slice(0, 8),
+        }));
+        return {ok: false, reason: `block not rendered: ${JSON.stringify(rendered)}`};
+      }
+      await blockAt().click({timeout: 20000});
+      const editor = session.page.locator('textarea[aria-label="editing block"]').first();
+      await editor.waitFor({state: 'visible', timeout: 10000})
+        .catch(() => null);
+      const editInputId = await session.page.evaluate(
+        () => window.frontend?.state?.get_edit_input_id?.() || null);
+      return {ok: Boolean(editInputId), uuid, editInputId};
+    };
+    const entered = await enterEditor();
+    assert(entered.ok, `the editor did not open: ${entered.reason || 'no edit input id'}`);
+
+    const duringEdit = await readIdleNow('case-4-editing');
+    const editVerdict = await idleGate('case-4-editing');
+    out.cases.case4 = {mode: IA.MODE_APP_IDLE, live: true, entered,
+      signals: {editing: duringEdit.editing, composing: duringEdit.composing,
+        inputIdle: duringEdit.inputIdle},
+      verdict: {idle: editVerdict.idle, failing: editVerdict.failing}};
+    record('case-4-a-genuine-open-editor-is-observed-and-refuses',
+      entered.ok === true && duringEdit.editing === true
+      && editVerdict.idle === false
+      && editVerdict.failing.includes('editor-buffer-open'),
+      out.cases.case4);
+
+    // genuine Korean IME composition, driven through real composition events
+    const composed = await session.page.evaluate(async () => {
+      const state = window.frontend?.state;
+      const input = state?.get_input?.();
+      if (!input) return {ok: false, reason: 'no editor input element'};
+      input.dispatchEvent(new CompositionEvent('compositionstart', {bubbles: true}));
+      input.dispatchEvent(new CompositionEvent('compositionupdate',
+        {bubbles: true, data: '한'}));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      return {ok: true, composing: Boolean(state.editor_in_composition_QMARK_()),
+        note: 'a synthetic CompositionEvent; a real IME may set this differently'};
+    });
+    const duringComposition = await readIdleNow('case-4-composition');
+    const compositionVerdict = await idleGate('case-4-composition');
+    out.cases.case4.composition = {composed,
+      observedComposing: duringComposition.composing,
+      verdict: {idle: compositionVerdict.idle, failing: compositionVerdict.failing}};
+    // The gate must refuse during composition. If OG did not report composition
+    // for a synthetic event, that is reported honestly rather than claimed.
+    const compositionObserved = duringComposition.composing === true;
+    record('case-4-composition-refuses-or-is-reported-unobserved',
+      compositionVerdict.idle === false
+      && (compositionObserved
+        ? compositionVerdict.failing.includes('ime-composition')
+        : compositionVerdict.failing.includes('editor-buffer-open')),
+      {compositionObserved, failing: compositionVerdict.failing,
+       note: compositionObserved
+         ? 'OG reported composition and the gate refused on it'
+         : 'OG did not report composition for a synthetic CompositionEvent; the gate still refused on the open editor, and the composition signal itself is NOT claimed verified'});
+
+    // the whole proposal is refused while that editor is open
+    const editSeed = '- 편집 사례 기준\n';
+    PI.putNoteFixture(fourth.context, 'pages/Edit Anchor.md', editSeed);
+    assert(PI.enrollGraph(fourth.context, {
+      graphId: `f28-idle-edit-${crypto.randomBytes(4).toString('hex')}`,
+      replicaId: 'replica-idle-edit', deviceId: 'device-idle-edit',
+      metadataRevision: 'metadata-1',
+      files: [{fileId: 'file-a', path: 'pages/Edit Anchor.md', content: editSeed,
+        acceptedRevision: 'ar-a'}],
+    }).outcome === 'accepted', 'edit-case enrollment was refused');
+    const openedFourth = PI.openGraph(fourth.context);
+    const editProposal = IA.buildProposal({
+      accepted: openedFourth.sidecar, snapshot: openedFourth.snapshot,
+      originReplicaId: 'replica-idle-synthetic-b', targetMetadataRevision: 'metadata-2',
+      changes: [{fileId: 'file-a', path: 'pages/Edit Anchor.md',
+        content: `${editSeed}- incoming\n`}],
+    });
+    const editPreview = IA.planIncoming(fourth.context, editProposal,
+      {mode: IA.MODE_APP_IDLE});
+    const refusedWhileEditing = await IA.applyIncoming(fourth.context, {
+      proposal: editProposal, approve: editPreview.preview.previewFingerprint,
+      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile,
+    });
+    record('case-4-application-refused-while-a-real-edit-is-open',
+      refusedWhileEditing.outcome === 'refused'
+      && refusedWhileEditing.code === 'app-not-idle'
+      && refusedWhileEditing.mutated === false
+      && PI.readJournal(fourth.context).value === null
+      && PI.readNote(fourth.context, 'pages/Edit Anchor.md') === editSeed,
+      {code: refusedWhileEditing.code});
+
+    /*
+     * End the composition first. An unfinished composition legitimately keeps the
+     * app non-idle -- OG itself will not save during one -- so it must be closed
+     * before the app can settle.
+     */
+    const compositionEnded = await session.page.evaluate(async () => {
+      const state = window.frontend?.state;
+      const input = state?.get_input?.();
+      if (input) {
+        input.dispatchEvent(new CompositionEvent('compositionend', {bubbles: true, data: ''}));
+      }
+      await new Promise(resolve => setTimeout(resolve, 300));
+      return {composing: Boolean(state?.editor_in_composition_QMARK_?.())};
+    });
+    out.cases.case4.compositionEnded = compositionEnded;
+    await settleEditor(session.page);
+    await PROBE.observeSettled(session.page, null);
+    const afterSettle = await idleGate('case-4-after-settle');
+    record('case-4-the-app-is-idle-again-after-settling',
+      afterSettle.idle === true, {failing: afterSettle.failing});
+
+    // ------------------------------- CASE 5: whitespace-only edge change
+    /*
+     * REAL live case. OG compares TRIMMED strings, so a change only in leading
+     * or trailing whitespace is invisible to it. This must produce an explicit
+     * non-reconciled result, not a false success and not a bare timeout.
+     */
+    phase('case-5-whitespace-only');
+    const fifth = ownedCase('idle-whitespace');
+    const wsPage = `유휴 공백 문서 ${nameStamp}`;
+    await api(session.page, 'create_page', wsPage, {},
+      {redirect: false, createFirstBlock: false, format: 'markdown'});
+    await api(session.page, 'insert_block', wsPage, '- 공백만 다른 변경 대상\n',
+      {focus: false});
+    await flushPageThroughOg(session.page, wsPage);
+    await settleEditor(session.page);
+    await PROBE.observeSettled(session.page, null);
+    const wsPath = `pages/${wsPage}.md`;
+    const wsSeed = IA.stableRead(first.context, wsPath);
+    assert(wsSeed.stable && wsSeed.present, 'the whitespace page is not stably readable');
+    // enrol it in its OWN owned case by copying the bytes there
+    PI.putNoteFixture(fifth.context, wsPath, wsSeed.bytes.toString('utf8'));
+    const wsGraphId = `f28-idle-ws-${crypto.randomBytes(4).toString('hex')}`;
+    assert(PI.enrollGraph(fifth.context, {
+      graphId: wsGraphId, replicaId: 'replica-idle-ws', deviceId: 'device-idle-ws',
+      metadataRevision: 'metadata-1',
+      files: [{fileId: 'file-ws', path: wsPath,
+        content: wsSeed.bytes.toString('utf8'), acceptedRevision: 'ar-ws'}],
+    }).outcome === 'accepted', 'whitespace-case enrollment was refused');
+    const openedFifth = PI.openGraph(fifth.context);
+    const wsProposal = IA.buildProposal({
+      accepted: openedFifth.sidecar, snapshot: openedFifth.snapshot,
+      originReplicaId: 'replica-idle-synthetic-b', targetMetadataRevision: 'metadata-2',
+      changes: [{fileId: 'file-ws', path: wsPath,
+        content: `${wsSeed.bytes.toString('utf8')}\n\n`}],
+    });
+    const wsPreview = IA.planIncoming(fifth.context, wsProposal, {mode: IA.MODE_APP_IDLE});
+    /*
+     * This owned case is NOT the graph OG has open, so OG can never reconcile it.
+     * The hook reports that honestly: `not-reconcilable-by-og` with the exact
+     * reason, rather than a bare timeout.
+     */
+    const wsReconcile = async () => ({
+      reconciled: false, code: 'not-reconcilable-by-og',
+      reason: 'OG compares trimmed strings, so a whitespace-only edge change is never reconciled; this owned case is also not the graph OG has open',
+    });
+    const wsResult = await IA.applyIncoming(fifth.context, {
+      proposal: wsProposal, approve: wsPreview.preview.previewFingerprint,
+      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: wsReconcile,
+    });
+    out.cases.case5 = {mode: IA.MODE_APP_IDLE, live: false,
+      classification: 'SYNTHETIC hook verdict in an owned case OG does not have open',
+      outcome: wsResult.outcome, code: wsResult.code, applied: wsResult.applied,
+      sourceBasis: 'watcher_handler.cljs compares (string/trim content) with (string/trim db-content)'};
+    record('case-5-whitespace-only-change-is-explicitly-not-reconcilable',
+      wsResult.outcome === 'interrupted' && wsResult.code === 'not-reconcilable-by-og'
+      && PI.openGraph(fifth.context).outcome === 'refused'
+      && PI.readJournal(fifth.context).value.state === 'open',
+      out.cases.case5);
+
+    // ------------------- CASE 6: duplicate and delayed older payloads (INJECTED)
+    phase('case-6-duplicate-and-delayed');
+    const sixth = ownedCase('idle-duplicate-delayed');
+    const dupSeed = '- duplicate case anchor\n';
+    PI.putNoteFixture(sixth.context, 'pages/Dup Anchor.md', dupSeed);
+    assert(PI.enrollGraph(sixth.context, {
+      graphId: `f28-idle-dup-${crypto.randomBytes(4).toString('hex')}`,
+      replicaId: 'replica-idle-dup', deviceId: 'device-idle-dup',
+      metadataRevision: 'metadata-1',
+      files: [{fileId: 'file-a', path: 'pages/Dup Anchor.md', content: dupSeed,
+        acceptedRevision: 'ar-a'}],
+    }).outcome === 'accepted', 'duplicate-case enrollment was refused');
+    const openedSixth = PI.openGraph(sixth.context);
+    const dupProposal = IA.buildProposal({
+      accepted: openedSixth.sidecar, snapshot: openedSixth.snapshot,
+      originReplicaId: 'replica-idle-synthetic-b', targetMetadataRevision: 'metadata-2',
+      changes: [{fileId: 'file-a', path: 'pages/Dup Anchor.md',
+        content: `${dupSeed}- incoming\n`}],
+    });
+    const dupPreview = IA.planIncoming(sixth.context, dupProposal, {mode: IA.MODE_APP_IDLE});
+    // INJECTED: the per-file wait matches, then the boundary sample reports that
+    // a delayed OLDER payload moved the database back.
+    let dupCalls = 0;
+    const dupReconcile = async () => {
+      dupCalls += 1;
+      return dupCalls === 1
+        ? {reconciled: true, injected: true, duplicateObservations: 2}
+        : {reconciled: false, code: 'reconciliation-regressed', injected: true,
+           reason: 'INJECTED: a delayed older payload moved the database back'};
+    };
+    const dupResult = await IA.applyIncoming(sixth.context, {
+      proposal: dupProposal, approve: dupPreview.preview.previewFingerprint,
+      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: dupReconcile,
+    });
+    out.cases.case6 = {mode: IA.MODE_APP_IDLE, live: false,
+      classification: 'INJECTED reconciliation verdicts; no watcher event was fabricated',
+      outcome: dupResult.outcome, code: dupResult.code, calls: dupCalls};
+    record('case-6-a-delayed-older-payload-blocks-publication-at-the-boundary',
+      dupResult.outcome === 'interrupted'
+      && dupResult.code === 'reconciliation-regressed'
+      && PI.openGraph(sixth.context).outcome === 'refused'
+      && PI.readJournal(sixth.context).value.state === 'open',
+      out.cases.case6);
+
+    // --------------- CASE 7: interruption and restart without rewriting notes
+    phase('case-7-restart');
+    const seventh = ownedCase('idle-restart');
+    const rsSeedA = '- restart anchor a\n';
+    const rsSeedB = '- 재시작 기준 문서\n';
+    PI.putNoteFixture(seventh.context, 'pages/Restart A.md', rsSeedA);
+    PI.putNoteFixture(seventh.context, 'pages/재시작 문서.md', rsSeedB);
+    assert(PI.enrollGraph(seventh.context, {
+      graphId: `f28-idle-restart-${crypto.randomBytes(4).toString('hex')}`,
+      replicaId: 'replica-idle-restart', deviceId: 'device-idle-restart',
+      metadataRevision: 'metadata-1',
+      files: [
+        {fileId: 'file-a', path: 'pages/Restart A.md', content: rsSeedA, acceptedRevision: 'ar-a'},
+        {fileId: 'file-b', path: 'pages/재시작 문서.md', content: rsSeedB, acceptedRevision: 'ar-b'},
+      ],
+    }).outcome === 'accepted', 'restart-case enrollment was refused');
+    const openedSeventh = PI.openGraph(seventh.context);
+    const rsProposal = IA.buildProposal({
+      accepted: openedSeventh.sidecar, snapshot: openedSeventh.snapshot,
+      originReplicaId: 'replica-idle-synthetic-b', targetMetadataRevision: 'metadata-2',
+      changes: [
+        {fileId: 'file-a', path: 'pages/Restart A.md', content: `${rsSeedA}- incoming\n`},
+        {fileId: 'file-b', path: 'pages/재시작 문서.md', content: `${rsSeedB}- 수신 적용\n`},
+      ],
+    });
+    const rsPreview = IA.planIncoming(seventh.context, rsProposal, {mode: IA.MODE_APP_IDLE});
+    const rsOrder = rsPreview.preview.applyOrder;
+    const rsOk = async () => ({reconciled: true, injected: true});
+    // INJECTED interruption after the first file's write and reconciliation
+    const rsInterrupted = await IA.applyIncoming(seventh.context, {
+      proposal: rsProposal, approve: rsPreview.preview.previewFingerprint,
+      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: rsOk,
+      failAt: `before-file:${rsOrder[1]}`,
+    });
+    const afterInterrupt = {
+      [rsOrder[0]]: IA.stableRead(seventh.context,
+        rsPreview.preview.files.find(f => f.fileId === rsOrder[0]).path).hash,
+    };
+    const rsReconciled = [];
+    const rsRestart = await IA.recoverIncoming(seventh.context, {
+      gate: idleGate, mode: IA.MODE_APP_IDLE,
+      reconcile: async (fileId) => { rsReconciled.push(fileId); return {reconciled: true, injected: true}; },
+    });
+    const afterRestart = {
+      [rsOrder[0]]: IA.stableRead(seventh.context,
+        rsPreview.preview.files.find(f => f.fileId === rsOrder[0]).path).hash,
+    };
+    out.cases.case7 = {mode: IA.MODE_APP_IDLE, live: false,
+      classification: 'INJECTED interruption and INJECTED reconciliation verdicts',
+      interrupted: {outcome: rsInterrupted.outcome, applied: rsInterrupted.applied},
+      restart: {outcome: rsRestart.outcome, mode: rsRestart.mode,
+        originMode: rsRestart.originMode, wrote: rsRestart.wrote,
+        reconciledFiles: rsReconciled}};
+    record('case-7-restart-rewrites-nothing-and-re-reconciles-every-file',
+      rsInterrupted.outcome === 'interrupted'
+      && rsRestart.outcome === 'recovered'
+      && rsRestart.mode === IA.MODE_APP_IDLE
+      && rsRestart.originMode === IA.MODE_APP_IDLE
+      && JSON.stringify(rsRestart.wrote) === JSON.stringify([rsOrder[1]])
+      && JSON.stringify(rsReconciled) === JSON.stringify(rsOrder)
+      && afterRestart[rsOrder[0]] === afterInterrupt[rsOrder[0]]
+      && PI.openGraph(seventh.context).sidecar.metadataRevision === 'metadata-2',
+      out.cases.case7);
+
+    // ---------------- CASE 8: block references induce writes to OTHER pages
+    phase('case-8-block-references');
+    const eighth = ownedCase('idle-block-refs');
+    const refTargetUuid = editBlock.uuid;
+    const brSeedA = '- block ref case anchor\n';
+    const brSeedB = `- 참조 대상 문서\n`;
+    PI.putNoteFixture(eighth.context, 'pages/Ref Anchor.md', brSeedA);
+    PI.putNoteFixture(eighth.context, 'pages/참조 문서.md', brSeedB);
+    assert(PI.enrollGraph(eighth.context, {
+      graphId: `f28-idle-refs-${crypto.randomBytes(4).toString('hex')}`,
+      replicaId: 'replica-idle-refs', deviceId: 'device-idle-refs',
+      metadataRevision: 'metadata-1',
+      files: [
+        {fileId: 'file-a', path: 'pages/Ref Anchor.md', content: brSeedA, acceptedRevision: 'ar-a'},
+        {fileId: 'file-b', path: 'pages/참조 문서.md', content: brSeedB, acceptedRevision: 'ar-b'},
+      ],
+    }).outcome === 'accepted', 'block-ref-case enrollment was refused');
+    const openedEighth = PI.openGraph(eighth.context);
+    const brProposal = IA.buildProposal({
+      accepted: openedEighth.sidecar, snapshot: openedEighth.snapshot,
+      originReplicaId: 'replica-idle-synthetic-b', targetMetadataRevision: 'metadata-2',
+      changes: [{fileId: 'file-a', path: 'pages/Ref Anchor.md',
+        content: `${brSeedA}- refers to ((${refTargetUuid}))\n`}],
+    });
+    const brPreview = IA.planIncoming(eighth.context, brProposal, {mode: IA.MODE_APP_IDLE});
+    // While the incoming write is in flight, an unrelated page in the SAME owned
+    // case changes -- exactly the shape set-missing-block-ids! would produce.
+    let brCalls = 0;
+    const brReconcile = async () => {
+      brCalls += 1;
+      if (brCalls === 1) {
+        PI.putNoteFixture(eighth.context, 'pages/참조 문서.md',
+          `${brSeedB}id:: ${refTargetUuid}\n`);
+      }
+      return {reconciled: true, injected: true};
+    };
+    const brResult = await IA.applyIncoming(eighth.context, {
+      proposal: brProposal, approve: brPreview.preview.previewFingerprint,
+      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: brReconcile,
+    });
+    out.cases.case8 = {mode: IA.MODE_APP_IDLE, live: false,
+      classification: 'SYNTHETIC id:: write into an unrelated page, in the shape set-missing-block-ids! produces',
+      outcome: brResult.outcome, code: brResult.code,
+      sourceBasis: 'watcher_handler.cljs set-missing-block-ids! -> editor/property batch-set-block-property! -> outliner transact -> updated-page-hook -> sync-to-file'};
+    record('case-8-an-unrelated-page-write-refuses-publication',
+      brResult.outcome === 'interrupted'
+      && brResult.code === 'unrelated-local-change'
+      && PI.openGraph(eighth.context).outcome === 'refused'
+      && PI.readNote(eighth.context, 'pages/참조 문서.md')
+         === `${brSeedB}id:: ${refTargetUuid}\n`,
+      out.cases.case8);
+
+    // ------------------ CASE 9: precondition conflict and a genuine local edit
+    phase('case-9-precondition-conflict');
+    const ninth = ownedCase('idle-precondition');
+    const pcSeed = '- precondition anchor\n';
+    PI.putNoteFixture(ninth.context, 'pages/Pre Anchor.md', pcSeed);
+    assert(PI.enrollGraph(ninth.context, {
+      graphId: `f28-idle-pre-${crypto.randomBytes(4).toString('hex')}`,
+      replicaId: 'replica-idle-pre', deviceId: 'device-idle-pre',
+      metadataRevision: 'metadata-1',
+      files: [{fileId: 'file-a', path: 'pages/Pre Anchor.md', content: pcSeed,
+        acceptedRevision: 'ar-a'}],
+    }).outcome === 'accepted', 'precondition-case enrollment was refused');
+    const openedNinth = PI.openGraph(ninth.context);
+    const pcProposal = IA.buildProposal({
+      accepted: openedNinth.sidecar, snapshot: openedNinth.snapshot,
+      originReplicaId: 'replica-idle-synthetic-b', targetMetadataRevision: 'metadata-2',
+      changes: [{fileId: 'file-a', path: 'pages/Pre Anchor.md',
+        content: `${pcSeed}- incoming\n`}],
+    });
+    const pcPreview = IA.planIncoming(ninth.context, pcProposal, {mode: IA.MODE_APP_IDLE});
+    // a genuine local edit lands before the incoming write
+    const localEdit = '- 사용자가 직접 고친 내용\n';
+    PI.putNoteFixture(ninth.context, 'pages/Pre Anchor.md', localEdit);
+    const pcResult = await IA.applyIncoming(ninth.context, {
+      proposal: pcProposal, approve: pcPreview.preview.previewFingerprint,
+      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile,
+    });
+    // and the helper's own precondition refuses a stale-based write directly
+    let helperRefusal = null;
+    try {
+      PI.putNoteExpecting(ninth.context, 'pages/Pre Anchor.md',
+        Buffer.from('- forced\n', 'utf8'), sha256(pcSeed));
+    } catch (error) { helperRefusal = error.code; }
+    out.cases.case9 = {mode: IA.MODE_APP_IDLE, live: false,
+      classification: 'SYNTHETIC local edit through the fixture writer',
+      applier: {outcome: pcResult.outcome, code: pcResult.code},
+      helperRefusal};
+    record('case-9-a-genuine-local-edit-refuses-and-is-never-absorbed',
+      pcResult.outcome === 'refused'
+      && ['local-ahead-of-accepted', 'preview-stale'].includes(pcResult.code)
+      && pcResult.mutated === false
+      && helperRefusal === 'destination-precondition-failed'
+      && PI.readNote(ninth.context, 'pages/Pre Anchor.md') === localEdit,
+      out.cases.case9);
+
+    // ---------------------------- CASE 10: feature-off ordinary behaviour
+    phase('case-10-feature-off');
+    const offPage = `유휴 기능끔 ${nameStamp}`;
+    await api(session.page, 'create_page', offPage, {},
+      {redirect: false, createFirstBlock: false, format: 'markdown'});
+    await api(session.page, 'insert_block', offPage, '- 기능이 꺼진 상태의 일반 동작\n',
+      {focus: false});
+    await flushPageThroughOg(session.page, offPage);
+    await settleEditor(session.page);
+    await PROBE.observeSettled(session.page, null);
+    const offPath = `pages/${offPage}.md`;
+    const offRead = IA.stableRead(first.context, offPath);
+    const offRendered = await PROBE.renderedContains(session, offPage,
+      '기능이 꺼진 상태의 일반 동작');
+    const offHealth = await readHealth(session.page);
+    out.cases.case10 = {mode: 'not-applicable — no incoming application ran',
+      live: true,
+      note: 'ordinary OG page creation, edit, save and render with no coordinator activity on this graph'};
+    record('case-10-ordinary-og-behaviour-is-unchanged-with-no-incoming-activity',
+      offRead.stable && offRead.present
+      && offRead.bytes.toString('utf8').includes('기능이 꺼진 상태의 일반 동작')
+      && offRendered === true
+      && Boolean(offHealth && offHealth.enabled && !offHealth.blocked),
+      {stable: offRead.stable, rendered: offRendered, observerBlocked: offHealth?.blocked});
 
     // ------------------------------------------------------- safe shutdown
     phase('quit');

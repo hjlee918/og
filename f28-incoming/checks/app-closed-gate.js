@@ -81,9 +81,15 @@ function makeGate(built, trees, deps = {}) {
  * in flight and they exclude nothing else at all.
  */
 function makeIdleGate(readIdle) {
-  return (stage, mode = 'app-idle') => {
+  return async (stage, mode = 'app-idle') => {
+    /*
+     * FRESH at every boundary. `readIdle` is awaited, so a live gate takes a new
+     * graph-bound reading each time it is called -- including between the first
+     * and second note write, and again at the completion boundary after an
+     * awaited reconciliation. Nothing here replays a value captured earlier.
+     */
     let signals;
-    try { signals = readIdle(stage); }
+    try { signals = await readIdle(stage, mode); }
     catch (error) {
       return { mode, idle: false, uncertain: true, stage,
         reason: `idle signals could not be read: ${error.message}` };
@@ -93,18 +99,25 @@ function makeIdleGate(readIdle) {
         reason: 'idle signals were unreadable' };
     }
     const failing = [];
-    // A signal that cannot be read is never treated as satisfied. Absence of
-    // evidence refuses, and the unreadable signal is named.
+    /*
+     * A required signal that cannot be read is NEVER treated as satisfied and is
+     * never substituted with a different, weaker observation. The weaker
+     * observation is reported alongside, as its own field, so the distinction
+     * stays visible in evidence.
+     */
     for (const [key, label] of [['editing', 'edit-state-unreadable'],
       ['composing', 'composition-unreadable'], ['inputIdle', 'input-idle-unreadable'],
-      ['writesFinished', 'writes-finished-unreadable']]) {
+      ['writesFinished', 'writes-finished-unreadable'],
+      ['pendingCauses', 'pending-causes-unreadable']]) {
       if (signals[key] === null || signals[key] === undefined) failing.push(label);
     }
     if (signals.editing) failing.push('editor-buffer-open');
     if (signals.composing) failing.push('ime-composition');
-    if (signals.inputIdle !== true) failing.push('recent-input');
-    if (signals.writesFinished !== true) failing.push('write-batch-not-dispatched');
-    if (signals.pendingCauses !== 0) failing.push('pending-bridge-cause');
+    if (signals.inputIdle === false) failing.push('recent-input');
+    if (signals.writesFinished === false) failing.push('write-batch-not-dispatched');
+    if (typeof signals.pendingCauses === 'number' && signals.pendingCauses !== 0) {
+      failing.push('pending-bridge-cause');
+    }
     if (signals.failedCauses) failing.push('failed-local-save');
     return {
       mode,

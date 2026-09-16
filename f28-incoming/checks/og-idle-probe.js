@@ -185,75 +185,142 @@ async function observeSettled(page, graphId, {windowMs = 2500, attempts = 6} = {
 }
 
 /*
- * Has OG taken the change? Poll its DATABASE for the exact path, and also read
- * what is rendered. A bounded wait with typed outcomes:
+ * Has OG taken the change?
  *
- *   reconciled              db content equals the approved target
- *   reconciliation-timeout  the wait expired with the database never matching
- *   reconciliation-regressed the database matched and then moved away again
+ * Bounded sampling with an explicit post-match settle window, so a regression
+ * is actually reachable rather than being dead code behind an immediate return:
  *
- * What a `reconciled` verdict establishes is bounded: OG's database agreed with
- * the approved target AT THE MOMENT IT WAS POLLED. It is not proof that a later
- * delayed or stale watcher payload cannot move the database again afterwards.
+ *   1. poll the DATABASE for the exact path until it equals the approved target
+ *      or the wait expires;
+ *   2. on a first match, keep sampling for `settleMs` and report a regression if
+ *      it moves away again;
+ *   3. report every sample count so the coverage is visible.
+ *
+ * Typed outcomes: `reconciled`, `reconciliation-timeout`,
+ * `reconciliation-regressed`, `reconciliation-failed`.
+ *
+ * WHAT THIS DOES NOT ESTABLISH. It says the database agreed throughout the
+ * observed window. It is NOT protection against a delayed or stale watcher
+ * payload arriving after the window closes, and no such protection is claimed.
+ * Rendering is NOT checked here -- visible content is verified separately by the
+ * caller, in the live cases where it matters.
  */
 async function awaitOgReconciliation(page, {repo, path, expectedContent,
-  timeoutMs = 20000, intervalMs = 250}) {
+  timeoutMs = 20000, intervalMs = 250, settleMs = 1500}) {
   const started = Date.now();
-  let everMatched = false;
+  const readDb = () => page.evaluate(({repo, path}) => {
+    const db = window.frontend && window.frontend.db;
+    if (!db || !db.get_file) throw new Error('frontend.db.get_file is unavailable');
+    const content = db.get_file(repo, path);
+    return typeof content === 'string' ? content : null;
+  }, {repo, path}).then(value => ({value}), error => ({error: String(error)}));
+
   let polls = 0;
-  let lastLength = null;
+  let matchedAtMs = null;
   for (;;) {
     polls += 1;
-    const observed = await page.evaluate(({repo, path}) => {
-      const db = window.frontend && window.frontend.db;
-      if (!db || !db.get_file) throw new Error('frontend.db.get_file is unavailable');
-      const content = db.get_file(repo, path);
-      return typeof content === 'string' ? content : null;
-    }, {repo, path}).catch(error => ({error: String(error)}));
-    if (observed && observed.error) {
-      return {reconciled: false, code: 'reconciliation-failed',
-        reason: observed.error, polls, elapsedMs: Date.now() - started};
+    const observed = await readDb();
+    if (observed.error) {
+      return {reconciled: false, code: 'reconciliation-failed', reason: observed.error,
+        polls, elapsedMs: Date.now() - started};
     }
-    lastLength = observed === null ? null : observed.length;
-    if (observed === expectedContent) {
-      everMatched = true;
-      return {reconciled: true, polls, elapsedMs: Date.now() - started,
-        observedLength: lastLength,
-        bounded: 'the database agreed at this poll; a later delayed payload could still move it'};
-    }
-    if (everMatched) {
-      return {reconciled: false, code: 'reconciliation-regressed',
-        reason: 'the database matched the approved target and then moved away',
-        polls, elapsedMs: Date.now() - started, observedLength: lastLength};
-    }
+    if (observed.value === expectedContent) { matchedAtMs = Date.now() - started; break; }
     if (Date.now() - started > timeoutMs) {
       return {reconciled: false, code: 'reconciliation-timeout',
         reason: `OG did not take the change within ${timeoutMs} ms`,
-        polls, elapsedMs: Date.now() - started, observedLength: lastLength};
+        polls, elapsedMs: Date.now() - started,
+        observedLength: observed.value === null ? null : observed.value.length};
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
+
+  // Post-match settle: this is what makes a regression observable at all.
+  const settleStarted = Date.now();
+  let settleSamples = 0;
+  while (Date.now() - settleStarted < settleMs) {
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+    settleSamples += 1;
+    polls += 1;
+    const again = await readDb();
+    if (again.error) {
+      return {reconciled: false, code: 'reconciliation-failed', reason: again.error,
+        polls, settleSamples, matchedAtMs, elapsedMs: Date.now() - started};
+    }
+    if (again.value !== expectedContent) {
+      return {reconciled: false, code: 'reconciliation-regressed',
+        reason: 'the database matched the approved target and then moved away during the settle window',
+        polls, settleSamples, matchedAtMs, elapsedMs: Date.now() - started,
+        observedLength: again.value === null ? null : again.value.length};
+    }
+  }
+  return {reconciled: true, polls, settleSamples, matchedAtMs, settleMs,
+    elapsedMs: Date.now() - started,
+    bounded: 'the database agreed throughout the observed window; a payload arriving after it is not excluded'};
 }
 
-/* Count reconciliation INVOCATIONS observably: OG's own raw watcher events for
- * the exact path, from the read-only observation stream. Backup file counts are
- * a separate signal and never substitute for this. */
-async function watcherEventsFor(page, path) {
-  return page.evaluate(({name, path}) => {
+/*
+ * A single later boundary sample: does the database STILL hold the approved
+ * target now? Used at the completion boundary, where re-running the full wait
+ * would hide a regression behind a fresh match.
+ */
+async function sampleOgContent(page, {repo, path, expectedContent}) {
+  const observed = await page.evaluate(({repo, path}) => {
+    const db = window.frontend && window.frontend.db;
+    if (!db || !db.get_file) throw new Error('frontend.db.get_file is unavailable');
+    const content = db.get_file(repo, path);
+    return typeof content === 'string' ? content : null;
+  }, {repo, path}).then(value => ({value}), error => ({error: String(error)}));
+  if (observed.error) {
+    return {reconciled: false, code: 'reconciliation-failed', reason: observed.error};
+  }
+  if (observed.value !== expectedContent) {
+    return {reconciled: false, code: 'reconciliation-regressed',
+      reason: 'the database no longer holds the approved target at the completion boundary',
+      observedLength: observed.value === null ? null : observed.value.length};
+  }
+  return {reconciled: true, boundarySample: true};
+}
+
+/*
+ * Is the approved content VISIBLE in the rendered page? Checked separately from
+ * the database, and only in the live cases where it matters.
+ */
+async function renderedContains(session, pageName, expected) {
+  await session.goTo(pageName);
+  return session.page.evaluate(value => document.body.innerText.includes(value), expected);
+}
+
+/*
+ * Count RAW WATCHER OBSERVATIONS recorded by the read-only observation stream
+ * for one exact graph and one exact graph-relative path.
+ *
+ * These are NOT reconciliation invocations. OG's internal
+ * `reconcile-from-disk!` calls are not instrumented by the observation-only
+ * package, and counting them would require changing it, which is out of scope.
+ * Reconciliation invocation and completion counts are therefore reported as
+ * UNAVAILABLE; watcher observations and backup files are different quantities
+ * and are never substituted for them.
+ *
+ * The match is bound to OG's exact repo identifier and the exact graph-relative
+ * path. A suffix match was previously used, which could have counted an
+ * identically named file in a different graph.
+ */
+async function watcherObservationsFor(page, ogRepo, path) {
+  return page.evaluate(({name, ogRepo, path}) => {
     const api = window[name];
     if (!api || typeof api.read !== 'function') return null;
     const events = api.read() || [];
     let count = 0;
     for (const record of events) {
       const observation = record && record.observation;
-      if (!observation || typeof observation.path !== 'string') continue;
-      // The watcher publishes an ABSOLUTE path; the transaction names a
-      // graph-relative one. Comparing them directly counts zero for every file,
-      // which is a measurement artefact, not an absence of events.
-      if (observation.path === path || observation.path.endsWith(`/${path}`)) count += 1;
+      if (!observation || observation.path !== path) continue;
+      // The stream records OG's own repo identifier, which is what identifies
+      // the graph directory here -- not the sidecar's graph id.
+      if (ogRepo && observation['graph-id'] !== ogRepo) continue;
+      count += 1;
     }
     return count;
-  }, {name: OBSERVATION_API, path});
+  }, {name: OBSERVATION_API, ogRepo, path});
 }
 
 /* A bounded sample of observation paths, for diagnosing count mismatches. */
@@ -267,7 +334,8 @@ async function observationPathSample(page, limit = 12) {
       const record = events[index];
       const observation = record && record.observation;
       if (observation && typeof observation.path === 'string') {
-        paths.push({kind: record.event, path: observation.path});
+        paths.push({kind: record.event, path: observation.path,
+          graphId: observation['graph-id'] ?? null});
       }
     }
     return paths;
@@ -276,5 +344,6 @@ async function observationPathSample(page, limit = 12) {
 
 module.exports = {
   OBSERVATION_API, awaitOgReconciliation, observationPathSample, observeSettled,
-  pendingLocalCauses, readIdleSignals, watcherEventsFor,
+  pendingLocalCauses, readIdleSignals, renderedContains, sampleOgContent,
+  watcherObservationsFor,
 };

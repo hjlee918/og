@@ -821,6 +821,33 @@ Awaiting supervisor review; not accepted. It extends the incoming contract above
 without weakening any of it. Results are in `RESULTS.md`, section "Idle-app
 incoming observation experiment".
 
+- **The runtime gate is awaited and freshly evaluated at every boundary.**
+  `assertRuntimeGate` is asynchronous, so a live gate takes a new reading at
+  `journal-create`, at each note write, at the completion boundary and at the
+  record step. Synchronous app-closed gates are unchanged. A required signal that
+  cannot be read refuses, and a weaker observation is **never** substituted for a
+  missing one -- it is reported separately.
+- **The originating runtime mode is persisted and bound.** `approved.runtimeMode`
+  lives in the hashed, approval-bound half and is part of the preview body, so an
+  approval issued for one mode cannot apply in the other. Recovery never crosses
+  modes by default: an explicit `fallback: 'app-closed'` selection is required, it
+  must run in app-closed mode, and the gate must still prove closure. Every
+  outcome -- refusals and already-closed journals included -- carries `mode`,
+  `originMode` and `fallback`. A gate refusal before any recovery write is a
+  refusal with `mutated: false`, not an interruption.
+- **Reconciliation observation states only what it observed.** The per-file wait
+  polls to a first match and then samples through a post-match settle window; the
+  completion boundary takes a single later sample. A reconciled verdict means the
+  database agreed throughout the observed window and is **not** protection against
+  a payload arriving after it. Rendering is verified separately from the database.
+- **Watcher observations are not reconciliation invocations.** They are counted
+  from the read-only stream, bound to OG's exact repo identifier and the exact
+  graph-relative path. Reconciliation invocation and completion counts are
+  **UNAVAILABLE** without changing the package; watcher and backup counts are
+  never substituted for them.
+- **Backups are narrower than first documented.** `:backupDbFile` writes only when
+  the diff contains a deletion (`string-some-deleted?`), so an append-only
+  incoming change produces no backup at all.
 - **Two explicit runtime modes, and the weaker cannot pass as the stronger.**
   `assertRuntimeGate(gate, mode, stage)` replaces `assertAppClosed`. `app-closed`
   requires a verdict with `closed: true` and is the accepted contract, unchanged.

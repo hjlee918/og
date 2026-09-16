@@ -1258,7 +1258,7 @@ test('records accepted at the target with files still pending refuses before any
 test('an app-idle gate that claims closure is refused', async () => {
   const { context, opened } = enrolled('idle-claims-closed');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   const liar = () => ({ mode: IA.MODE_APP_IDLE, idle: true, closed: true });
   const result = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint,
@@ -1274,16 +1274,20 @@ test('an app-idle gate that claims closure is refused', async () => {
 test('an app-closed gate cannot satisfy an app-idle run, or the reverse', async () => {
   const { context, opened } = enrolled('mode-crossing');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const idlePreview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  const closedPreview = IA.planIncoming(context, proposal);
+  assert.notEqual(idlePreview.preview.previewFingerprint,
+    closedPreview.preview.previewFingerprint,
+    'an approval is bound to the mode it was issued for');
 
   const idleWithClosedGate = await IA.applyIncoming(context, {
-    proposal, approve: preview.preview.previewFingerprint,
+    proposal, approve: idlePreview.preview.previewFingerprint,
     gate: CLOSED, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
   });
   assert.equal(idleWithClosedGate.code, 'gate-mode-mismatch', idleWithClosedGate.reason);
 
   const closedWithIdleGate = await IA.applyIncoming(context, {
-    proposal, approve: preview.preview.previewFingerprint,
+    proposal, approve: closedPreview.preview.previewFingerprint,
     gate: IDLE, mode: IA.MODE_APP_CLOSED,
   });
   assert.equal(closedWithIdleGate.code, 'gate-mode-mismatch', closedWithIdleGate.reason);
@@ -1293,7 +1297,7 @@ test('an app-closed gate cannot satisfy an app-idle run, or the reverse', async 
 test('app-idle refuses before any write when the reconciliation hook is absent', async () => {
   const { context, opened } = enrolled('idle-no-hook');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   for (const reconcile of [null, undefined, 'not-a-function', {}]) {
     const result = await IA.applyIncoming(context, {
       proposal, approve: preview.preview.previewFingerprint,
@@ -1311,7 +1315,7 @@ test('app-idle refuses before any write when the reconciliation hook is absent',
 test('a not-idle app refuses every write', async () => {
   const { context, opened } = enrolled('not-idle');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   const result = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint,
     gate: NOT_IDLE, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
@@ -1325,7 +1329,7 @@ test('a not-idle app refuses every write', async () => {
 test('app-idle applies, waits for reconciliation, and records its mode', async () => {
   const { context, opened } = enrolled('idle-happy');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   const seen = [];
   const reconcile = async (fileId) => { seen.push(fileId); return { reconciled: true }; };
   const result = await IA.applyIncoming(context, {
@@ -1345,7 +1349,7 @@ test('app-idle applies, waits for reconciliation, and records its mode', async (
 test('a reconciliation that never completes blocks publication as a timeout', async () => {
   const { context, opened } = enrolled('idle-timeout');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   const reconcile = async () => ({ reconciled: false, code: 'reconciliation-timeout',
     reason: 'OG did not take the change within the bounded wait' });
   const result = await IA.applyIncoming(context, {
@@ -1380,7 +1384,7 @@ test('meaningful reconciliation failures keep their own cause, not "timeout"', a
   ]) {
     const { context, opened } = enrolled(`idle-cause-${label.replace(/[^a-z]+/g, '-')}`);
     const proposal = standardProposal(opened);
-    const preview = IA.planIncoming(context, proposal);
+    const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
     const result = await IA.applyIncoming(context, {
       proposal, approve: preview.preview.previewFingerprint,
       gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile,
@@ -1395,7 +1399,7 @@ test('meaningful reconciliation failures keep their own cause, not "timeout"', a
 test('the completion boundary rechecks every file, not just the last match', async () => {
   const { context, opened } = enrolled('idle-boundary');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   let calls = 0;
   // every per-file wait succeeds; the boundary re-check then reports a regression
   const reconcile = async () => {
@@ -1421,7 +1425,7 @@ test('the completion boundary rechecks every file, not just the last match', asy
 test('a disk change after reconciliation is caught at the completion boundary', async () => {
   const { context, opened } = enrolled('idle-disk-drift');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   let calls = 0;
   const reconcile = async () => {
     calls += 1;
@@ -1445,7 +1449,7 @@ test('a disk change after reconciliation is caught at the completion boundary', 
 test('app-idle recovery re-runs reconciliation and never omits it', async () => {
   const { context, opened } = enrolled('idle-recovery');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   const order = preview.preview.applyOrder;
   const failing = async (fileId) => (fileId === order[1]
     ? { reconciled: false, code: 'reconciliation-timeout', reason: 'stalled' }
@@ -1477,7 +1481,7 @@ test('app-idle recovery re-runs reconciliation and never omits it', async () => 
 test('an explicit app-closed fallback completes without live reconciliation', async () => {
   const { context, opened } = enrolled('idle-then-closed');
   const proposal = standardProposal(opened);
-  const preview = IA.planIncoming(context, proposal);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
   const stalled = async () => ({ reconciled: false, code: 'reconciliation-timeout',
     reason: 'stalled' });
   const run = await IA.applyIncoming(context, {
@@ -1489,11 +1493,204 @@ test('an explicit app-closed fallback completes without live reconciliation', as
 
   // The operator quits the app and falls back. This is disk/identity recovery,
   // NOT live UI reconciliation, and the result says which mode produced it.
-  const recovered = await IA.recoverIncoming(context, { gate: CLOSED, mode: IA.MODE_APP_CLOSED });
+  // Without an explicit fallback selection, an app-idle transaction does NOT
+  // silently become an app-closed recovery.
+  const implicit = await IA.recoverIncoming(context, { gate: CLOSED, mode: IA.MODE_APP_CLOSED });
+  assert.equal(implicit.outcome, 'refused');
+  assert.equal(implicit.code, 'runtime-mode-mismatch', implicit.reason);
+  assert.equal(implicit.originMode, IA.MODE_APP_IDLE);
+
+  const recovered = await IA.recoverIncoming(context,
+    { gate: CLOSED, mode: IA.MODE_APP_CLOSED, fallback: IA.MODE_APP_CLOSED });
   assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
   assert.equal(recovered.mode, IA.MODE_APP_CLOSED,
     'the fallback names app-closed, so it can never be read as live reconciliation');
+  assert.equal(recovered.originMode, IA.MODE_APP_IDLE, 'the origin mode is retained');
+  assert.equal(recovered.fallback, true, 'the fallback is explicit in the result');
   assert.deepEqual(recovered.reconciliations, [],
     'no UI reconciliation was performed or claimed');
   assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
+});
+
+// ============================== review corrections: fresh gate, mode provenance
+
+test('the gate is re-evaluated between writes and at the completion boundary', async () => {
+  const { context, opened } = enrolled('fresh-gate');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  const stages = [];
+  // an ASYNC gate: it must be awaited, and it reports a fresh reading each call
+  const gate = async (stage, mode) => {
+    stages.push(stage);
+    return { mode, idle: true, stage, readingNumber: stages.length };
+  };
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  });
+  assert.equal(result.outcome, 'applied', result.reason || '');
+  assert.ok(stages.includes('journal-create'));
+  assert.ok(stages.includes('note-write:file-english'));
+  assert.ok(stages.includes('note-write:file-new-korean'));
+  assert.ok(stages.includes('completion-boundary'),
+    'the gate is consulted again at the completion boundary');
+  assert.ok(stages.includes('record-step'));
+  assert.ok(new Set(stages).size >= 5, 'each boundary got its own reading');
+});
+
+test('a state change between the first and second write refuses', async () => {
+  const { context, opened } = enrolled('gate-flips-midway');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  const order = preview.preview.applyOrder;
+  const gate = async (stage, mode) => ({
+    mode,
+    // idle until the SECOND note write is attempted
+    idle: stage !== `note-write:${order[1]}`,
+    stage,
+  });
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  });
+  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.code, 'app-not-idle', result.reason);
+  assert.deepEqual(result.applied, [order[0]], 'only the first file was written');
+  assert.equal(PI.openGraph(context).outcome, 'refused', 'identity was not published');
+  assert.equal(journalValue(context).value.state, 'open');
+});
+
+test('a state change before publication refuses at the completion boundary', async () => {
+  const { context, opened } = enrolled('gate-flips-at-boundary');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  const gate = async (stage, mode) => ({
+    mode, idle: stage !== 'completion-boundary', stage,
+  });
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  });
+  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.code, 'app-not-idle', result.reason);
+  assert.deepEqual(result.applied, preview.preview.applyOrder, 'both files were written');
+  assert.equal(PI.openGraph(context).outcome, 'refused',
+    'identity is not published when the app stops being idle before publication');
+  assert.equal(journalValue(context).value.state, 'open');
+});
+
+test('an unreadable required signal refuses and is never substituted', async () => {
+  const { context, opened } = enrolled('unreadable-signal');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  // a gate that reports a weaker observation alongside an unreadable signal
+  const gate = async (stage, mode) => ({
+    mode, idle: false, stage,
+    failing: ['writes-finished-unreadable'],
+    signals: { writesFinished: null, settleObservation: true },
+  });
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'app-not-idle');
+  assert.equal(result.mutated, false);
+  assert.equal(PI.readJournal(context).value, null,
+    'a weaker observation does not stand in for the missing signal');
+});
+
+test('the journal records the runtime mode it was applied in', async () => {
+  const { context, opened } = enrolled('mode-provenance');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  const run = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+    failAt: `before-file:${preview.preview.applyOrder[0]}`,
+  });
+  assert.equal(run.outcome, 'interrupted');
+  const approved = journalValue(context).value.approved;
+  assert.equal(approved.runtimeMode, IA.MODE_APP_IDLE,
+    'the originating mode is persisted in the approved half');
+  // it is inside the hashed, approval-bound half
+  assert.equal(journalValue(context).value.approvedHash,
+    `sha256:${sha256(stableStringify(approved))}`);
+
+  // a journal claiming an unknown mode has no authority
+  const pristine = PI.readJournal(context);
+  rewriteJournal(context, (v) => {
+    v.approved.runtimeMode = 'app-whatever';
+    v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
+  });
+  const bad = await IA.recoverIncoming(context,
+    { gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED });
+  assert.equal(bad.outcome, 'refused');
+  assert.equal(bad.code, 'malformed-record', bad.reason);
+  PI.writeJournal(context, pristine.bytes,
+    PI.readJournal(context).hash.replace(/^sha256:/, ''));
+});
+
+test('recovery outcomes are labelled with both the running and origin modes', async () => {
+  const { context, opened } = enrolled('mode-labels');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  assert.equal((await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  })).outcome, 'applied');
+
+  // an already-closed journal still reports both modes
+  const closed = await IA.recoverIncoming(context,
+    { gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED });
+  assert.equal(closed.outcome, 'none');
+  assert.equal(closed.code, 'journal-closed');
+  assert.equal(closed.mode, IA.MODE_APP_IDLE);
+  assert.equal(closed.originMode, IA.MODE_APP_IDLE);
+
+  // and a refusal does too
+  const crossed = await IA.recoverIncoming(context,
+    { gate: CLOSED, mode: IA.MODE_APP_CLOSED });
+  assert.equal(crossed.outcome, 'refused');
+  assert.equal(crossed.code, 'runtime-mode-mismatch');
+  assert.equal(crossed.mode, IA.MODE_APP_CLOSED);
+  assert.equal(crossed.originMode, IA.MODE_APP_IDLE);
+  assert.equal(crossed.fallback, false);
+});
+
+test('an app-closed fallback must be run in app-closed mode with proven closure', async () => {
+  const { context, opened } = enrolled('fallback-rules');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal, { mode: IA.MODE_APP_IDLE });
+  const stalled = async () => ({ reconciled: false, code: 'reconciliation-timeout',
+    reason: 'stalled' });
+  assert.equal((await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: stalled,
+  })).outcome, 'interrupted');
+
+  // a fallback selected but run in the wrong mode
+  const wrongMode = await IA.recoverIncoming(context,
+    { gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+      fallback: IA.MODE_APP_CLOSED });
+  assert.equal(wrongMode.code, 'invalid-fallback', wrongMode.reason);
+
+  // a fallback whose gate cannot prove closure
+  const notClosed = await IA.recoverIncoming(context,
+    { gate: RUNNING, mode: IA.MODE_APP_CLOSED, fallback: IA.MODE_APP_CLOSED });
+  assert.equal(notClosed.outcome, 'refused');
+  assert.equal(notClosed.code, 'app-running', notClosed.reason);
+  assert.equal(journalValue(context).value.state, 'open');
+
+  // an unsupported fallback selection
+  const bogus = await IA.recoverIncoming(context,
+    { gate: CLOSED, mode: IA.MODE_APP_CLOSED, fallback: 'app-idle' });
+  assert.equal(bogus.code, 'invalid-fallback');
+
+  // and the correct one completes, reported as app-closed recovery
+  const ok = await IA.recoverIncoming(context,
+    { gate: CLOSED, mode: IA.MODE_APP_CLOSED, fallback: IA.MODE_APP_CLOSED });
+  assert.equal(ok.outcome, 'recovered', ok.reason || '');
+  assert.equal(ok.fallback, true);
+  assert.deepEqual(ok.reconciliations, [], 'no live UI reconciliation was performed');
 });

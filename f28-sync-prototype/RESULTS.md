@@ -2333,3 +2333,164 @@ published, journal open with `recordsAccepted: false`.
 - Creates and updates only; one incoming transaction per owned run; no
   whole-graph atomicity; no cross-process serialization; no power-loss
   durability; no transport; no second device.
+
+## Idle-app experiment — review corrections and completed verification (2026-09-16)
+
+**Awaiting supervisor review; not accepted.** Mode **app-idle** unless stated.
+The earlier 26/26 run remains limited historical evidence of that run only.
+
+### The four review findings, confirmed and fixed
+
+**1. The live gate was cached, not freshly evaluated.** `run-idle-incoming.js`
+built its gate from a `out.liveSignals` snapshot taken once before
+`applyIncoming`, so every later gate call — including after an awaited
+reconciliation — replayed the same values.
+
+Fixed: `assertRuntimeGate` is now **async and awaited**, so a live gate takes a
+fresh, graph-bound reading at every boundary. Synchronous app-closed gates are
+unaffected (awaiting a non-promise is a no-op) and their behaviour is unchanged.
+The live gate re-reads editor state, composition, idle, the write batch and the
+graph-bound cause counts on each call. **The forbidden substitution is gone:** an
+unreadable `writesFinished` no longer becomes `true` via the settle observation;
+the settle observation is reported separately as its own field and a required
+signal that cannot be read refuses. Evidence records every gate reading and the
+stage it was taken at; the live run shows distinct readings at `journal-create`,
+each `note-write:<fileId>`, `completion-boundary` and `record-step`.
+
+**2. Reconciliation observation overstated its coverage.** `awaitOgReconciliation`
+returned on its first match, making its regression branch unreachable, and it
+read only the database despite comments mentioning rendering.
+
+Fixed: the per-file wait now polls to a first match and then **keeps sampling for
+a post-match settle window**, so a regression is genuinely reachable; the
+completion boundary takes a **single later sample** rather than re-running the
+wait, so a regression cannot hide behind a fresh match. Rendering is verified
+**separately** (`renderedContains`) in the live case where it matters. The
+comment and the results now say what is true: a reconciled verdict means the
+database agreed throughout the observed window, and is **not** protection against
+a payload arriving after the window closes.
+
+**3. Watcher entries are not reconciliation invocations.** The counter was
+documented as counting reconciliation invocations, counted raw observation
+entries, and matched on a path suffix that could match another graph.
+
+Fixed: renamed `watcherObservationsFor`, documented as raw watcher observations,
+and bound to **OG's exact repo identifier and the exact graph-relative path**.
+A first attempt bound it to the sidecar `graphId` and counted zero — the stream
+records OG's repo, not the sidecar lineage, and the binding was corrected.
+Reconciliation **invocation and completion counts are reported as UNAVAILABLE**:
+they are not instrumented by the observation-only package, and watcher or backup
+counts are never substituted for them.
+
+**4. Recovery-mode provenance is now explicit.** The originating runtime mode is
+persisted as `approved.runtimeMode`, inside the hashed, approval-bound half, and
+validated against the known modes. It is also part of the preview body, so **an
+approval issued for one mode cannot be used to apply in the other**
+(`preview-stale`). An app-idle transaction **never** becomes an app-closed
+recovery by default: crossing modes requires an explicit `fallback: 'app-closed'`
+selection, must be run in app-closed mode, and still requires the gate to prove
+closure. Every outcome — including refusals and an already-closed journal — is
+labelled with `mode`, `originMode` and `fallback`.
+
+A fifth defect was found while fixing these: a gate refusal **before** any
+recovery write was reported as `interrupted` with nothing mutated. Refusals with
+no write are now `refused` with `mutated: false`.
+
+### Focused automated regressions
+
+| Suite | Result |
+|---|---|
+| `tests/incoming-application.test.js` | **64/64** (57 before, 7 added) |
+| `f28-incoming/checks/isolation-check.js` | **34/34** |
+| `tests/persistent-identity.test.js` | 51/51 |
+| `f28-identity-capture/checks/isolation-check.js` | 22/22 |
+
+Added: an async gate consulted at every boundary with distinct stages; a state
+change between the first and second write; a state change at the completion
+boundary; an unreadable required signal refusing with no substitution; the
+runtime mode persisted, hash-bound and validated; outcomes labelled with both
+modes including refusals and closed journals; and the fallback rules
+(wrong mode, unproven closure, unsupported selection, correct use).
+
+### Live batch — 37/37, app-idle, one Intel host
+
+Evidence `development/evidence/f28-idle-incoming-2026-09-16T05-34-35-090Z.json`.
+The accepted package was reused unmodified (manifest
+`2026-09-15T22-55-52-952Z-eb60e451`). Each mutating or failing scenario ran in
+its **own fresh owned case** — nine owned cases in one owned run — preserving one
+incoming transaction per owned case.
+
+**Real live cases** (the application genuinely did this):
+
+- **Case 1 — idle English update and Korean create.** Disk application, UI
+  reconciliation (16 polls / ~3.8 s each), **rendering verified separately**,
+  identity accepted, journal closed. Exactly **one** raw watcher observation per
+  applied path, bound to OG's repo and the exact path; the watcher seam was
+  entered 6 times overall. Only the expected notes changed.
+- **Case 4 — genuine unsaved input and genuine Korean composition.** A block was
+  opened for editing through the UI; the gate observed `editing: true` and
+  refused `editor-buffer-open`. A composition was then started and **OG reported
+  `editor-in-composition? = true`**, and the gate refused on `ime-composition`.
+  A real proposal was refused `app-not-idle` with nothing written and no journal.
+  After ending the composition and settling, the app was idle again.
+- **Case 10 — feature-off ordinary behaviour.** Ordinary page creation, edit,
+  save and render with no incoming activity on that graph; the observer stayed
+  healthy and unblocked.
+
+**Injected or synthetic cases** (labelled as such in the evidence):
+
+- **Case 5 — whitespace-only edge change.** Classified explicitly as
+  `not-reconcilable-by-og`, with the source basis recorded
+  (`watcher_handler.cljs` compares trimmed strings). Identity not published.
+  The hook verdict is synthetic; the owned case is not the graph OG has open.
+- **Case 6 — delayed older payload.** Injected reconciliation verdicts only; no
+  watcher event was fabricated. The boundary sample reported
+  `reconciliation-regressed` and publication was blocked.
+- **Case 7 — interruption and restart.** Injected interruption and reconciliation
+  verdicts. Restart wrote **only** the remaining file, re-reconciled **every**
+  file, left the already-applied note byte-identical, and reported
+  `mode: app-idle, originMode: app-idle`.
+- **Case 8 — block-reference-induced write.** A synthetic `id::` write into an
+  unrelated page, in the shape `set-missing-block-ids!` produces, refused
+  publication as `unrelated-local-change` and the other page's content was
+  preserved.
+- **Case 9 — precondition conflict and a genuine local edit.** The applier
+  refused `local-ahead-of-accepted` with nothing mutated, and the helper's own
+  precondition refused a stale-based write with
+  `destination-precondition-failed`. The local edit survived untouched.
+- **Cases 2 and 3 — gate and hook contracts**, on their own owned cases.
+
+### The missing backup: resolved from source
+
+The earlier run recorded "source predicts a backup; none appeared" as an open
+question. Traced within source only: `:backupDbFile`
+(`src/electron/electron/handler.cljs:94`) writes a backup **only when
+`string-some-deleted?` is true** — that is, only when the diff between the
+database content and the new content contains a deletion. The incoming changes
+here **append**, so nothing is deleted and **no backup is expected**. This is
+"did not happen", by design, not "not observed". The earlier design prediction
+that every update reconciliation writes a backup was **too broad and is
+corrected**: it holds only for changes that delete content.
+
+### Limitations — unchanged or newly stated
+
+- **Concurrent-edit safety is not tested and not claimed.** Case 4 proves the
+  gate refuses while a real edit is open; it proves nothing about applying safely
+  *during* editing.
+- **The queued-save condition remains only partially established.** The gate
+  refuses on `writesFinished === false` and on an unreadable signal, and case 4
+  shows a real open editor refusing. A genuinely queued-but-unflushed save was
+  **not** constructed, so that specific condition is exercised by forcing the
+  signal, not by observing a real queue. `*writes-finished?` marks dispatch, not
+  completion.
+- **A real IME was not used.** Case 4 drove synthetic `CompositionEvent`s; OG did
+  report composition, but a real input method may behave differently.
+- **Duplicate and delayed payloads were injected, not observed.** No natural
+  duplicate or stale watcher payload occurred in these runs, and none was
+  fabricated at the watcher level.
+- **Reconciliation invocation and completion counts remain unavailable.**
+- **No exactly-once claim**, no whole-graph atomicity, no cross-process
+  serialization, no power-loss durability, no transport, no second device.
+  Creates and updates only; one incoming transaction per owned case.
+- The app-closed live coordinator was updated for the async API and syntax
+  checked; it was **not** re-run live in this session.

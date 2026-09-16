@@ -201,7 +201,7 @@ const RUNTIME_MODES = [MODE_APP_CLOSED, MODE_APP_IDLE];
  * cloud agents, external editors, a second coordinator and the same app the
  * instant after the check are outside both.
  */
-function assertRuntimeGate(gate, mode, stage) {
+async function assertRuntimeGate(gate, mode, stage) {
   if (!RUNTIME_MODES.includes(mode)) {
     throw new IncomingError('invalid-mode', `unknown runtime mode ${String(mode)}`);
   }
@@ -209,8 +209,14 @@ function assertRuntimeGate(gate, mode, stage) {
     throw new IncomingError('app-state-uncertain',
       `no runtime gate was supplied for ${stage}`);
   }
+  /*
+   * The gate is AWAITED, so a live gate can take a fresh, graph-bound reading at
+   * every boundary instead of replaying a value cached before the first write.
+   * A synchronous app-closed gate is unaffected: awaiting a non-promise is a
+   * no-op, and its behaviour is unchanged.
+   */
   let verdict;
-  try { verdict = gate(stage, mode); }
+  try { verdict = await gate(stage, mode); }
   catch (error) {
     throw new IncomingError('app-state-uncertain',
       `the ${mode} gate failed at ${stage}: ${error.message}`);
@@ -461,6 +467,10 @@ function buildProposal({ accepted, snapshot, originReplicaId, targetMetadataRevi
  * Every refusal here is a preflight refusal: no note byte has changed.
  */
 function planIncoming(context, input, options = {}) {
+  const runtimeMode = options.mode || MODE_APP_CLOSED;
+  if (!RUNTIME_MODES.includes(runtimeMode)) {
+    return refuse('invalid-mode', `unknown runtime mode ${String(runtimeMode)}`);
+  }
   let proposal;
   try { proposal = validateProposal(input); }
   catch (error) { return refuse(error.code || 'malformed-record', error.message, error.detail); }
@@ -721,6 +731,7 @@ function planIncoming(context, input, options = {}) {
       .sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
     const previewBody = {
       schema: PREVIEW_SCHEMA,
+      runtimeMode,
       proposalId: proposal.proposalId,
       planId: comparison.plan.planId,
       projectedSnapshotFingerprint: comparison.plan.projectedSnapshotFingerprint,
@@ -757,6 +768,7 @@ function planIncoming(context, input, options = {}) {
       preview: { ...previewBody, previewFingerprint },
       internal: { proposal, sidecar, snapshot, comparison, execution, files, acceptedFiles },
       approvedInputs: {
+        runtimeMode,
         originReplicaId: proposal.originReplicaId,
         graphNotes,
         planProjectedSnapshotFingerprint: comparison.plan.projectedSnapshotFingerprint,
@@ -787,6 +799,7 @@ const PREVIEW_LIMITS = [
 function previewBodyFrom(approved) {
   return {
     schema: PREVIEW_SCHEMA,
+    runtimeMode: approved.runtimeMode,
     proposalId: approved.proposalId,
     planId: approved.planId,
     projectedSnapshotFingerprint: approved.planProjectedSnapshotFingerprint,
@@ -875,7 +888,7 @@ function journalBody(approved, progress) {
   return Buffer.from(`${stableStringify(body)}\n`, 'utf8');
 }
 
-const APPROVED_KEYS = ['proposalId', 'planId', 'previewFingerprint', 'graphId',
+const APPROVED_KEYS = ['runtimeMode', 'proposalId', 'planId', 'previewFingerprint', 'graphId',
   'originReplicaId', 'graphNotes', 'planProjectedSnapshotFingerprint',
   'graphBinding', 'profileBinding', 'base', 'target', 'applyOrder', 'files', 'unchanged'];
 const APPROVED_FILE_KEYS = ['kind', 'path', 'precondition', 'beforeImage',
@@ -932,6 +945,10 @@ function validateJournal(context, journal, records) {
   }
   requireText(approved.graphId, 'journal.approved.graphId');
   requireText(approved.originReplicaId, 'journal.approved.originReplicaId');
+  if (!RUNTIME_MODES.includes(approved.runtimeMode)) {
+    throw new IncomingError('malformed-record',
+      `journal.approved.runtimeMode is not a known runtime mode: ${String(approved.runtimeMode)}`);
+  }
   if (typeof approved.planId !== 'string' || !/^plan-[0-9a-f]{32}$/.test(approved.planId)) {
     throw new IncomingError('malformed-record', 'journal planId is not a well-formed plan identity');
   }
@@ -1221,7 +1238,7 @@ async function applyIncoming(context, {
   proposal, approve, gate, mode = MODE_APP_CLOSED, reconcile = null,
   failAt = null, recordFailure = null,
 }) {
-  const planned = planIncoming(context, proposal);
+  const planned = planIncoming(context, proposal, { mode });
   if (planned.outcome !== 'preview') return planned;
   if (!approve) {
     return refuse('approval-required',
@@ -1236,6 +1253,7 @@ async function applyIncoming(context, {
   const { files } = planned.internal;
   const records = PI.readRecords(context);
   const approved = {
+    runtimeMode: planned.approvedInputs.runtimeMode,
     proposalId: planned.preview.proposalId,
     planId: planned.preview.planId,
     previewFingerprint: planned.preview.previewFingerprint,
@@ -1301,7 +1319,7 @@ async function applyIncoming(context, {
     return refuse('reconciliation-hook-missing',
       'app-idle requires a reconciliation hook; application is refused without one');
   }
-  try { assertRuntimeGate(gate, mode, 'journal-create'); }
+  try { await assertRuntimeGate(gate, mode, 'journal-create'); }
   catch (error) { return refuse(error.code, error.message, error.detail); }
 
   if (failAt === 'before-journal') {
@@ -1318,7 +1336,7 @@ async function applyIncoming(context, {
   const reconciliations = [];
   try {
     for (const fileId of approved.applyOrder) {
-      assertRuntimeGate(gate, mode, `note-write:${fileId}`);
+      await assertRuntimeGate(gate, mode, `note-write:${fileId}`);
       if (failAt === `before-file:${fileId}`) {
         throw new IncomingError('injected-failure', `injected failure before writing ${fileId}`);
       }
@@ -1347,7 +1365,7 @@ async function applyIncoming(context, {
      * before publication -- disk for every file, and OG for every file in
      * app-idle.
      */
-    assertRuntimeGate(gate, mode, 'completion-boundary');
+    await assertRuntimeGate(gate, mode, 'completion-boundary');
     const boundary = revalidateIntendedState(context, approved);
     if (boundary.code) {
       throw new IncomingError(boundary.code,
@@ -1360,7 +1378,7 @@ async function applyIncoming(context, {
       }
     }
 
-    assertRuntimeGate(gate, mode, 'record-step');
+    await assertRuntimeGate(gate, mode, 'record-step');
     const accepted = acceptRecords(context, approved,
       recordFailure ? { ordering: 'graph-first', failure: recordFailure } : {});
     if (accepted.outcome !== 'accepted') {
@@ -1616,7 +1634,7 @@ function recomputePlan(context, sidecar, approved, records) {
  * before this layer will close anything.
  */
 async function recoverIncoming(context, {
-  gate, mode = MODE_APP_CLOSED, reconcile = null,
+  gate, mode = MODE_APP_CLOSED, reconcile = null, fallback = null,
 } = {}) {
   if (!RUNTIME_MODES.includes(mode)) {
     return refuse('invalid-mode', `unknown runtime mode ${String(mode)}`);
@@ -1624,6 +1642,10 @@ async function recoverIncoming(context, {
   if (mode === MODE_APP_IDLE && typeof reconcile !== 'function') {
     return refuse('reconciliation-hook-missing',
       'app-idle recovery requires a reconciliation hook; it never falls back to app-closed');
+  }
+  if (fallback !== null && fallback !== MODE_APP_CLOSED) {
+    return refuse('invalid-fallback',
+      `the only selectable fallback is ${MODE_APP_CLOSED}`);
   }
   let journal;
   let value;
@@ -1638,6 +1660,28 @@ async function recoverIncoming(context, {
   }
 
   const approved = value.approved;
+  const originMode = approved.runtimeMode;
+  /* Every outcome below is labelled with both the mode recovery is RUNNING in
+   * and the mode the transaction ORIGINATED in, including refusals. */
+  const label = (result) => ({ ...result, mode, originMode,
+    fallback: fallback === MODE_APP_CLOSED && originMode !== mode });
+
+  /*
+   * An app-idle transaction never becomes an app-closed recovery by default.
+   * Crossing modes requires an EXPLICIT fallback selection, and app-closed
+   * recovery additionally requires the gate to prove the application closed --
+   * which `assertRuntimeGate` enforces for every write below. A fallback is
+   * reported as disk/identity recovery, never as live UI reconciliation.
+   */
+  if (originMode !== mode && fallback !== MODE_APP_CLOSED) {
+    return label(refuse('runtime-mode-mismatch',
+      `this transaction was applied in ${originMode}; recovering it in ${mode} requires an explicit fallback selection`,
+      { originMode, recoveryMode: mode }));
+  }
+  if (fallback === MODE_APP_CLOSED && mode !== MODE_APP_CLOSED) {
+    return label(refuse('invalid-fallback',
+      'an app-closed fallback must be run in app-closed mode'));
+  }
 
   /*
    * Before anything else, and certainly before any write: the retained inputs
@@ -1646,7 +1690,7 @@ async function recoverIncoming(context, {
    * afterwards; it is not evidence that these values are the approved ones.
    */
   const linkage = validateApprovalLinkage(approved);
-  if (linkage.code) return refuse(linkage.code, linkage.reason, linkage.detail || {});
+  if (linkage.code) return label(refuse(linkage.code, linkage.reason, linkage.detail || {}));
 
   /*
    * A closed journal still has to prove itself. If the records it claims are not
@@ -1656,23 +1700,23 @@ async function recoverIncoming(context, {
   if (value.state === 'closed') {
     const proof = proveRecordsAccepted(context, approved);
     if (!proof.accepted) {
-      return refuse('closed-journal-not-verified',
+      return label(refuse('closed-journal-not-verified',
         `the journal is labelled closed but the records do not prove it: ${proof.code}`,
         { proofCode: proof.code, proofReason: proof.reason, proofDetail: proof.detail,
-          proposalId: approved.proposalId });
+          proposalId: approved.proposalId }));
     }
-    return { outcome: 'none', mutated: false, code: 'journal-closed', verified: true,
-      proposalId: approved.proposalId, transactionId: approved.target.transactionId };
+    return label({ outcome: 'none', mutated: false, code: 'journal-closed', verified: true,
+      proposalId: approved.proposalId, transactionId: approved.target.transactionId });
   }
 
   const sidecar = records.sidecar;
-  if (!sidecar) return refuse('records-not-accepted', 'no sidecar is present');
+  if (!sidecar) return label(refuse('records-not-accepted', 'no sidecar is present'));
   if (records.malformed.length) {
-    return refuse('malformed-record', 'a record does not parse; it is retained for review',
-      { malformed: records.malformed });
+    return label(refuse('malformed-record', 'a record does not parse; it is retained for review',
+      { malformed: records.malformed }));
   }
   if (sidecar.graphId !== approved.graphId) {
-    return refuse('journal-graph-mismatch', 'the journal names a different graph lineage');
+    return label(refuse('journal-graph-mismatch', 'the journal names a different graph lineage'));
   }
 
   /*
@@ -1681,14 +1725,14 @@ async function recoverIncoming(context, {
    */
   const outstanding = records.outstandingIntents;
   if (outstanding.length > 1) {
-    return refuse('multiple-outstanding-transactions',
+    return label(refuse('multiple-outstanding-transactions',
       'more than one identity transaction is outstanding; this needs review',
-      { outstanding });
+      { outstanding }));
   }
   if (outstanding.length === 1 && outstanding[0] !== approved.target.transactionId) {
-    return refuse('unrelated-outstanding-transaction',
+    return label(refuse('unrelated-outstanding-transaction',
       'an identity transaction unrelated to this journal is outstanding; nothing is resolved here',
-      { outstanding, approvedTransactionId: approved.target.transactionId });
+      { outstanding, approvedTransactionId: approved.target.transactionId }));
   }
 
   const proofBefore = proveRecordsAccepted(context, approved);
@@ -1700,11 +1744,11 @@ async function recoverIncoming(context, {
     && sidecar.acceptedTransactionId === approved.base.acceptedTransactionId;
 
   if (!recordsAlreadyAccepted && !atBase && outstanding.length === 0) {
-    return refuse('journal-base-mismatch',
+    return label(refuse('journal-base-mismatch',
       'the records are neither at this journal\'s base nor provably at its target',
       { accepted: sidecar.metadataRevision, base: approved.base.metadataRevision,
         target: approved.target.metadataRevision,
-        proofCode: proofBefore.code, proofReason: proofBefore.reason });
+        proofCode: proofBefore.code, proofReason: proofBefore.reason }));
   }
 
   // ---- whole-transaction preflight: classify every file before writing any
@@ -1713,8 +1757,8 @@ async function recoverIncoming(context, {
     const file = approved.files[fileId];
     const disk = stableRead(context, file.path);
     if (!disk.stable) {
-      return refuse('unstable-read', `${file.path} did not read back identically twice`,
-        { fileId });
+      return label(refuse('unstable-read', `${file.path} did not read back identically twice`,
+        { fileId }));
     }
     let state;
     if (disk.present && disk.hash === file.targetContentHash) state = 'applied';
@@ -1727,7 +1771,7 @@ async function recoverIncoming(context, {
   }
   const thirdStates = classified.filter((item) => item.state === 'third-state');
   if (thirdStates.length) {
-    return {
+    return label({
       outcome: 'third-state',
       mutated: false,
       code: 'third-state',
@@ -1735,7 +1779,7 @@ async function recoverIncoming(context, {
       classified,
       thirdStates,
       note: 'nothing was rolled back, nothing was reapplied, every before-image and journal byte is retained',
-    };
+    });
   }
 
   const progressDisagreement = classified.filter((item) =>
@@ -1766,31 +1810,31 @@ async function recoverIncoming(context, {
    */
   if (pending.length) {
     if (recordsAlreadyAccepted) {
-      return refuse('journal-base-mismatch',
+      return label(refuse('journal-base-mismatch',
         'the records are already accepted at the target while files remain unapplied; this needs review, not a roll-forward',
-        { classified });
+        { classified }));
     }
     if (outstanding.length) {
-      return refuse('outstanding-transaction-with-unapplied-files',
+      return label(refuse('outstanding-transaction-with-unapplied-files',
         'an identity transaction is outstanding while files remain unapplied; this needs review',
-        { classified, outstanding });
+        { classified, outstanding }));
     }
     if (!atBase) {
-      return refuse('journal-base-mismatch',
+      return label(refuse('journal-base-mismatch',
         'files are unapplied but the records are not at this journal\'s base, so the intended projection cannot be revalidated from retained evidence',
-        { classified });
+        { classified }));
     }
   }
   if (atBase) {
     const verdict = recomputePlan(context, sidecar, approved, records);
-    if (verdict.code) return refuse(verdict.code, verdict.reason, verdict.detail || {});
+    if (verdict.code) return label(refuse(verdict.code, verdict.reason, verdict.detail || {}));
   }
   const wrote = [];
   try {
     if (pending.length) {
-      assertRuntimeGate(gate, mode, 'recovery-note-writes');
+      await assertRuntimeGate(gate, mode, 'recovery-note-writes');
       for (const item of pending) {
-        assertRuntimeGate(gate, mode, `recovery-note-write:${item.fileId}`);
+        await assertRuntimeGate(gate, mode, `recovery-note-write:${item.fileId}`);
         const file = approved.files[item.fileId];
         // Recheck immediately before this write, through the helper's own
         // precondition. Still a recheck-then-rename, not a compare-and-swap.
@@ -1799,8 +1843,17 @@ async function recoverIncoming(context, {
       }
     }
   } catch (error) {
-    return interrupted(error.code || 'recovery-write-failed', error.message,
-      { wrote, classified, detail: error.detail || null });
+    /*
+     * A refusal BEFORE any recovery write mutated nothing, so it is a refusal,
+     * not an interruption. Only once a note has actually been written does the
+     * outcome become `interrupted`.
+     */
+    if (!wrote.length) {
+      return label(refuse(error.code || 'recovery-write-refused', error.message,
+        { classified, detail: error.detail || null }));
+    }
+    return label(interrupted(error.code || 'recovery-write-failed', error.message,
+      { wrote, classified, detail: error.detail || null }));
   }
 
   /*
@@ -1812,13 +1865,13 @@ async function recoverIncoming(context, {
   const reconciliations = [];
   if (mode === MODE_APP_IDLE) {
     try {
-      assertRuntimeGate(gate, mode, 'recovery-reconciliation');
+      await assertRuntimeGate(gate, mode, 'recovery-reconciliation');
       for (const fileId of approved.applyOrder) {
         const verdict = await awaitReconciliation(reconcile, mode, fileId, approved.files[fileId]);
         reconciliations.push({ fileId, recovery: true, ...verdict });
       }
     } catch (error) {
-      return {
+      return label({
         outcome: 'unresolved',
         mutated: wrote.length > 0,
         mode,
@@ -1828,7 +1881,7 @@ async function recoverIncoming(context, {
         classified,
         reconciliations,
         note: 'the incoming journal stays open; identity is not published and nothing is reported complete',
-      };
+      });
     }
   }
 
@@ -1836,11 +1889,11 @@ async function recoverIncoming(context, {
   let resolution = recordsAlreadyAccepted ? 'already-accepted' : null;
   try {
     if (!recordsAlreadyAccepted && outstanding.length === 1) {
-      assertRuntimeGate(gate, mode, 'recovery-record-recovery');
+      await assertRuntimeGate(gate, mode, 'recovery-record-recovery');
       const recoveredStore = PI.recover(context,
         { transactionId: approved.target.transactionId });
       if (recoveredStore.outcome !== 'recovered') {
-        return {
+        return label({
           outcome: 'unresolved',
           mutated: wrote.length > 0,
           code: 'identity-transaction-unresolved',
@@ -1851,14 +1904,14 @@ async function recoverIncoming(context, {
           classified,
           transactionId: approved.target.transactionId,
           note: 'the incoming journal stays open and every record, intent and before-image is retained',
-        };
+        });
       }
       resolution = `store-recovered:${recoveredStore.classification}`;
     } else if (!recordsAlreadyAccepted) {
-      assertRuntimeGate(gate, mode, 'recovery-record-step');
+      await assertRuntimeGate(gate, mode, 'recovery-record-step');
       const accepted = acceptRecords(context, approved);
       if (accepted.outcome !== 'accepted') {
-        return {
+        return label({
           outcome: String(accepted.outcome || '').startsWith('uncertain') ? 'unresolved' : 'refused',
           mutated: wrote.length > 0,
           code: String(accepted.outcome || '').startsWith('uncertain')
@@ -1870,13 +1923,17 @@ async function recoverIncoming(context, {
           wrote,
           classified,
           note: 'the incoming journal stays open and every retained record is preserved',
-        };
+        });
       }
       resolution = 'published';
     }
   } catch (error) {
-    return interrupted(error.code || 'recovery-record-failed', error.message,
-      { wrote, classified, detail: error.detail || null });
+    if (!wrote.length) {
+      return label(refuse(error.code || 'recovery-record-refused', error.message,
+        { classified, detail: error.detail || null }));
+    }
+    return label(interrupted(error.code || 'recovery-record-failed', error.message,
+      { wrote, classified, detail: error.detail || null }));
   }
 
   /*
@@ -1885,7 +1942,7 @@ async function recoverIncoming(context, {
    */
   const proof = proveRecordsAccepted(context, approved);
   if (!proof.accepted) {
-    return {
+    return label({
       outcome: 'unresolved',
       mutated: wrote.length > 0,
       code: 'records-not-proven',
@@ -1897,7 +1954,7 @@ async function recoverIncoming(context, {
       classified,
       resolution,
       note: 'the incoming journal stays open; nothing is reported as completed',
-    };
+    });
   }
 
   try {
@@ -1914,7 +1971,7 @@ async function recoverIncoming(context, {
         note: 'the records are accepted and proven; only the journal close failed' });
   }
 
-  return {
+  return label({
     outcome: 'recovered',
     mutated: wrote.length > 0,
     mode,
@@ -1928,7 +1985,7 @@ async function recoverIncoming(context, {
     metadataRevision: approved.target.metadataRevision,
     snapshotFingerprint: approved.target.snapshotFingerprint,
     proposalId: approved.proposalId,
-  };
+  });
 }
 
 

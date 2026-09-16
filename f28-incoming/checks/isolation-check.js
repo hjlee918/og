@@ -107,7 +107,7 @@ async function main() {
 
   const RUNNING = () => ({mode: 'app-closed', closed: false, running: ['probe']});
   const CLOSED = () => ({mode: 'app-closed', closed: true});
-  const IDLE = () => ({mode: 'app-idle', idle: true});
+  const IDLE = async () => ({mode: 'app-idle', idle: true});
   const RECONCILED = async () => ({reconciled: true});
 
   const preview = IA.planIncoming(context, proposal);
@@ -237,9 +237,10 @@ async function main() {
   const idleSignals = {editing: false, composing: false, inputIdle: true,
     writesFinished: true, pendingCauses: 0};
   const idleGate = makeIdleGate(() => idleSignals);
+  const idleVerdict = await idleGate('t');
   check('idle-gate-reports-idle-and-never-closure',
-    idleGate('t').idle === true && idleGate('t').closed !== true &&
-    idleGate('t').mode === 'app-idle', idleGate('t'));
+    idleVerdict.idle === true && idleVerdict.closed !== true &&
+    idleVerdict.mode === 'app-idle', idleVerdict);
   for (const [field, value, label] of [
     ['editing', true, 'editor-buffer-open'],
     ['composing', true, 'ime-composition'],
@@ -247,11 +248,11 @@ async function main() {
     ['writesFinished', false, 'write-batch-not-dispatched'],
     ['pendingCauses', 1, 'pending-bridge-cause'],
   ]) {
-    const probe = makeIdleGate(() => ({...idleSignals, [field]: value}))('t');
+    const probe = await makeIdleGate(() => ({...idleSignals, [field]: value}))('t');
     check(`idle-gate-refuses-on-${label}`,
       probe.idle === false && probe.failing.includes(label) && probe.closed !== true, probe);
   }
-  const unreadable = makeIdleGate(() => { throw new Error('evaluate failed'); })('t');
+  const unreadable = await makeIdleGate(() => { throw new Error('evaluate failed'); })('t');
   check('idle-gate-unreadable-is-uncertain-never-idle',
     unreadable.idle === false && unreadable.uncertain === true, unreadable);
 
@@ -276,7 +277,7 @@ async function main() {
     originReplicaId: 'replica-iso-synthetic-b', targetMetadataRevision: 'metadata-2',
     changes: [{fileId: 'file-english', path: englishPath, content: englishUpdate}],
   });
-  const idlePreview = IA.planIncoming(idleCase, idleProposal);
+  const idlePreview = IA.planIncoming(idleCase, idleProposal, {mode: 'app-idle'});
   const noHook = await IA.applyIncoming(idleCase, {
     proposal: idleProposal, approve: idlePreview.preview.previewFingerprint,
     gate: IDLE, mode: 'app-idle',
@@ -293,6 +294,16 @@ async function main() {
   check('an-app-closed-gate-cannot-satisfy-an-app-idle-run',
     crossMode.outcome === 'refused' && crossMode.code === 'gate-mode-mismatch' &&
     PI.readNote(idleCase, englishPath) === englishSeed, crossMode);
+
+  // An approval issued for one mode cannot be used to apply in the other.
+  const closedApproval = IA.planIncoming(idleCase, idleProposal);
+  const wrongApproval = await IA.applyIncoming(idleCase, {
+    proposal: idleProposal, approve: closedApproval.preview.previewFingerprint,
+    gate: IDLE, mode: 'app-idle', reconcile: RECONCILED,
+  });
+  check('an-approval-issued-for-another-mode-is-refused',
+    wrongApproval.outcome === 'refused' && wrongApproval.code === 'preview-stale' &&
+    PI.readNote(idleCase, englishPath) === englishSeed, wrongApproval);
 
   const idleCalls = [];
   const idleApplied = await IA.applyIncoming(idleCase, {
