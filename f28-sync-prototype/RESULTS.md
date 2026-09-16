@@ -2150,3 +2150,186 @@ Unchanged from the previous section, and still true:
 - One incoming transaction per owned run; creates and updates only; no
   whole-graph atomicity, no cross-process serialization, no transport, no second
   device.
+
+## Idle-app incoming observation experiment (2026-09-16)
+
+**Awaiting supervisor review — not accepted.** Mode: **app-idle** throughout.
+The application was **open and idle**; it was never edited while a change was
+applied. **Concurrent-edit safety was not tested and is not claimed.**
+
+### Package and implementation identity
+
+- Application: the accepted `Logseq OG F28 IdentityCapture` package, **reused
+  unmodified and not rebuilt** — manifest `2026-09-15T22-55-52-952Z-eb60e451`,
+  clean commit `e62dbbdadd157b368e3a8c03a3fa78437a079c4c`, bundle
+  `com.logseq.logseq-og.f28identitycapture`, x64, bridge
+  `{mode: observation-only, persistence: false, synchronizationPorts: false}`.
+  No application IPC, native command authority, renderer privilege,
+  process-launch exception or network permission was added.
+- Helper: `sha256:0117ca48ba468e15a55091fa76d9fa6a07360b19ddda60d9bccc2ca8e94ff959`
+  (unchanged; no native command was added).
+- Coordinator source at `93a89071d` plus this batch's work, committed with these
+  records.
+
+### What was implemented
+
+1. **`applyIncoming` and `recoverIncoming` are now `async`.** This is a real API
+   change: their return type is a promise, and **every** caller — the test
+   suite, both isolation checks and both coordinators — was updated to await
+   them. The app-closed *behaviour* is unchanged, but the *signature* is not,
+   and that is stated rather than glossed.
+2. **Explicit runtime modes.** `assertRuntimeGate(gate, mode, stage)` replaces
+   `assertAppClosed`. `app-closed` still requires `closed === true`. `app-idle`
+   requires `idle === true` and **refuses a verdict that claims `closed`**
+   (`gate-mode-mismatch`), so an idle run can never be recorded or replayed as
+   an app-closed result. A gate answering for the wrong mode is refused in both
+   directions.
+3. **The reconciliation hook is mandatory in app-idle**, checked **before the
+   journal is created** so a missing hook can never leave an unconfirmable
+   mutation on disk. Missing, non-callable, rejecting, empty-verdict and
+   `reconciled: false` hooks all refuse; there is **no fall back to app-closed
+   behaviour**.
+4. **Awaited reconciliation between the verified note write and publication**,
+   per file, and **again for every file at a completion boundary** before the
+   record step — because an intermediate match is not proof that the match still
+   holds. The boundary also re-runs `revalidateIntendedState`, so a disk change
+   after reconciliation is caught.
+5. **Recovery applies the same rule.** An app-idle restart re-runs the
+   reconciliation wait for **every** file in the transaction, including files
+   applied before the interruption, because reconciliation leaves no durable
+   marker this layer owns. A missing hook refuses.
+6. **Failure causes are preserved, not flattened to "timeout".** A rejection
+   with a code keeps it; a rejection without one is `reconciliation-failed`; a
+   verdict's own code (`reconciliation-regressed`, `not-reconcilable-by-og`) is
+   kept; only an actual expiry is `reconciliation-timeout`.
+7. Every accepted protection is retained unchanged: pre-write authority
+   validation, complete recovery preflight, exact approval bindings,
+   before-images, the retained journal and the post-write proofs.
+
+### Focused tests
+
+Real anchored helper, real modules, fresh owned synthetic cases, Intel
+(x86_64, macOS 14.8.3).
+
+| Suite | Result |
+|---|---|
+| `tests/incoming-application.test.js` | **57/57** (46 before, 11 added for app-idle) |
+| `f28-incoming/checks/isolation-check.js` | **33/33** (22 before, 11 added) |
+| `tests/persistent-identity.test.js` | 51/51 |
+| pure modules | 75/75 |
+| persistence / filesystem-application / compare-workflow / read-selected / stable-working-tree | 8 / 23 / 7 / 5 / 12 |
+| `f28-identity-capture/checks/isolation-check.js` | 22/22 |
+
+Added coverage: an idle gate claiming closure; mode crossing in both
+directions; a missing hook in four shapes; a not-idle app; a successful idle
+application with per-file and boundary waits; a stalled reconciliation blocking
+publication; five distinct failure causes preserved; a boundary re-check
+catching a regression after every per-file wait succeeded; a disk change after
+reconciliation caught as `unrelated-local-change`; app-idle recovery re-running
+every file and refusing without a hook; and an explicit app-closed fallback that
+performs **no** UI reconciliation and names its mode.
+
+### Live batch — app-idle, one Intel host, three owned cases
+
+**26/26 checks passed**, evidence
+`development/evidence/f28-idle-incoming-2026-09-16T04-42-39-335Z.json` (local,
+never a Git input). Owned run `f28-idle-incoming-2026-09-16T04-42-39-335Z-…`
+with **three separate owned cases**, because one incoming transaction is
+permitted per owned run: `g-idle-main`, `g-idle-gate-refusals`, `g-idle-no-hook`.
+
+Reported separately, as four distinct completions:
+
+| Stage | Result |
+|---|---|
+| Disk application | both files written and read back twice with the approved hashes; an untouched Korean note byte-identical |
+| UI reconciliation | OG's database held the exact approved content for both paths (English after 10 polls / 2280 ms, Korean after 10 polls / 2283 ms) |
+| Identity acceptance | `accepted` at `metadata-2`, transaction equal to the approval's binding |
+| Journal closure | `closed` only after both boundary re-checks passed (1 poll / 2 ms each) |
+
+Gate refusals (case 2, its own owned case, fixture-seeded): all seven non-idle
+signals — editor buffer open, IME composition, recent input, write batch not
+dispatched, **writes-finished unreadable**, pending bridge cause, failed local
+save — refused with `app-not-idle` **before any note write**, with the notes
+byte-identical and no journal created. An idle gate claiming closure refused
+with `gate-mode-mismatch`.
+
+Hook enforcement (case 3, its own owned case): a missing hook refused
+`reconciliation-hook-missing` with no journal and no note written; an
+**injected** stalled verdict produced `reconciliation-timeout`, identity **not**
+published, journal open with `recordsAccepted: false`.
+
+### Observation accuracy
+
+- **Watcher events are naturally observed, not injected.** Exactly **one** raw
+  watcher observation was recorded for each applied path during the window. The
+  watcher seam was entered **5 times** in total (hook entries 11 → 16); the other
+  entries were directory events with an empty path and an unrelated
+  `pages/contents.md`. One observation per path is what this run saw; it is
+  **not** evidence that two are impossible, and no exactly-once claim is made.
+- **Reconciliation invocations are not directly instrumented.** Only watcher
+  seam entries and per-path observations are countable; OG's internal
+  `reconcile-from-disk!` invocations are not. Backup counts are reported
+  separately and never used as a proxy.
+- **Injected versus natural:** case 3's stalled verdict is explicitly injected
+  and labelled as such in the evidence. Cases 1 and 2 involve no injected events.
+- **Source-predicted versus observed, kept distinct.** Source predicts that
+  reconciling an *update* writes `logseq/bak/<page>/<ISO>.Desktop.md`. **No
+  backup file appeared** in the owned graph in this run. The reason was not
+  determined and is recorded as an open observation, not explained away. The
+  practical consequence is the opposite of the earlier worry: the whole-graph
+  note inventory did **not** drift from backups here.
+- **Inventory is scoped to the exact owned graph.** Changed notes were exactly
+  the English update; new notes exactly the Korean create; nothing removed; no
+  unexpected note mutated. Neither shared root was listed at any point.
+- **No block references were used in cases 1–3**, so `set-missing-block-ids!`
+  had nothing to do. Its `id::` writes to other pages were therefore **not**
+  triggered or observed in this batch — see untested cases below.
+
+### Defects found and fixed during the batch
+
+1. `await f(...).outcome` in nine converted test sites read `.outcome` off the
+   promise; corrected to `(await f(...)).outcome`.
+2. The idle probe treated `get-edit-input-id` returning nil — which *is* the idle
+   condition — as an unreadable signal, so the gate refused a genuinely idle app.
+3. **The probe read the observation stream with the wrong record shape.** The
+   sanitized record carries `event`, `cause` and `observation` as siblings; the
+   probe read `record.event.cause`. Until fixed, the pending-cause signal was
+   vacuously zero and per-path watcher counts were vacuously zero. Both are now
+   real: 16 causes seen, 1 watcher observation per applied path.
+4. `insert_block` leaves a block in edit mode even with `focus: false`, so the
+   app was genuinely not idle after page creation. The coordinator now settles
+   the editor **before** the base is read and enrolled, so settling can never
+   invalidate an approval computed afterwards.
+5. The first attempt at case 2 reused a stale preview and refused `preview-stale`
+   before reaching the gate. The preview is now recomputed immediately before
+   each attempt, and any staleness is recorded.
+
+### Limitations and untested cases — stated plainly
+
+- **Concurrent-edit safety is not tested and not claimed.** Nothing here shows
+  it is safe to apply while someone is typing.
+- **The idle signals are evidence, not exclusion.** `input-idle?` returns true
+  merely when no block is in edit mode; `*writes-finished?` marks that a batch
+  was *dispatched*, not that its writes landed, because `alter-files-handler!`
+  returns a promise nobody awaits. A signal that cannot be read is treated as
+  not-idle and never as satisfied. **The queued-save condition was exercised
+  only by forcing the signal, not by constructing a genuinely queued save**; the
+  claim is narrowed accordingly.
+- **A reconciled verdict is bounded to the moment it was polled.** A later
+  delayed or stale watcher payload could still move the database. The completion
+  boundary re-check narrows this window; it does not close it.
+- **Not run in this batch, and therefore not claimed:** duplicate and delayed
+  watcher payloads including an older one; a whitespace-only edge change (which
+  source says OG cannot reconcile at all); a genuine local edit competing with an
+  applied change; coordinator interruption and restart in a live app-idle run;
+  block-reference-induced `id::` writes and the publication refusal they should
+  cause; the precondition-conflict and `:file/not-matched-from-disk` paths; and
+  feature-off ordinary behaviour as a live check. Several of these are covered
+  synthetically in the focused suite but **not** against a running app.
+- **The app-closed live coordinator was updated for the async API and syntax
+  checked, but was not re-run live in this session.** The previous **39/39**
+  app-closed result remains historical evidence of that earlier run and is not
+  coverage of anything here.
+- Creates and updates only; one incoming transaction per owned run; no
+  whole-graph atomicity; no cross-process serialization; no power-loss
+  durability; no transport; no second device.

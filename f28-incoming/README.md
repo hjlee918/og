@@ -76,6 +76,23 @@ accepted at the new revision and the sidecar stays portable; the journal closes;
 and after a reopen OG renders both incoming changes with unchanged note hashes
 and unchanged accepted identity.
 
+## Idle-app mode (proposed, awaiting review)
+
+`checks/run-idle-incoming.js` runs the same applier against an **open but idle**
+application, in the explicit `app-idle` gate mode. It requires a reconciliation
+hook, waits for OG to actually take each change before identity is published,
+and re-checks every file at a completion boundary.
+
+```sh
+F28_IDENTITY_HELPER=../helpers/f28-identity-store-helper-x86_64 \
+  node f28-incoming/checks/run-idle-incoming.js
+```
+
+`app-idle` never reports closure, so an idle run cannot be read as an
+app-closed result. Idle signals are evidence, not exclusion, and a signal that
+cannot be read is treated as not-idle. **Concurrent-edit safety is not tested
+and not claimed.** See `../f28-sync-prototype/RESULTS.md`.
+
 ## Limits
 
 **One incoming transaction per owned run.** The journal slot is never reused: a

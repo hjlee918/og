@@ -19,9 +19,9 @@ const IA = require('../src/incoming-application');
 const { stableStringify } = require('../src/core');
 
 function test(name, body) {
-  return nodeTest(name, (context) => {
+  return nodeTest(name, async (context) => {
     PI.setDiagnosticCase(name);
-    try { return body(context); }
+    try { return await body(context); }
     catch (error) { PI.recordAssertionFailure(name, error); throw error; }
     finally { PI.setDiagnosticCase(null); }
   });
@@ -39,9 +39,17 @@ const sha256 = (value) => crypto.createHash('sha256')
   .update(Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8')).digest('hex');
 
 /* The gate this suite injects. The live coordinator supplies the real one. */
-const CLOSED = () => ({ closed: true, evidence: 'synthetic: no application in this suite' });
-const RUNNING = () => ({ closed: false, running: ['Logseq OG F28 IdentityCapture'] });
-const UNCERTAIN = () => ({ closed: false, uncertain: true, reason: 'ps produced no parseable output' });
+const CLOSED = () => ({ mode: IA.MODE_APP_CLOSED, closed: true,
+  evidence: 'synthetic: no application in this suite' });
+const RUNNING = () => ({ mode: IA.MODE_APP_CLOSED, closed: false,
+  running: ['Logseq OG F28 IdentityCapture'] });
+const UNCERTAIN = () => ({ mode: IA.MODE_APP_CLOSED, closed: false, uncertain: true,
+  reason: 'ps produced no parseable output' });
+const IDLE = () => ({ mode: IA.MODE_APP_IDLE, idle: true,
+  evidence: 'synthetic: no editor, no queued save, no pending cause' });
+const NOT_IDLE = () => ({ mode: IA.MODE_APP_IDLE, idle: false, reason: 'an editor buffer is open' });
+/* A hook that always reports OG took the change. */
+const RECONCILED = async () => ({ reconciled: true, observedAt: 'synthetic' });
 
 const NOTES = [
   { fileId: 'file-english', path: 'pages/Incoming Anchor.md',
@@ -114,7 +122,7 @@ function reseal(proposal) {
   return { ...body, proposalId: sha256(stableStringify(body)) };
 }
 
-function applyApproved(context, proposal, extra = {}) {
+async function applyApproved(context, proposal, extra = {}) {
   const preview = IA.planIncoming(context, proposal);
   assert.equal(preview.outcome, 'preview', `preview refused: ${preview.code} ${preview.reason || ''}`);
   return IA.applyIncoming(context, {
@@ -147,7 +155,7 @@ function rewriteJournal(context, mutate) {
 
 // ============================================================ happy path
 
-test('an approved incoming proposal applies both files and accepts one new revision', () => {
+test('an approved incoming proposal applies both files and accepts one new revision', async () => {
   const { context, opened } = enrolled('happy');
   const proposal = standardProposal(opened);
   const before = PI.hashGraphNotes(context);
@@ -161,7 +169,7 @@ test('an approved incoming proposal applies both files and accepts one new revis
   assert.equal(preview.preview.files[1].precondition, 'absent', 'a create states absent');
   assert.equal(PI.hashGraphNotes(context).hash, before.hash, 'preview writes nothing');
 
-  const result = IA.applyIncoming(context, {
+  const result = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
   });
   assert.equal(result.outcome, 'applied', result.reason || '');
@@ -183,9 +191,9 @@ test('an approved incoming proposal applies both files and accepts one new revis
   assert.deepEqual(value.progress.applied, ['file-english', 'file-new-korean']);
 });
 
-test('the sidecar stays portable and never carries the origin replica', () => {
+test('the sidecar stays portable and never carries the origin replica', async () => {
   const { context, opened } = enrolled('portable');
-  assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
+  assert.equal((await applyApproved(context, standardProposal(opened))).outcome, 'applied');
   const bytes = PI.readRecords(context).sidecarBytes.toString('utf8');
   assert.ok(!bytes.includes('replica-incoming-synthetic-b'));
   assert.ok(!bytes.includes('replicaId') && !bytes.includes('deviceId'));
@@ -194,7 +202,7 @@ test('the sidecar stays portable and never carries the origin replica', () => {
 
 // ====================================================== base and plan
 
-test('a proposal against any other accepted base is refused, never rebased', () => {
+test('a proposal against any other accepted base is refused, never rebased', async () => {
   const { context, opened } = enrolled('base');
   for (const mutate of [
     (p) => { p.base.metadataRevision = 'metadata-99'; },
@@ -212,7 +220,7 @@ test('a proposal against any other accepted base is refused, never rebased', () 
   assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-1');
 });
 
-test('a proposal carrying a plan the modules do not reproduce is refused', () => {
+test('a proposal carrying a plan the modules do not reproduce is refused', async () => {
   const { context, opened } = enrolled('plan');
   const proposal = standardProposal(opened);
   proposal.planId = 'plan-0123456789abcdef0123456789abcdef';
@@ -223,28 +231,28 @@ test('a proposal carrying a plan the modules do not reproduce is refused', () =>
 
 // ====================================================== preview and approval
 
-test('application without an approval, or with a stale one, is refused', () => {
+test('application without an approval, or with a stale one, is refused', async () => {
   const { context, opened } = enrolled('approval');
   const proposal = standardProposal(opened);
-  const noApproval = IA.applyIncoming(context, { proposal, gate: CLOSED });
+  const noApproval = await IA.applyIncoming(context, { proposal, gate: CLOSED });
   assert.equal(noApproval.code, 'approval-required');
   assert.equal(noApproval.mutated, false);
 
-  const wrong = IA.applyIncoming(context, {
+  const wrong = await IA.applyIncoming(context, {
     proposal, approve: `sha256:${'0'.repeat(64)}`, gate: CLOSED,
   });
   assert.equal(wrong.code, 'preview-stale');
   assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content);
 });
 
-test('a local edit between preview and apply makes the approved preview stale', () => {
+test('a local edit between preview and apply makes the approved preview stale', async () => {
   const { context, opened } = enrolled('stale');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
   assert.equal(preview.outcome, 'preview');
 
   PI.putNoteFixture(context, 'pages/수신 기준 문서.md', '- 사용자가 직접 고친 내용\n');
-  const result = IA.applyIncoming(context, {
+  const result = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
   });
   assert.equal(result.outcome, 'refused');
@@ -255,7 +263,7 @@ test('a local edit between preview and apply makes the approved preview stale', 
 
 // ====================================================== newer local edits
 
-test('an uncaptured local edit to a proposed file refuses the whole proposal', () => {
+test('an uncaptured local edit to a proposed file refuses the whole proposal', async () => {
   const { context, opened } = enrolled('local-ahead');
   const proposal = standardProposal(opened);
   PI.putNoteFixture(context, 'pages/Incoming Anchor.md', '- the user typed this after enrollment\n');
@@ -269,7 +277,7 @@ test('an uncaptured local edit to a proposed file refuses the whole proposal', (
     'no part of the proposal was applied');
 });
 
-test('a create whose destination is already occupied is refused', () => {
+test('a create whose destination is already occupied is refused', async () => {
   const { context, opened } = enrolled('occupied');
   const proposal = standardProposal(opened);
   PI.putNoteFixture(context, 'pages/수신 새 문서.md', '- something else got there first\n');
@@ -278,7 +286,7 @@ test('a create whose destination is already occupied is refused', () => {
   assert.equal(PI.readNote(context, 'pages/수신 새 문서.md'), '- something else got there first\n');
 });
 
-test('an update whose base file was deleted locally is refused', () => {
+test('an update whose base file was deleted locally is refused', async () => {
   const { context, opened } = enrolled('missing-base');
   const proposal = standardProposal(opened);
   fs.unlinkSync(graphPath(context, 'pages/Incoming Anchor.md'));
@@ -289,7 +297,7 @@ test('an update whose base file was deleted locally is refused', () => {
 
 // ====================================================== helper precondition
 
-test('the helper refuses a write whose destination changed after the preview', () => {
+test('the helper refuses a write whose destination changed after the preview', async () => {
   const { context, opened } = enrolled('precondition');
   const file = opened.sidecar.identity.files['file-english'];
   assert.throws(
@@ -299,7 +307,7 @@ test('the helper refuses a write whose destination changed after the preview', (
     'the file is preserved exactly');
 });
 
-test('incoming writes cannot fall back to an unconditional overwrite', () => {
+test('incoming writes cannot fall back to an unconditional overwrite', async () => {
   const { context } = enrolled('no-any');
   for (const bad of ['any', '', null, undefined, 'ANY', 'sha256:' + '0'.repeat(64)]) {
     assert.throws(
@@ -313,7 +321,7 @@ test('incoming writes cannot fall back to an unconditional overwrite', () => {
 
 // ====================================================== paths and parents
 
-test('every disallowed target path shape is refused before the helper is called', () => {
+test('every disallowed target path shape is refused before the helper is called', async () => {
   const { context, opened } = enrolled('paths');
   const shapes = [
     'pages/nested/deep.md', 'pages/note.org', 'logseq/.og-sync/sneak.md',
@@ -333,7 +341,7 @@ test('every disallowed target path shape is refused before the helper is called'
   assert.ok(!fs.existsSync(graphPath(context, 'assets')), 'no directory was created');
 });
 
-test('a target whose parent no accepted file proves is refused', () => {
+test('a target whose parent no accepted file proves is refused', async () => {
   // Only pages/ is enrolled here, so journals/ is never proven even though the
   // path syntax is allowed and put-note would happily create it.
   const { context, opened } = enrolled('unproven', [NOTES[0], NOTES[1]]);
@@ -350,7 +358,7 @@ test('a target whose parent no accepted file proves is refused', () => {
     'the helper was never invoked, so no directory was created');
 });
 
-test('a symlink at the destination is preserved and the write refused', () => {
+test('a symlink at the destination is preserved and the write refused', async () => {
   const { context, opened } = enrolled('symlink');
   const link = graphPath(context, 'pages/수신 새 문서.md');
   fs.symlinkSync(graphPath(context, 'pages/Incoming Anchor.md'), link);
@@ -367,7 +375,7 @@ test('a symlink at the destination is preserved and the write refused', () => {
 
 // ====================================================== bytes and bounds
 
-test('bytes that do not round-trip as UTF-8 are refused, never replaced', () => {
+test('bytes that do not round-trip as UTF-8 are refused, never replaced', async () => {
   assert.throws(() => IA.decodeNoteHex('ff fe'.replace(' ', ''), 'target'),
     (error) => ['non-roundtrip-bytes', 'malformed-record'].includes(error.code));
   assert.throws(() => IA.decodeNoteHex('fffe', 'target'),
@@ -378,7 +386,7 @@ test('bytes that do not round-trip as UTF-8 are refused, never replaced', () => 
   assert.equal(IA.decodeNoteHex(good.hex, 'target').text, '- 한국어 ✅\n');
 });
 
-test('an oversized note refuses before any note write', () => {
+test('an oversized note refuses before any note write', async () => {
   const { context, opened } = enrolled('oversize');
   const proposal = standardProposal(opened);
   proposal.files[1].targetContentHex = Buffer.from('x'.repeat(IA.MAX_NOTE_BYTES + 1)).toString('hex');
@@ -391,9 +399,9 @@ test('an oversized note refuses before any note write', () => {
 
 // ====================================================== outstanding work
 
-test('an unfinished transaction blocks an unrelated new proposal', () => {
+test('an unfinished transaction blocks an unrelated new proposal', async () => {
   const { context, opened } = enrolled('outstanding');
-  const first = applyApproved(context, standardProposal(opened), { failAt: 'after-file:file-english' });
+  const first = await applyApproved(context, standardProposal(opened), { failAt: 'after-file:file-english' });
   assert.equal(first.outcome, 'interrupted');
   assert.equal(first.mutated, true);
   assert.deepEqual(first.applied, ['file-english']);
@@ -417,9 +425,9 @@ test('an unfinished transaction blocks an unrelated new proposal', () => {
 
 // ====================================================== recovery authority
 
-test('a malformed, tampered or substituted journal never earns the right to write', () => {
+test('a malformed, tampered or substituted journal never earns the right to write', async () => {
   const { context, opened } = enrolled('authority');
-  const interruptedRun = applyApproved(context, standardProposal(opened),
+  const interruptedRun = await applyApproved(context, standardProposal(opened),
     { failAt: 'before-file:file-english' });
   assert.equal(interruptedRun.outcome, 'interrupted');
   assert.deepEqual(interruptedRun.applied, []);
@@ -440,7 +448,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
   ];
   for (const [code, mutate] of cases) {
     rewriteJournal(context, mutate);
-    const result = IA.recoverIncoming(context, { gate: CLOSED });
+    const result = await IA.recoverIncoming(context, { gate: CLOSED });
     assert.equal(result.outcome, 'refused', `${code}: expected a refusal`);
     assert.equal(result.code, code, `${code}: got ${result.code} (${result.reason})`);
     assert.equal(result.mutated, false);
@@ -461,7 +469,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
       mutate(v);
       v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
     });
-    const result = IA.recoverIncoming(context, { gate: CLOSED });
+    const result = await IA.recoverIncoming(context, { gate: CLOSED });
     assert.equal(result.outcome, 'refused');
     assert.equal(result.code, 'journal-apply-order-invalid', result.reason);
     restore();
@@ -472,7 +480,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
     v.approved.graphBinding.graphInode += 1;
     resealJournal(v);
   });
-  let result = IA.recoverIncoming(context, { gate: CLOSED });
+  let result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-binding-mismatch');
   assert.equal(result.mutated, false);
   restore();
@@ -481,7 +489,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
     v.approved.profileBinding.profileDirectory = 'p-somewhere-else';
     resealJournal(v);
   });
-  result = IA.recoverIncoming(context, { gate: CLOSED });
+  result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-binding-mismatch');
   restore();
 
@@ -491,7 +499,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
     v.approved.graphId = 'graph-some-other-lineage';
     v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
   });
-  result = IA.recoverIncoming(context, { gate: CLOSED });
+  result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-proposal-mismatch', result.reason);
   restore();
 
@@ -502,7 +510,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
     v.approved.graphId = 'graph-some-other-lineage';
     resealJournal(v);
   });
-  result = IA.recoverIncoming(context, { gate: CLOSED });
+  result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-graph-mismatch', result.reason);
   assert.equal(result.mutated, false);
   assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content);
@@ -513,7 +521,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
     v.approved.planId = 'plan-ffffffffffffffffffffffffffffffff';
     resealJournal(v);
   });
-  result = IA.recoverIncoming(context, { gate: CLOSED });
+  result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-plan-mismatch', result.reason);
   assert.equal(result.mutated, false);
   restore();
@@ -523,7 +531,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
     v.approved.base.metadataRevision = 'metadata-0';
     resealJournal(v);
   });
-  result = IA.recoverIncoming(context, { gate: CLOSED });
+  result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-base-mismatch', result.reason);
   assert.equal(result.mutated, false);
   restore();
@@ -531,7 +539,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
   // unparseable bytes are retained as evidence, not destroyed
   PI.writeJournal(context, Buffer.from('{ not json at all\n', 'utf8'),
     PI.readJournal(context).hash.replace(/^sha256:/, ''));
-  result = IA.recoverIncoming(context, { gate: CLOSED });
+  result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-malformed');
   assert.equal(PI.readJournal(context).bytes.toString('utf8'), '{ not json at all\n');
   assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content);
@@ -539,16 +547,16 @@ test('a malformed, tampered or substituted journal never earns the right to writ
 
 // ====================================================== recovery behaviour
 
-test('recovery rolls forward the remaining files and accepts one revision', () => {
+test('recovery rolls forward the remaining files and accepts one revision', async () => {
   const { context, opened } = enrolled('roll-forward');
-  const first = applyApproved(context, standardProposal(opened),
+  const first = await applyApproved(context, standardProposal(opened),
     { failAt: 'after-file:file-english' });
   assert.equal(first.outcome, 'interrupted');
   assert.deepEqual(first.applied, ['file-english']);
   assert.equal(PI.openGraph(context).outcome, 'refused',
     'the disk is ahead of the sidecar, which the store refuses');
 
-  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  const recovered = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
   assert.deepEqual(recovered.wrote, ['file-new-korean']);
   assert.equal(recovered.progressDisagreement.length, 1,
@@ -560,12 +568,12 @@ test('recovery rolls forward the remaining files and accepts one revision', () =
   assert.equal(accepted.sidecar.metadataRevision, 'metadata-2');
   assert.equal(journalValue(context).value.state, 'closed');
 
-  const again = IA.recoverIncoming(context, { gate: CLOSED });
+  const again = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(again.outcome, 'none');
   assert.equal(again.code, 'journal-closed');
 });
 
-test('a third state anywhere in the transaction prevents ALL further note writes', () => {
+test('a third state anywhere in the transaction prevents ALL further note writes', async () => {
   const { context, opened } = enrolled('third-state', NOTES);
   // three files, so a third state in the LAST one must block the first two
   const proposal = IA.buildProposal({
@@ -580,7 +588,7 @@ test('a third state anywhere in the transaction prevents ALL further note writes
         content: '- last of three\n' },
     ],
   });
-  const run = applyApproved(context, proposal, { failAt: 'before-file:file-english' });
+  const run = await applyApproved(context, proposal, { failAt: 'before-file:file-english' });
   assert.equal(run.outcome, 'interrupted');
   assert.deepEqual(run.applied, [], 'nothing was applied yet');
 
@@ -591,7 +599,7 @@ test('a third state anywhere in the transaction prevents ALL further note writes
   const beforeImage = journalValue(context).value.approved.files[last].beforeImage.contentHex;
   PI.putNoteFixture(context, lastPath, '- a third value nobody planned\n');
 
-  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  const recovered = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(recovered.outcome, 'third-state');
   assert.equal(recovered.mutated, false);
   assert.equal(recovered.thirdStates.length, 1);
@@ -613,9 +621,9 @@ test('a third state anywhere in the transaction prevents ALL further note writes
   assert.equal(journalValue(context).value.state, 'open', 'the journal is retained open');
 });
 
-test('interruption after the records are accepted closes without a second write', () => {
+test('interruption after the records are accepted closes without a second write', async () => {
   const { context, opened } = enrolled('records-then-crash');
-  const run = applyApproved(context, standardProposal(opened), { failAt: 'after-records' });
+  const run = await applyApproved(context, standardProposal(opened), { failAt: 'after-records' });
   assert.equal(run.outcome, 'interrupted');
   assert.equal(run.recordsAccepted, false, 'the journal never recorded acceptance');
 
@@ -625,7 +633,7 @@ test('interruption after the records are accepted closes without a second write'
     'the store did accept before the journal could be closed');
   const sidecarBefore = PI.readRecords(context).sidecarHash;
 
-  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  const recovered = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
   assert.deepEqual(recovered.wrote, [], 'no note was rewritten');
   assert.equal(recovered.recordsAlreadyAccepted, true);
@@ -634,9 +642,9 @@ test('interruption after the records are accepted closes without a second write'
   assert.equal(journalValue(context).value.state, 'closed');
 });
 
-test('a retained journal is never overwritten and a second proposal is refused', () => {
+test('a retained journal is never overwritten and a second proposal is refused', async () => {
   const { context, opened } = enrolled('slot');
-  assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
+  assert.equal((await applyApproved(context, standardProposal(opened))).outcome, 'applied');
   const first = PI.readJournal(context);
   assert.equal(first.value.state, 'closed');
 
@@ -652,7 +660,7 @@ test('a retained journal is never overwritten and a second proposal is refused',
   const preview = IA.planIncoming(context, second);
   assert.equal(preview.outcome, 'refused');
   assert.equal(preview.code, 'journal-slot-occupied');
-  const applied = IA.applyIncoming(context, {
+  const applied = await IA.applyIncoming(context, {
     proposal: second, approve: 'sha256:' + '0'.repeat(64), gate: CLOSED,
   });
   assert.equal(applied.outcome, 'refused');
@@ -666,9 +674,9 @@ test('a retained journal is never overwritten and a second proposal is refused',
   assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
 });
 
-test('a retained journal that does not parse also refuses a new proposal', () => {
+test('a retained journal that does not parse also refuses a new proposal', async () => {
   const { context, opened } = enrolled('slot-malformed');
-  assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
+  assert.equal((await applyApproved(context, standardProposal(opened))).outcome, 'applied');
   const before = PI.readJournal(context);
   PI.writeJournal(context, Buffer.from('{ not json\n', 'utf8'),
     before.hash.replace(/^sha256:/, ''));
@@ -687,14 +695,14 @@ test('a retained journal that does not parse also refuses a new proposal', () =>
 
 // ====================================================== app-closed gate
 
-test('a running or uncertain app refuses every write, and the gate is rechecked', () => {
+test('a running or uncertain app refuses every write, and the gate is rechecked', async () => {
   const { context, opened } = enrolled('gate');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
 
   for (const [gate, code] of [[RUNNING, 'app-running'], [UNCERTAIN, 'app-state-uncertain'],
     [undefined, 'app-state-uncertain'], [() => { throw new Error('ps failed'); }, 'app-state-uncertain']]) {
-    const result = IA.applyIncoming(context, {
+    const result = await IA.applyIncoming(context, {
       proposal, approve: preview.preview.previewFingerprint, gate,
     });
     assert.equal(result.outcome, 'refused');
@@ -706,8 +714,13 @@ test('a running or uncertain app refuses every write, and the gate is rechecked'
 
   // the gate is re-evaluated per write, not once: allow the journal, then refuse
   let calls = 0;
-  const flips = () => { calls += 1; return calls <= 1 ? { closed: true } : { closed: false }; };
-  const midway = IA.applyIncoming(context, {
+  const flips = () => {
+    calls += 1;
+    return calls <= 1
+      ? { mode: IA.MODE_APP_CLOSED, closed: true }
+      : { mode: IA.MODE_APP_CLOSED, closed: false };
+  };
+  const midway = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: flips,
   });
   assert.equal(midway.outcome, 'interrupted');
@@ -719,9 +732,9 @@ test('a running or uncertain app refuses every write, and the gate is rechecked'
 
 // ====================================================== containment
 
-test('the incoming path writes only inside the owned run', () => {
+test('the incoming path writes only inside the owned run', async () => {
   const { context, opened } = enrolled('containment');
-  assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
+  assert.equal((await applyApproved(context, standardProposal(opened))).outcome, 'applied');
   const graph = graphPath(context);
   const profile = profilePath(context);
   assert.equal(fs.realpathSync(graph), graph);
@@ -741,7 +754,7 @@ test('the incoming path writes only inside the owned run', () => {
  * entirely, and closed the incoming journal as recovered with a null
  * transaction ID. These are the boundaries that must now hold.
  */
-test('a device-step failure after the sidecar advances is resolved, not declared complete', () => {
+test('a device-step failure after the sidecar advances is resolved, not declared complete', async () => {
   const { context, opened } = enrolled('device-step');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
@@ -751,7 +764,7 @@ test('a device-step failure after the sidecar advances is resolved, not declared
   assert.match(bound.snapshotFingerprint, /^sha256:[0-9a-f]{64}$/);
 
   // graph-first publication fails after the sidecar lands, before the device record
-  const run = IA.applyIncoming(context, {
+  const run = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     recordFailure: { step: 'device', point: 'after-stage' },
   });
@@ -768,7 +781,7 @@ test('a device-step failure after the sidecar advances is resolved, not declared
   assert.equal(journalValue(context).value.state, 'open',
     'the incoming journal is NOT closed while the record transaction is unresolved');
 
-  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  const recovered = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
   assert.equal(recovered.resolution, 'store-recovered:graph-applied',
     'the record store resolved it through its own recovery contract');
@@ -785,11 +798,11 @@ test('a device-step failure after the sidecar advances is resolved, not declared
     'the closed journal names the real transaction, not null');
 });
 
-test('an outstanding transaction that is not ours is never resolved or ignored', () => {
+test('an outstanding transaction that is not ours is never resolved or ignored', async () => {
   const { context, opened } = enrolled('foreign-tx');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
-  const run = IA.applyIncoming(context, {
+  const run = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     failAt: 'after-file:file-english',
   });
@@ -805,7 +818,7 @@ test('an outstanding transaction that is not ours is never resolved or ignored',
   }, { ordering: 'graph-first', failure: { step: 'device', point: 'after-stage' } });
   assert.equal(foreign.outcome, 'uncertain-write');
 
-  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'unrelated-outstanding-transaction');
   assert.equal(result.mutated, false);
@@ -814,11 +827,11 @@ test('an outstanding transaction that is not ours is never resolved or ignored',
   assert.equal(journalValue(context).value.state, 'open');
 });
 
-test('a journal labelled closed whose records moved on is not trusted', () => {
+test('a journal labelled closed whose records moved on is not trusted', async () => {
   const { context, opened } = enrolled('false-closed');
-  assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
+  assert.equal((await applyApproved(context, standardProposal(opened))).outcome, 'applied');
   assert.equal(journalValue(context).value.state, 'closed');
-  assert.equal(IA.recoverIncoming(context, { gate: CLOSED }).code, 'journal-closed',
+  assert.equal((await IA.recoverIncoming(context, { gate: CLOSED })).code, 'journal-closed',
     'a genuinely complete transaction verifies');
 
   const now = PI.openGraph(context);
@@ -829,7 +842,7 @@ test('a journal labelled closed whose records moved on is not trusted', () => {
     expectedMetadataRevision: 'metadata-2', metadataRevision: 'metadata-9', files, tombstones: [],
   }).outcome, 'accepted');
 
-  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'closed-journal-not-verified');
   assert.equal(result.mutated, false);
@@ -840,7 +853,7 @@ test('a journal labelled closed whose records moved on is not trusted', () => {
  * and the proposal's own identity was never recomputed, so a changed body kept
  * a valid-looking ID and produced an identical approval fingerprint.
  */
-test('the stored revision is derived from the plan, not chosen by the proposal', () => {
+test('the stored revision is derived from the plan, not chosen by the proposal', async () => {
   const { context, opened } = enrolled('derived-revision');
   const proposal = standardProposal(opened);
   assert.ok(!('acceptedRevision' in proposal.files[0]),
@@ -851,7 +864,7 @@ test('the stored revision is derived from the plan, not chosen by the proposal',
     assert.match(file.acceptedRevision, /^compare-revision-[0-9a-f]{32}$/,
       'the revision is the deterministic compare-revision');
   }
-  assert.equal(applyApproved(context, proposal).outcome, 'applied');
+  assert.equal((await applyApproved(context, proposal)).outcome, 'applied');
   const stored = PI.openGraph(context).sidecar.identity.files;
   for (const file of preview.preview.files) {
     assert.equal(stored[file.fileId].acceptedRevision, file.acceptedRevision,
@@ -859,7 +872,7 @@ test('the stored revision is derived from the plan, not chosen by the proposal',
   }
 });
 
-test('a changed proposal body keeping its identity is refused', () => {
+test('a changed proposal body keeping its identity is refused', async () => {
   const { context, opened } = enrolled('proposal-identity');
   const proposal = standardProposal(opened);
   for (const mutate of [
@@ -878,7 +891,7 @@ test('a changed proposal body keeping its identity is refused', () => {
   assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content);
 });
 
-test('proposal field types and the plan identity are validated strictly', () => {
+test('proposal field types and the plan identity are validated strictly', async () => {
   const { context, opened } = enrolled('strict-types');
   const base = standardProposal(opened);
   const reid = (p) => { delete p.proposalId; return p; };
@@ -906,11 +919,11 @@ test('proposal field types and the plan identity are validated strictly', () => 
  * The related consistency check: acceptRecords used to reread current bytes and
  * stamp the intended revision on them, whichever bytes those happened to be.
  */
-test('drift is classified honestly and never silently adopted', () => {
+test('drift is classified honestly and never silently adopted', async () => {
   const { context, opened } = enrolled('drift');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
-  const run = IA.applyIncoming(context, {
+  const run = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     failAt: 'after-file:file-new-korean',
   });
@@ -922,7 +935,7 @@ test('drift is classified honestly and never silently adopted', () => {
   assert.equal(verdict.code, 'unrelated-local-change');
   assert.equal(verdict.detail.drift[0].fileId, 'file-korean');
 
-  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  const recovered = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.notEqual(recovered.outcome, 'recovered',
     'an unrelated local change is never adopted into the accepted metadata');
   assert.equal(PI.readNote(context, 'pages/수신 기준 문서.md'), '- 사용자가 직접 고친 내용\n',
@@ -930,11 +943,11 @@ test('drift is classified honestly and never silently adopted', () => {
   assert.equal(journalValue(context).value.state, 'open');
 });
 
-test('a transaction file that no longer holds its approved target is target-divergence', () => {
+test('a transaction file that no longer holds its approved target is target-divergence', async () => {
   const { context, opened } = enrolled('divergence');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
-  const run = IA.applyIncoming(context, {
+  const run = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     failAt: 'after-file:file-new-korean',
   });
@@ -982,12 +995,12 @@ function noteState(context) {
 }
 
 /* One fresh case, stopped before the first note write, with nothing applied. */
-function stoppedBeforeFirstWrite(caseName) {
+async function stoppedBeforeFirstWrite(caseName) {
   const { context, opened } = enrolled(caseName);
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
   assert.equal(preview.outcome, 'preview');
-  const run = IA.applyIncoming(context, {
+  const run = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     failAt: `before-file:${preview.preview.applyOrder[0]}`,
   });
@@ -1016,76 +1029,76 @@ function assertNothingMutated(state, journalHash, label) {
   assert.equal(journalValue(context).value.state, 'open', `${label}: the journal stays open`);
 }
 
-test('a substituted target transaction is refused before any note is written', () => {
-  const state = stoppedBeforeFirstWrite('sub-transaction');
+test('a substituted target transaction is refused before any note is written', async () => {
+  const state = await stoppedBeforeFirstWrite('sub-transaction');
   const hash = forgeJournal(state.context,
     (v) => { v.approved.target.transactionId = 'f'.repeat(64); }, 'approval');
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'journal-target-mismatch', result.reason);
   assert.deepEqual(result.bindingMismatch, ['transactionId']);
   assertNothingMutated(state, hash, 'substituted transactionId');
 });
 
-test('a substituted target snapshot is refused before any note is written', () => {
-  const state = stoppedBeforeFirstWrite('sub-snapshot');
+test('a substituted target snapshot is refused before any note is written', async () => {
+  const state = await stoppedBeforeFirstWrite('sub-snapshot');
   const hash = forgeJournal(state.context,
     (v) => { v.approved.target.snapshotFingerprint = `sha256:${'e'.repeat(64)}`; }, 'approval');
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'journal-target-mismatch', result.reason);
   assert.ok(result.bindingMismatch.includes('snapshotFingerprint'));
   assertNothingMutated(state, hash, 'substituted snapshotFingerprint');
 });
 
-test('a substituted sidecar record hash is refused before any note is written', () => {
-  const state = stoppedBeforeFirstWrite('sub-sidecar');
+test('a substituted sidecar record hash is refused before any note is written', async () => {
+  const state = await stoppedBeforeFirstWrite('sub-sidecar');
   const hash = forgeJournal(state.context,
     (v) => { v.approved.target.sidecarHash = `sha256:${'d'.repeat(64)}`; }, 'approval');
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.code, 'journal-target-mismatch', result.reason);
   assert.deepEqual(result.bindingMismatch, ['sidecarHash']);
   assertNothingMutated(state, hash, 'substituted sidecarHash');
 });
 
-test('a substituted device record hash is refused before any note is written', () => {
-  const state = stoppedBeforeFirstWrite('sub-device');
+test('a substituted device record hash is refused before any note is written', async () => {
+  const state = await stoppedBeforeFirstWrite('sub-device');
   const hash = forgeJournal(state.context,
     (v) => { v.approved.target.deviceHash = `sha256:${'c'.repeat(64)}`; }, 'approval');
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.code, 'journal-target-mismatch', result.reason);
   assert.deepEqual(result.bindingMismatch, ['deviceHash']);
   assertNothingMutated(state, hash, 'substituted deviceHash');
 });
 
-test('a substituted stored revision is refused before any note is written', () => {
-  const state = stoppedBeforeFirstWrite('sub-revision');
+test('a substituted stored revision is refused before any note is written', async () => {
+  const state = await stoppedBeforeFirstWrite('sub-revision');
   const target = state.preview.preview.applyOrder[0];
   const hash = forgeJournal(state.context, (v) => {
     v.approved.files[target].acceptedRevision = 'compare-revision-00000000000000000000000000000000';
   }, 'approval');
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'journal-revision-mismatch', result.reason);
   assert.equal(result.fileId, target);
   assertNothingMutated(state, hash, 'substituted stored revision');
 });
 
-test('a substituted revision for a file outside the transaction is refused', () => {
-  const state = stoppedBeforeFirstWrite('sub-unchanged-revision');
+test('a substituted revision for a file outside the transaction is refused', async () => {
+  const state = await stoppedBeforeFirstWrite('sub-unchanged-revision');
   const outside = Object.keys(journalValue(state.context).value.approved.unchanged)[0];
   const hash = forgeJournal(state.context, (v) => {
     v.approved.unchanged[outside].acceptedRevision = 'accepted-revision-somewhere-else';
   }, 'approval');
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.code, 'journal-revision-mismatch', result.reason);
   assertNothingMutated(state, hash, 'substituted unchanged revision');
 });
 
-test('a plausible approval fingerprint is not proof of the approved proposal', () => {
+test('a plausible approval fingerprint is not proof of the approved proposal', async () => {
   // originReplicaId is part of the PROPOSAL body but not the preview body, so
   // re-sealing the approval fingerprint leaves it looking entirely consistent.
-  const state = stoppedBeforeFirstWrite('linkage-proposal');
+  const state = await stoppedBeforeFirstWrite('linkage-proposal');
   const hash = forgeJournal(state.context,
     (v) => { v.approved.originReplicaId = 'replica-somewhere-else'; }, 'approval');
   const journal = journalValue(state.context).value;
@@ -1095,48 +1108,48 @@ test('a plausible approval fingerprint is not proof of the approved proposal', (
     `sha256:${sha256(stableStringify(IA.previewBodyFrom(journal.approved)))}`,
     'the approval fingerprint reconstructs');
 
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'journal-proposal-mismatch', result.reason);
   assertNothingMutated(state, hash, 'substituted originReplicaId');
 });
 
-test('a self-consistent approvedHash is not proof of the approved values', () => {
-  const state = stoppedBeforeFirstWrite('linkage-approval');
+test('a self-consistent approvedHash is not proof of the approved values', async () => {
+  const state = await stoppedBeforeFirstWrite('linkage-approval');
   const hash = forgeJournal(state.context,
     (v) => { v.approved.target.transactionId = 'a'.repeat(64); }, 'approved');
   const journal = journalValue(state.context).value;
   assert.equal(journal.approvedHash, `sha256:${sha256(stableStringify(journal.approved))}`);
 
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'journal-approval-mismatch', result.reason);
   assertNothingMutated(state, hash, 'approvedHash alone');
 });
 
-test('a substituted plan projection is refused before any note is written', () => {
-  const state = stoppedBeforeFirstWrite('sub-plan-projection');
+test('a substituted plan projection is refused before any note is written', async () => {
+  const state = await stoppedBeforeFirstWrite('sub-plan-projection');
   const hash = forgeJournal(state.context,
     (v) => { v.approved.planProjectedSnapshotFingerprint = `sha256:${'b'.repeat(64)}`; }, 'approval');
-  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(result.code, 'journal-plan-mismatch', result.reason);
   assertNothingMutated(state, hash, 'substituted plan projection');
 });
 
-test('an untampered journal still rolls the remaining files forward', () => {
+test('an untampered journal still rolls the remaining files forward', async () => {
   // The valid partial-recovery case: the first file landed, the second did not.
   const { context, opened } = enrolled('valid-partial');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
   const order = preview.preview.applyOrder;
-  const run = IA.applyIncoming(context, {
+  const run = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     failAt: `after-file:${order[0]}`,
   });
   assert.equal(run.outcome, 'interrupted');
   assert.deepEqual(run.applied, [order[0]]);
 
-  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  const recovered = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
   assert.deepEqual(recovered.wrote, [order[1]], 'only the remaining file was written');
   assert.equal(recovered.transactionId, preview.preview.target.transactionId);
@@ -1150,18 +1163,18 @@ test('an untampered journal still rolls the remaining files forward', () => {
   assert.equal(journalValue(context).value.state, 'closed');
 });
 
-test('a forged journal that is later restored recovers normally', () => {
-  const state = stoppedBeforeFirstWrite('forge-then-restore');
+test('a forged journal that is later restored recovers normally', async () => {
+  const state = await stoppedBeforeFirstWrite('forge-then-restore');
   const pristine = PI.readJournal(state.context);
   const hash = forgeJournal(state.context,
     (v) => { v.approved.target.transactionId = 'f'.repeat(64); }, 'approval');
-  assert.equal(IA.recoverIncoming(state.context, { gate: CLOSED }).code,
+  assert.equal((await IA.recoverIncoming(state.context, { gate: CLOSED })).code,
     'journal-target-mismatch');
   assertNothingMutated(state, hash, 'before restore');
 
   PI.writeJournal(state.context, pristine.bytes,
     PI.readJournal(state.context).hash.replace(/^sha256:/, ''));
-  const recovered = IA.recoverIncoming(state.context, { gate: CLOSED });
+  const recovered = await IA.recoverIncoming(state.context, { gate: CLOSED });
   assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
   assert.deepEqual(recovered.wrote, state.preview.preview.applyOrder,
     'both files rolled forward once the journal was honest again');
@@ -1169,11 +1182,11 @@ test('a forged journal that is later restored recovers normally', () => {
     state.preview.preview.target.transactionId);
 });
 
-test('an outstanding transaction with unapplied files refuses before any write', () => {
+test('an outstanding transaction with unapplied files refuses before any write', async () => {
   const { context, opened } = enrolled('outstanding-pending');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
-  const run = IA.applyIncoming(context, {
+  const run = await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     failAt: `before-file:${preview.preview.applyOrder[0]}`,
   });
@@ -1191,7 +1204,7 @@ test('an outstanding transaction with unapplied files refuses before any write',
   }, { ordering: 'graph-first', failure: { step: 'device', point: 'after-stage' } }).outcome,
   'uncertain-write');
 
-  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   // the unrelated intent is caught first and named for what it is
   assert.equal(result.code, 'unrelated-outstanding-transaction', result.reason);
@@ -1203,17 +1216,17 @@ test('an outstanding transaction with unapplied files refuses before any write',
     'the unrelated transaction is left exactly as it was');
 });
 
-test('records accepted at the target with files still pending refuses before any write', () => {
+test('records accepted at the target with files still pending refuses before any write', async () => {
   const { context, opened } = enrolled('accepted-pending');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
   const order = preview.preview.applyOrder;
   // apply everything and accept the records, then put one file back to its
   // before-image so recovery sees an accepted target with a pending file
-  assert.equal(IA.applyIncoming(context, {
+  assert.equal((await IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
     failAt: 'after-records',
-  }).outcome, 'interrupted');
+  })).outcome, 'interrupted');
   assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
 
   const approved = journalValue(context).value.approved;
@@ -1224,7 +1237,7 @@ test('records accepted at the target with files still pending refuses before any
   const journalHash = PI.readJournal(context).hash;
   const records = PI.readRecords(context);
 
-  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  const result = await IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.outcome, 'refused');
   assert.equal(result.code, 'journal-base-mismatch', result.reason);
   assert.equal(result.mutated, false);
@@ -1232,4 +1245,255 @@ test('records accepted at the target with files still pending refuses before any
   for (const path of WATCHED) assert.equal(after[path], notes[path], `${path} unchanged`);
   assert.equal(PI.readJournal(context).hash, journalHash);
   assert.equal(PI.readRecords(context).sidecarHash, records.sidecarHash);
+});
+
+// ==================================================== app-idle runtime mode
+
+/*
+ * The app-idle mode is weaker than app-closed and must never be able to pass
+ * as it. Its reconciliation hook is mandatory, and a hook that is missing,
+ * rejecting, timing out or merely unconvinced blocks publication.
+ */
+
+test('an app-idle gate that claims closure is refused', async () => {
+  const { context, opened } = enrolled('idle-claims-closed');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const liar = () => ({ mode: IA.MODE_APP_IDLE, idle: true, closed: true });
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: liar, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'gate-mode-mismatch', result.reason);
+  assert.equal(result.mutated, false);
+  assert.equal(PI.readJournal(context).value, null);
+  assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content);
+});
+
+test('an app-closed gate cannot satisfy an app-idle run, or the reverse', async () => {
+  const { context, opened } = enrolled('mode-crossing');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+
+  const idleWithClosedGate = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: CLOSED, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  });
+  assert.equal(idleWithClosedGate.code, 'gate-mode-mismatch', idleWithClosedGate.reason);
+
+  const closedWithIdleGate = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_CLOSED,
+  });
+  assert.equal(closedWithIdleGate.code, 'gate-mode-mismatch', closedWithIdleGate.reason);
+  assert.equal(PI.readJournal(context).value, null, 'neither created a journal');
+});
+
+test('app-idle refuses before any write when the reconciliation hook is absent', async () => {
+  const { context, opened } = enrolled('idle-no-hook');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  for (const reconcile of [null, undefined, 'not-a-function', {}]) {
+    const result = await IA.applyIncoming(context, {
+      proposal, approve: preview.preview.previewFingerprint,
+      gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile,
+    });
+    assert.equal(result.outcome, 'refused');
+    assert.equal(result.code, 'reconciliation-hook-missing', result.reason);
+    assert.equal(result.mutated, false);
+  }
+  assert.equal(PI.readJournal(context).value, null, 'no journal was created');
+  assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content,
+    'no note was written; app-idle never falls back to app-closed behaviour');
+});
+
+test('a not-idle app refuses every write', async () => {
+  const { context, opened } = enrolled('not-idle');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: NOT_IDLE, mode: IA.MODE_APP_IDLE, reconcile: RECONCILED,
+  });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'app-not-idle', result.reason);
+  assert.equal(result.mutated, false);
+  assert.equal(PI.readJournal(context).value, null);
+});
+
+test('app-idle applies, waits for reconciliation, and records its mode', async () => {
+  const { context, opened } = enrolled('idle-happy');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const seen = [];
+  const reconcile = async (fileId) => { seen.push(fileId); return { reconciled: true }; };
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile,
+  });
+  assert.equal(result.outcome, 'applied', result.reason || '');
+  assert.equal(result.mode, IA.MODE_APP_IDLE, 'the result names its mode');
+  // once per file during application, once per file again at the completion
+  // boundary -- an intermediate match is not proof that it still holds
+  assert.deepEqual(seen, ['file-english', 'file-new-korean', 'file-english', 'file-new-korean']);
+  assert.equal(result.reconciliations.filter((item) => item.boundary).length, 2);
+  assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
+  assert.equal(journalValue(context).value.state, 'closed');
+});
+
+test('a reconciliation that never completes blocks publication as a timeout', async () => {
+  const { context, opened } = enrolled('idle-timeout');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const reconcile = async () => ({ reconciled: false, code: 'reconciliation-timeout',
+    reason: 'OG did not take the change within the bounded wait' });
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile,
+  });
+  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.code, 'reconciliation-timeout', result.reason);
+  assert.equal(result.mode, IA.MODE_APP_IDLE);
+  assert.deepEqual(result.applied, ['file-english'], 'it stopped at the first file');
+  assert.equal(PI.openGraph(context).outcome, 'refused', 'identity was NOT published');
+  assert.equal(journalValue(context).value.state, 'open', 'the journal is retained open');
+  assert.equal(journalValue(context).value.progress.recordsAccepted, false);
+});
+
+test('meaningful reconciliation failures keep their own cause, not "timeout"', async () => {
+  for (const [label, reconcile, expected] of [
+    ['rejection with a code', async () => {
+      const error = new Error('the page never rendered');
+      error.code = 'reconciliation-not-rendered';
+      throw error;
+    }, 'reconciliation-not-rendered'],
+    ['rejection without a code', async () => { throw new Error('evaluate failed'); },
+      'reconciliation-failed'],
+    ['verdict with its own code', async () => ({ reconciled: false,
+      code: 'reconciliation-regressed', reason: 'OG moved back to older content' }),
+      'reconciliation-regressed'],
+    ['no verdict at all', async () => undefined, 'reconciliation-failed'],
+    ['non-reconcilable input', async () => ({ reconciled: false,
+      code: 'not-reconcilable-by-og', reason: 'whitespace-only edge change' }),
+      'not-reconcilable-by-og'],
+  ]) {
+    const { context, opened } = enrolled(`idle-cause-${label.replace(/[^a-z]+/g, '-')}`);
+    const proposal = standardProposal(opened);
+    const preview = IA.planIncoming(context, proposal);
+    const result = await IA.applyIncoming(context, {
+      proposal, approve: preview.preview.previewFingerprint,
+      gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile,
+    });
+    assert.equal(result.outcome, 'interrupted', label);
+    assert.equal(result.code, expected, `${label}: got ${result.code}`);
+    assert.equal(PI.openGraph(context).outcome, 'refused', `${label}: identity not published`);
+    assert.equal(journalValue(context).value.state, 'open', label);
+  }
+});
+
+test('the completion boundary rechecks every file, not just the last match', async () => {
+  const { context, opened } = enrolled('idle-boundary');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  let calls = 0;
+  // every per-file wait succeeds; the boundary re-check then reports a regression
+  const reconcile = async () => {
+    calls += 1;
+    return calls <= 2
+      ? { reconciled: true }
+      : { reconciled: false, code: 'reconciliation-regressed',
+          reason: 'a delayed older payload moved the database back' };
+  };
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile,
+  });
+  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.code, 'reconciliation-regressed', result.reason);
+  assert.deepEqual(result.applied, ['file-english', 'file-new-korean'],
+    'both files were written');
+  assert.equal(PI.openGraph(context).outcome, 'refused',
+    'identity is not published even though every per-file wait had succeeded');
+  assert.equal(journalValue(context).value.state, 'open');
+});
+
+test('a disk change after reconciliation is caught at the completion boundary', async () => {
+  const { context, opened } = enrolled('idle-disk-drift');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  let calls = 0;
+  const reconcile = async () => {
+    calls += 1;
+    // after both files are applied and reconciled, something else edits one
+    if (calls === 2) {
+      PI.putNoteFixture(context, 'pages/수신 기준 문서.md', '- 누군가 다른 것을 썼습니다\n');
+    }
+    return { reconciled: true };
+  };
+  const result = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile,
+  });
+  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.code, 'unrelated-local-change', result.reason);
+  assert.equal(PI.openGraph(context).outcome, 'refused');
+  assert.equal(PI.readNote(context, 'pages/수신 기준 문서.md'),
+    '- 누군가 다른 것을 썼습니다\n', 'the other write is preserved, not adopted');
+});
+
+test('app-idle recovery re-runs reconciliation and never omits it', async () => {
+  const { context, opened } = enrolled('idle-recovery');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const order = preview.preview.applyOrder;
+  const failing = async (fileId) => (fileId === order[1]
+    ? { reconciled: false, code: 'reconciliation-timeout', reason: 'stalled' }
+    : { reconciled: true });
+  const run = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: failing,
+  });
+  assert.equal(run.outcome, 'interrupted');
+  assert.equal(run.code, 'reconciliation-timeout');
+
+  // recovery with no hook must refuse, never silently behave like app-closed
+  const noHook = await IA.recoverIncoming(context, { gate: IDLE, mode: IA.MODE_APP_IDLE });
+  assert.equal(noHook.outcome, 'refused');
+  assert.equal(noHook.code, 'reconciliation-hook-missing', noHook.reason);
+
+  const seen = [];
+  const good = async (fileId) => { seen.push(fileId); return { reconciled: true }; };
+  const recovered = await IA.recoverIncoming(context,
+    { gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: good });
+  assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
+  assert.equal(recovered.mode, IA.MODE_APP_IDLE);
+  assert.deepEqual(seen, order,
+    'every file is re-reconciled on restart, including ones applied before the crash');
+  assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
+  assert.equal(journalValue(context).value.state, 'closed');
+});
+
+test('an explicit app-closed fallback completes without live reconciliation', async () => {
+  const { context, opened } = enrolled('idle-then-closed');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const stalled = async () => ({ reconciled: false, code: 'reconciliation-timeout',
+    reason: 'stalled' });
+  const run = await IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint,
+    gate: IDLE, mode: IA.MODE_APP_IDLE, reconcile: stalled,
+  });
+  assert.equal(run.outcome, 'interrupted');
+  assert.equal(journalValue(context).value.state, 'open');
+
+  // The operator quits the app and falls back. This is disk/identity recovery,
+  // NOT live UI reconciliation, and the result says which mode produced it.
+  const recovered = await IA.recoverIncoming(context, { gate: CLOSED, mode: IA.MODE_APP_CLOSED });
+  assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
+  assert.equal(recovered.mode, IA.MODE_APP_CLOSED,
+    'the fallback names app-closed, so it can never be read as live reconciliation');
+  assert.deepEqual(recovered.reconciliations, [],
+    'no UI reconciliation was performed or claimed');
+  assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
 });

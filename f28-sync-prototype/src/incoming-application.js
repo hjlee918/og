@@ -179,33 +179,112 @@ function stableRead(context, notePath) {
   return { stable: true, present: true, bytes: first, hash: sha256(first) };
 }
 
-// ------------------------------------------------------------- app-closed gate
+// ------------------------------------------------------------- runtime gate
+
+const MODE_APP_CLOSED = 'app-closed';
+const MODE_APP_IDLE = 'app-idle';
+const RUNTIME_MODES = [MODE_APP_CLOSED, MODE_APP_IDLE];
 
 /*
- * The gate proves ONE app has exited: the owned experimental build this harness
- * started. It excludes nothing else -- not Finder, not a cloud agent, not an
- * external editor, not a second coordinator, and not the same app launched again
- * one millisecond after the check passes. An uncertain result is never treated
- * as closed.
+ * Two explicit runtime modes, and the weaker one can never be mistaken for the
+ * stronger one.
+ *
+ *   app-closed  the accepted contract: the owned application is PROVEN to have
+ *               exited. The verdict must carry `closed: true`.
+ *   app-idle    the application is open and believed idle. The verdict carries
+ *               `idle: true` and must NEVER carry `closed: true` -- a gate that
+ *               claims closure in idle mode is itself refused, so an idle run
+ *               cannot be read, recorded or replayed as an app-closed result.
+ *
+ * Neither mode excludes anything. app-closed excludes exactly one application;
+ * app-idle excludes nothing at all and reports evidence, not proof. Finder,
+ * cloud agents, external editors, a second coordinator and the same app the
+ * instant after the check are outside both.
  */
-function assertAppClosed(gate, stage) {
+function assertRuntimeGate(gate, mode, stage) {
+  if (!RUNTIME_MODES.includes(mode)) {
+    throw new IncomingError('invalid-mode', `unknown runtime mode ${String(mode)}`);
+  }
   if (typeof gate !== 'function') {
     throw new IncomingError('app-state-uncertain',
-      `no app-closed gate was supplied for ${stage}`);
+      `no runtime gate was supplied for ${stage}`);
   }
   let verdict;
-  try { verdict = gate(stage); }
+  try { verdict = gate(stage, mode); }
   catch (error) {
     throw new IncomingError('app-state-uncertain',
-      `the app-closed gate failed at ${stage}: ${error.message}`);
+      `the ${mode} gate failed at ${stage}: ${error.message}`);
   }
-  if (!verdict || verdict.closed !== true) {
-    throw new IncomingError(
-      verdict && verdict.uncertain ? 'app-state-uncertain' : 'app-running',
-      `the owned application is not proven closed at ${stage}`,
-      { verdict: verdict || null });
+  if (!verdict) {
+    throw new IncomingError('app-state-uncertain',
+      `the ${mode} gate returned nothing at ${stage}`);
+  }
+  if (verdict.uncertain === true) {
+    throw new IncomingError('app-state-uncertain',
+      `the ${mode} gate could not determine application state at ${stage}`,
+      { verdict });
+  }
+  if (verdict.mode !== mode) {
+    throw new IncomingError('gate-mode-mismatch',
+      `the gate answered for mode ${String(verdict.mode)} while ${mode} was required at ${stage}`,
+      { verdict });
+  }
+  if (mode === MODE_APP_CLOSED) {
+    if (verdict.closed !== true) {
+      throw new IncomingError('app-running',
+        `the owned application is not proven closed at ${stage}`, { verdict });
+    }
+    return verdict;
+  }
+  // app-idle
+  if (verdict.closed === true) {
+    throw new IncomingError('gate-mode-mismatch',
+      `an app-idle gate must not report closure at ${stage}`, { verdict });
+  }
+  if (verdict.idle !== true) {
+    throw new IncomingError('app-not-idle',
+      `the owned application is not idle at ${stage}`, { verdict });
   }
   return verdict;
+}
+
+/*
+ * The awaited reconciliation hook.
+ *
+ * In app-idle mode it is MANDATORY: a missing, non-callable, rejecting or
+ * timing-out hook is a typed failure, never a silent fall back to app-closed
+ * behaviour. Rejections keep their own cause -- only an actual expiry of the
+ * bounded wait is `reconciliation-timeout`.
+ *
+ * What a resolved hook establishes is bounded: OG's database and rendering
+ * agreed with the approved target AT THE MOMENT IT WAS POLLED. It is not proof
+ * that a later stale or delayed watcher payload cannot arrive afterwards and
+ * move the database again, which is why §6's completion boundary re-checks.
+ */
+async function awaitReconciliation(reconcile, mode, fileId, file) {
+  if (mode !== MODE_APP_IDLE) return null;
+  if (typeof reconcile !== 'function') {
+    throw new IncomingError('reconciliation-hook-missing',
+      `app-idle requires a reconciliation hook; none was supplied for ${fileId}`);
+  }
+  let outcome;
+  try {
+    outcome = await reconcile(fileId, file);
+  } catch (error) {
+    throw new IncomingError(error && error.code ? error.code : 'reconciliation-failed',
+      `reconciliation rejected for ${fileId}: ${error && error.message ? error.message : String(error)}`,
+      { fileId, cause: error && error.code ? error.code : null });
+  }
+  if (!outcome || typeof outcome !== 'object') {
+    throw new IncomingError('reconciliation-failed',
+      `the reconciliation hook returned no verdict for ${fileId}`, { fileId });
+  }
+  if (outcome.reconciled !== true) {
+    throw new IncomingError(outcome.code || 'reconciliation-failed',
+      outcome.reason || `reconciliation did not complete for ${fileId}`,
+      { fileId, outcome });
+  }
+  return outcome;
 }
 
 // ---------------------------------------------------------- proposal shape
@@ -1138,7 +1217,10 @@ function proveRecordsAccepted(context, approved) {
  * and this slice has no approved way to archive it durably first. Another
  * experiment uses a fresh owned run.
  */
-function applyIncoming(context, { proposal, approve, gate, failAt = null, recordFailure = null }) {
+async function applyIncoming(context, {
+  proposal, approve, gate, mode = MODE_APP_CLOSED, reconcile = null,
+  failAt = null, recordFailure = null,
+}) {
   const planned = planIncoming(context, proposal);
   if (planned.outcome !== 'preview') return planned;
   if (!approve) {
@@ -1207,7 +1289,19 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, record
       `the serialized journal would be ${bytes.length} bytes; the limit is ${MAX_JOURNAL_BYTES}`);
   }
 
-  try { assertAppClosed(gate, 'journal-create'); }
+  if (!RUNTIME_MODES.includes(mode)) {
+    return refuse('invalid-mode', `unknown runtime mode ${String(mode)}`);
+  }
+  /*
+   * app-idle needs its reconciliation hook before anything is written, not at
+   * the moment it would first be awaited: discovering a missing hook after the
+   * notes are on disk would leave a mutation we could never confirm.
+   */
+  if (mode === MODE_APP_IDLE && typeof reconcile !== 'function') {
+    return refuse('reconciliation-hook-missing',
+      'app-idle requires a reconciliation hook; application is refused without one');
+  }
+  try { assertRuntimeGate(gate, mode, 'journal-create'); }
   catch (error) { return refuse(error.code, error.message, error.detail); }
 
   if (failAt === 'before-journal') {
@@ -1221,9 +1315,10 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, record
 
   let journalHash = `sha256:${sha256(bytes)}`;
   const appliedNow = [];
+  const reconciliations = [];
   try {
     for (const fileId of approved.applyOrder) {
-      assertAppClosed(gate, `note-write:${fileId}`);
+      assertRuntimeGate(gate, mode, `note-write:${fileId}`);
       if (failAt === `before-file:${fileId}`) {
         throw new IncomingError('injected-failure', `injected failure before writing ${fileId}`);
       }
@@ -1237,9 +1332,35 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, record
       bytes = journalBody(approved, progress);
       PI.writeJournal(context, bytes, journalHash.replace(/^sha256:/, ''));
       journalHash = `sha256:${sha256(bytes)}`;
+
+      // In app-idle, OG must actually have taken the change before the next
+      // file is written, so a stalled reconciliation cannot be masked by a
+      // later file succeeding.
+      const verdict = await awaitReconciliation(reconcile, mode, fileId, approved.files[fileId]);
+      if (verdict) reconciliations.push({ fileId, ...verdict });
     }
 
-    assertAppClosed(gate, 'record-step');
+    /*
+     * The completion boundary. Each file matched disk once when it was written
+     * and, in app-idle, OG agreed once when it was polled. Neither is proof that
+     * both still hold now, so the COMPLETE intended state is rechecked here
+     * before publication -- disk for every file, and OG for every file in
+     * app-idle.
+     */
+    assertRuntimeGate(gate, mode, 'completion-boundary');
+    const boundary = revalidateIntendedState(context, approved);
+    if (boundary.code) {
+      throw new IncomingError(boundary.code,
+        `the completion boundary refused: ${boundary.reason}`, boundary.detail || {});
+    }
+    if (mode === MODE_APP_IDLE) {
+      for (const fileId of approved.applyOrder) {
+        const again = await awaitReconciliation(reconcile, mode, fileId, approved.files[fileId]);
+        reconciliations.push({ fileId, boundary: true, ...again });
+      }
+    }
+
+    assertRuntimeGate(gate, mode, 'record-step');
     const accepted = acceptRecords(context, approved,
       recordFailure ? { ordering: 'graph-first', failure: recordFailure } : {});
     if (accepted.outcome !== 'accepted') {
@@ -1274,6 +1395,8 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, record
     return {
       outcome: 'applied',
       mutated: true,
+      mode,
+      reconciliations,
       applied: appliedNow,
       transactionId: approved.target.transactionId,
       metadataRevision: approved.target.metadataRevision,
@@ -1283,6 +1406,8 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, record
     };
   } catch (error) {
     return interrupted(error.code || 'application-failed', error.message, {
+      mode,
+      reconciliations,
       applied: appliedNow,
       recordsAccepted: progress.recordsAccepted,
       proposalId: approved.proposalId,
@@ -1490,7 +1615,16 @@ function recomputePlan(context, sidecar, approved, records) {
  * transaction is resolved through the record store's own recovery contract
  * before this layer will close anything.
  */
-function recoverIncoming(context, { gate } = {}) {
+async function recoverIncoming(context, {
+  gate, mode = MODE_APP_CLOSED, reconcile = null,
+} = {}) {
+  if (!RUNTIME_MODES.includes(mode)) {
+    return refuse('invalid-mode', `unknown runtime mode ${String(mode)}`);
+  }
+  if (mode === MODE_APP_IDLE && typeof reconcile !== 'function') {
+    return refuse('reconciliation-hook-missing',
+      'app-idle recovery requires a reconciliation hook; it never falls back to app-closed');
+  }
   let journal;
   let value;
   let records;
@@ -1654,9 +1788,9 @@ function recoverIncoming(context, { gate } = {}) {
   const wrote = [];
   try {
     if (pending.length) {
-      assertAppClosed(gate, 'recovery-note-writes');
+      assertRuntimeGate(gate, mode, 'recovery-note-writes');
       for (const item of pending) {
-        assertAppClosed(gate, `recovery-note-write:${item.fileId}`);
+        assertRuntimeGate(gate, mode, `recovery-note-write:${item.fileId}`);
         const file = approved.files[item.fileId];
         // Recheck immediately before this write, through the helper's own
         // precondition. Still a recheck-then-rename, not a compare-and-swap.
@@ -1669,11 +1803,40 @@ function recoverIncoming(context, { gate } = {}) {
       { wrote, classified, detail: error.detail || null });
   }
 
+  /*
+   * An app-idle restart must not silently omit reconciliation. Reconciliation
+   * leaves no durable marker this layer owns, so recovery re-runs the wait for
+   * EVERY file in the transaction -- applied-before-the-crash included -- rather
+   * than assuming an earlier run reconciled them.
+   */
+  const reconciliations = [];
+  if (mode === MODE_APP_IDLE) {
+    try {
+      assertRuntimeGate(gate, mode, 'recovery-reconciliation');
+      for (const fileId of approved.applyOrder) {
+        const verdict = await awaitReconciliation(reconcile, mode, fileId, approved.files[fileId]);
+        reconciliations.push({ fileId, recovery: true, ...verdict });
+      }
+    } catch (error) {
+      return {
+        outcome: 'unresolved',
+        mutated: wrote.length > 0,
+        mode,
+        code: error.code || 'reconciliation-failed',
+        reason: error.message,
+        wrote,
+        classified,
+        reconciliations,
+        note: 'the incoming journal stays open; identity is not published and nothing is reported complete',
+      };
+    }
+  }
+
   // ---- resolve the record store, through its own recovery contract
   let resolution = recordsAlreadyAccepted ? 'already-accepted' : null;
   try {
     if (!recordsAlreadyAccepted && outstanding.length === 1) {
-      assertAppClosed(gate, 'recovery-record-recovery');
+      assertRuntimeGate(gate, mode, 'recovery-record-recovery');
       const recoveredStore = PI.recover(context,
         { transactionId: approved.target.transactionId });
       if (recoveredStore.outcome !== 'recovered') {
@@ -1692,7 +1855,7 @@ function recoverIncoming(context, { gate } = {}) {
       }
       resolution = `store-recovered:${recoveredStore.classification}`;
     } else if (!recordsAlreadyAccepted) {
-      assertAppClosed(gate, 'recovery-record-step');
+      assertRuntimeGate(gate, mode, 'recovery-record-step');
       const accepted = acceptRecords(context, approved);
       if (accepted.outcome !== 'accepted') {
         return {
@@ -1754,6 +1917,8 @@ function recoverIncoming(context, { gate } = {}) {
   return {
     outcome: 'recovered',
     mutated: wrote.length > 0,
+    mode,
+    reconciliations,
     wrote,
     classified,
     progressDisagreement,
@@ -1769,6 +1934,11 @@ function recoverIncoming(context, { gate } = {}) {
 
 module.exports = {
   IncomingError,
+  MODE_APP_CLOSED,
+  MODE_APP_IDLE,
+  RUNTIME_MODES,
+  assertRuntimeGate,
+  awaitReconciliation,
   JOURNAL_SCHEMA,
   MAX_JOURNAL_BYTES,
   MAX_NOTE_BYTES,

@@ -305,8 +305,9 @@ async function run() {
     // -------------------------- application must refuse while the app is open
     phase('refuse-while-running');
     const runningVerdict = gate('live-check');
-    const refusedWhileRunning = IA.applyIncoming(context, {
+    const refusedWhileRunning = await IA.applyIncoming(context, {
       proposal, approve: previewed.preview.previewFingerprint, gate,
+      mode: IA.MODE_APP_CLOSED,
     });
     const englishWhileRunning = IA.stableRead(context, englishPath);
     record('application-refuses-while-the-owned-app-is-running',
@@ -336,12 +337,14 @@ async function run() {
     // ------------------------------------------------------- application
     phase('apply');
     const notesBeforeApply = PI.hashGraphNotes(context);
-    const applied = IA.applyIncoming(context, {
+    const applied = await IA.applyIncoming(context, {
       proposal, approve: previewed.preview.previewFingerprint, gate,
+      mode: IA.MODE_APP_CLOSED,
     });
     assert(applied.outcome === 'applied',
       `application did not complete: ${applied.code} ${applied.reason || ''}`);
-    out.applied = {applied: applied.applied, transactionId: applied.transactionId,
+    out.mode = IA.MODE_APP_CLOSED;
+    out.applied = {mode: applied.mode, applied: applied.applied, transactionId: applied.transactionId,
       metadataRevision: applied.metadataRevision,
       snapshotFingerprint: applied.snapshotFingerprint, journalHash: applied.journalHash};
 
@@ -408,7 +411,7 @@ async function run() {
       {state: journal.value?.state, applied: journal.value?.progress?.applied,
        transactionId: journal.value?.progress?.transactionId});
 
-    const nothingToRecover = IA.recoverIncoming(context, {gate});
+    const nothingToRecover = await IA.recoverIncoming(context, {gate, mode: IA.MODE_APP_CLOSED});
     record('recovery-verifies-the-closed-journal-rather-than-trusting-its-label',
       nothingToRecover.outcome === 'none' && nothingToRecover.code === 'journal-closed' &&
       nothingToRecover.verified === true &&

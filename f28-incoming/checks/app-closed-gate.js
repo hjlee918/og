@@ -41,15 +41,16 @@ function ownedProcesses(executable, deps = {}) {
 
 function makeGate(built, trees, deps = {}) {
   const alive = deps.alive || OP.alive;
-  return (stage) => {
+  return (stage, mode = 'app-closed') => {
     const retained = [...new Set(trees.flat())];
     const aliveTree = retained.filter(alive);
     const byName = ownedProcesses(built.exe, deps);
     if (byName === null) {
-      return { closed: false, uncertain: true, stage,
+      return { mode, closed: false, uncertain: true, stage,
         reason: 'process state could not be read; it is treated as unknown, never as closed' };
     }
     return {
+      mode,
       closed: aliveTree.length === 0 && byName.length === 0,
       stage,
       retainedTreeAlive: aliveTree,
@@ -59,4 +60,61 @@ function makeGate(built, trees, deps = {}) {
   };
 }
 
-module.exports = { makeGate, ownedProcesses };
+/*
+ * The app-idle gate. The application is OPEN; this reports evidence that it is
+ * idle and NEVER reports closure, so an idle run can never be recorded as an
+ * app-closed result.
+ *
+ * `readIdle()` returns the live signals the harness reads through the existing
+ * automation channel. Every one of them is evidence, not exclusion:
+ *   - `get-edit-input-id` nil says no block is in edit mode NOW;
+ *   - `editor-in-composition?` false says no IME composition NOW (Korean
+ *     composition is the case where OG itself refuses to save);
+ *   - `input-idle?` returns true merely when nothing is being edited, so it is
+ *     not a quiet-period proof;
+ *   - `*writes-finished?` marks that a batch was DISPATCHED, not that its IPC
+ *     writes landed, because alter-files-handler! returns a promise nobody
+ *     awaits;
+ *   - pending bridge causes cover only writes that already reached
+ *     write-file-impl!.
+ * Together they are evidence of an idle app. They do not prove that no save is
+ * in flight and they exclude nothing else at all.
+ */
+function makeIdleGate(readIdle) {
+  return (stage, mode = 'app-idle') => {
+    let signals;
+    try { signals = readIdle(stage); }
+    catch (error) {
+      return { mode, idle: false, uncertain: true, stage,
+        reason: `idle signals could not be read: ${error.message}` };
+    }
+    if (!signals || typeof signals !== 'object') {
+      return { mode, idle: false, uncertain: true, stage,
+        reason: 'idle signals were unreadable' };
+    }
+    const failing = [];
+    // A signal that cannot be read is never treated as satisfied. Absence of
+    // evidence refuses, and the unreadable signal is named.
+    for (const [key, label] of [['editing', 'edit-state-unreadable'],
+      ['composing', 'composition-unreadable'], ['inputIdle', 'input-idle-unreadable'],
+      ['writesFinished', 'writes-finished-unreadable']]) {
+      if (signals[key] === null || signals[key] === undefined) failing.push(label);
+    }
+    if (signals.editing) failing.push('editor-buffer-open');
+    if (signals.composing) failing.push('ime-composition');
+    if (signals.inputIdle !== true) failing.push('recent-input');
+    if (signals.writesFinished !== true) failing.push('write-batch-not-dispatched');
+    if (signals.pendingCauses !== 0) failing.push('pending-bridge-cause');
+    if (signals.failedCauses) failing.push('failed-local-save');
+    return {
+      mode,
+      idle: failing.length === 0,
+      stage,
+      signals,
+      failing,
+      evidenceOnly: 'these signals are evidence of an idle app, not proof that no save is in flight, and they exclude no other writer',
+    };
+  };
+}
+
+module.exports = { makeGate, makeIdleGate, ownedProcesses };

@@ -814,3 +814,54 @@ This is not cross-device synchronization. The second replica is a synthetic
 in-memory state on the same host; there is no transport, no peer and no network.
 Incoming rename and delete, application while OG runs, real transport, personal
 data enrollment and daily use remain separate future approvals.
+
+## Idle-app incoming observation contract (2026-09-16)
+
+Awaiting supervisor review; not accepted. It extends the incoming contract above
+without weakening any of it. Results are in `RESULTS.md`, section "Idle-app
+incoming observation experiment".
+
+- **Two explicit runtime modes, and the weaker cannot pass as the stronger.**
+  `assertRuntimeGate(gate, mode, stage)` replaces `assertAppClosed`. `app-closed`
+  requires a verdict with `closed: true` and is the accepted contract, unchanged.
+  `app-idle` requires `idle: true` and **refuses any verdict that claims
+  `closed`** (`gate-mode-mismatch`); a gate answering for the wrong mode is
+  refused in both directions. Every result, evidence record and results section
+  names its mode.
+- **`applyIncoming` and `recoverIncoming` are asynchronous.** Their return type
+  is a promise. The app-closed behaviour is unchanged; the signature is not, and
+  every caller awaits them.
+- **In app-idle the reconciliation hook is mandatory**, verified before the
+  journal is created. Missing, non-callable, rejecting, verdict-less and
+  unreconciled hooks all refuse. There is **no** fall back to app-closed
+  behaviour under any of them.
+- **Reconciliation is awaited between the verified note write and publication**,
+  per file, and **again for every file at a completion boundary** before the
+  record step, together with a full `revalidateIntendedState`. An intermediate
+  match is not treated as proof that the match still holds.
+- **Recovery re-runs the wait for every file**, including files applied before
+  an interruption, because reconciliation leaves no durable marker this layer
+  owns. An app-idle restart never silently omits reconciliation. An explicit
+  fallback to app-closed recovery requires proven closure and is reported as
+  disk/identity recovery, never as live UI reconciliation.
+- **Failure causes are preserved.** Only an expiry of the bounded wait is
+  `reconciliation-timeout`; rejections keep their own code,
+  `reconciliation-failed` is the default for an uncoded rejection, and a
+  verdict's own code (`reconciliation-regressed`, `not-reconcilable-by-og`) is
+  kept.
+- **Idle signals are evidence, not exclusion**, and a signal that cannot be read
+  is treated as not-idle. The checked set is: no editor buffer, no IME
+  composition, input idle, the outliner write batch dispatched, no pending bridge
+  cause and no failed local cause. `input-idle?` returns true merely when nothing
+  is being edited, and `*writes-finished?` marks dispatch rather than completion,
+  so neither proves an empty queue.
+- **What a reconciled verdict establishes is bounded**: OG's database agreed with
+  the approved target at the moment it was polled. A later delayed or stale
+  payload could still move it.
+- **No exactly-once claim.** Reconciliation invocations are not directly
+  instrumented; watcher seam entries and per-path observations are counted, and
+  backup counts are reported separately and never used as a proxy.
+- **Concurrent-edit safety is outside this contract.** It was not tested and is
+  not claimed. The application gains nothing: the accepted observation-only
+  package is reused unmodified, with no added IPC, native command authority,
+  renderer privilege, process-launch exception or network permission.
