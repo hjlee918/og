@@ -18,14 +18,20 @@ findings, and independently ran the memory-only probe checks. The complete live
 observation matrix is **not** accepted as finished, and concurrent-edit safety
 remains unverified and unclaimed.
 
-[EDITING_PAUSE_DESIGN.md](./EDITING_PAUSE_DESIGN.md) is a **proposal only**: it
-designs that document's deferred option B — a short, explicit "Apply pending
-changes" pause that stops admitting new edits, drains queued and in-flight
-saves by awaiting real save causes, applies one approved transaction, verifies
-it and resumes. It preserves the editor buffer and never force-ends a Korean
-composition. It requires five new in-app seams behind a default-off define and
-is **not approved or implemented**. It does not design continuous concurrent
-editing or a general synchronization service.
+[EDITING_PAUSE_DESIGN.md](./EDITING_PAUSE_DESIGN.md) is a **proposal only**,
+now at revision 2: it designs that document's deferred option B — a short,
+explicit "Apply pending changes" pause. Revision 1 was reviewed and found to
+leave its central guarantee unresolved; revision 2 replaces the quiet-window
+drain with explicit ownership tracking, refuses application while any unsaved
+buffer exists rather than replaying stale state, splits timeout and crash
+handling into pre-write and post-write regimes, and corrects the protection
+claims. The honest scope is **twelve** application seams, three of them in the
+path every save takes, so **revision 2 recommends retaining the accepted
+app-closed path for the next prototype**. Nothing in it is approved or
+implemented. It does not design continuous concurrent editing or a general
+synchronization service.
+
+Korean progress summary: [PROJECT_ROADMAP_KO.md](../PROJECT_ROADMAP_KO.md).
 
 Run the incoming-application suite with the identity helper, in fresh owned
 children of one fresh run:

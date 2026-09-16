@@ -1,686 +1,663 @@
 # A controlled editing/save pause for applying one incoming change
 
-Status: **proposal only**, 2026-09-16. Nothing here is implemented, approved or
-run. Written from source and documentation review; no graph, profile, helper or
-application was touched.
+Status: **proposal only, revision 2**, 2026-09-16. Nothing here is implemented,
+approved or run. Written from source and documentation review; no graph,
+profile, helper or application was touched.
 
-This is option **B** of
-[APP_RUNNING_INCOMING_DESIGN.md](./APP_RUNNING_INCOMING_DESIGN.md) — the "real
-temporary editing/save barrier" that design deliberately deferred. It is written
-now because the accepted idle-app observation milestone has extracted what
-observation can give, and the missing ingredient for the next step is **control,
-not more measurement**.
+Revision 1 (`63e4625f5`) was reviewed and found to leave its central guarantee
+unresolved. This revision resolves it, and the resolution changes the
+recommendation. **Revision 2 recommends retaining the accepted app-closed path
+for the next prototype** — see "Recommendation".
 
-## What this builds on, and what it does not touch
+## Revision 2: claims withdrawn from revision 1
 
-| Milestone | Status | This design's relationship |
-|---|---|---|
-| App-closed incoming application ([INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md)) | accepted | reused unchanged; kept as the supported fallback |
-| Graph-binding correction (`8cd6662c3`) | accepted | its three-identity discipline is mandatory here |
-| Limited idle-app observation findings | accepted | reused; its gate, hook and mode discipline are extended, not replaced |
-| Complete live observation matrix | **not accepted as finished** | not continued, not assumed, not cited as passing |
-| Concurrent-edit safety | **unverified** | still unverified after this design; this is a proposal |
+| Withdrawn claim | What is actually true |
+|---|---|
+| The drain produces "the first genuine completion signal for saves in this project" | A stability window is a quiet timer, not a completion barrier. Revision 1 conceded work can exist before `save-pending!` and then called the result genuine anyway. Replaced by explicit ownership tracking (§2). |
+| Live case 1: leave unsaved text in a buffer, apply, then let the buffer "save normally" | That buffer would save the **pre-application** content over the newly applied file. The case was unsafe as written. Replaced (§3, §8). |
+| "Deferred pages are re-queued exactly once on resume" | Replaying a queue entry means replaying a **stale in-memory database** over applied content. The gate was also placed after `outliner-tx/transact!`, so the database was already mutated. Withdrawn; the first slice **prevents** the mutation instead (§3). |
+| "Editing always resumes on restart" and "every blocked state self-releases" | A renderer timeout cannot prove that an external helper operation is not running. The journal blocks the coordinator, not OG's writer. Split into two regimes (§5). |
+| §5.1: the editor buffer is preserved across failure and restart | A process kill destroys the DOM buffer. Revision 1 implied otherwise and case 10 asserted it. Withdrawn outright; no persistence mechanism is designed here (§5.4). |
+| §1.3/§5.3: uncontrolled paths are "detected, not prevented" by `EXPECT` plus publication checks | `revalidateIntendedState` (`incoming-application.js:1066`) walks only an **enumerated** set of `approved.files` and `approved.unchanged`, and `checkNotePath` (`:119`) admits only direct-child `.md` under `pages/` and `journals/`. A file that was never in the accepted snapshot, and every non-note file, is not covered at all. Both checks are also check-then-write. Replaced by the three-bucket table (§6). |
+| "Five application seams (H1–H5)" | The actual scope of a defensible pause is **twelve** seams, three of which sit in OG's universal save path (§7). |
 
 Nothing below converts injected records, synthetic `CompositionEvent`s,
 same-process `recoverIncoming` calls or simulated secondary writes into claims
-about real integration. Where this design depends on one of those, it says so.
+about real integration.
+
+## Accepted status, restated unchanged
+
+The graph-binding correction and the **limited** idle-app observation findings
+are accepted; the supervisor independently ran the memory-only probe checks
+(15/15); the focused live result (14/14) remains coder-reported evidence; the
+**complete live observation matrix is not accepted as finished**; and
+**concurrent-edit safety remains unverified and unclaimed**, including after
+this design, which is a proposal.
 
 ## Non-goals
 
-- Not continuous concurrent editing. The pause is short, explicit and
-  user-initiated.
-- Not a general synchronization service, background sync loop or transport.
+- Not continuous concurrent editing, not a synchronization service, not a
+  transport, not a background loop.
 - Not incoming rename or delete. Creates and updates only, as accepted.
-- Not exclusion of Finder, cloud agents, external editors or a second Logseq
-  instance. See §6.
-- Not exactly-once. The accepted no-exactly-once position is unchanged.
-- Not whole-graph atomicity, power-loss durability or cross-process
-  serialization.
-- Not a durable barrier. It does not survive a crash and does not claim to (§5).
+- Not exclusion of Finder, cloud agents, external editors, a second Logseq
+  window or a second instance (§6).
+- Not exactly-once. Not whole-graph atomicity, power-loss durability or
+  cross-process serialization.
+- **Not unsaved-buffer persistence across a process kill** (§5.4).
 - One host, synthetic data, no second device, no personal data.
 
 ---
 
-## 1. Admission control: which paths must cooperate
+## 1. Admission control
 
-An overlay is not a write barrier. A modal that covers the editor stops
-keystrokes reaching a textarea and stops nothing else: the outliner queue keeps
-draining, plugins keep writing, and the main process keeps writing backups.
-Admission control has to sit on the write paths themselves.
+An overlay is not a write barrier, and — revision 1's error — neither is a gate
+placed after the database transaction. By the time `sync-to-file` runs, the
+mutation is already committed to the in-memory database and is already stale
+relative to anything applied afterwards. Admission must close **before**
+`outliner-tx/transact!`.
 
-### 1.1 The six layers a local edit passes through
+### 1.1 The layers, and where the gates go
 
-| # | Layer | Source | Barrier? |
+| # | Layer | Source | Gate |
 |---|---|---|---|
-| 1 | Keystrokes: DOM textarea value and `:editor/content` | `state.cljs:128`, `state.cljs:920`; the value read at save time is `(gobj/get elem "value")`, `editor.cljs:1343` | **never touched** |
-| 2 | Commit into the database | `save-current-block!` `editor.cljs:1322`; `save-block!` `:1298`; `save-blocks!` `:1315` | **gate here (H3)** |
-| 3 | Database → file queue | `updated-page-hook` `outliner/pipeline.cljs:12` → `sync-to-file` `outliner/file.cljs:86` → `async/put!` onto `:file/writes` (`state.cljs:34`, buffer 10000) | **gate here (H2)** |
-| 4 | Rate limiter | `<ratelimit-file-writes!` `outliner/file.cljs:101`, `batch-write-interval` 1000 ms `:17`, installed once at `handler.cljs:240` | **flush here (H4)** |
-| 5 | Write execution | `write-files!` `:73` → `do-write-file!` `:44` → `save-tree!` `modules/file/core.cljs:168` → `alter-files-handler!` `handler/file.cljs:203` → `write-plain-text-file!` `fs.cljs:93` → `write-file-impl!` `fs/node.cljs:22` → IPC `writeFile` | **must NOT be gated** — this is what drains |
-| 6 | Cause registration | `save-pending!` `og_sync_bridge.cljs:269` inside `write-file-impl!` | observation only |
+| 0 | Entering edit mode | `state/set-editing!` `state.cljs:1921`, four call sites (`components/block.cljs:2303`, `:5629`; `handler/editor/property.cljs:72`; `extensions/code.cljs:459`) | **G1 — refuse entry** |
+| 1 | Keystrokes: DOM textarea value and `:editor/content` | `state.cljs:128`, `:920`; the value read at save time is `(gobj/get elem "value")` `editor.cljs:1343` | never touched |
+| 2 | Commit into the database | `save-current-block!` `editor.cljs:1322` | **G2 — refuse the commit** |
+| 3 | Database → file queue | `updated-page-hook` `outliner/pipeline.cljs:12` → `sync-to-file` `outliner/file.cljs:86` → `async/put!` onto `:file/writes` (`state.cljs:34-39`) | **G3 — refuse, and register in the ledger (§2)** |
+| 4 | Rate limiter | `<ratelimit-file-writes!` `outliner/file.cljs:101`, interval 1000 ms `:17`, installed at `handler.cljs:240` | flush-now only, never blocked |
+| 5 | Write execution | `write-files!` `:73` → `do-write-file!` `:46` → `save-tree!` `modules/file/core.cljs:168` → `alter-files-handler!` `handler/file.cljs:203` → `write-plain-text-file!` `fs.cljs:93` → `write-file-impl!` `fs/node.cljs:22` → IPC | **never gated** — this is what drains |
+| 6 | Cause registration | `save-pending!` `og_sync_bridge.cljs:269` | ownership, §2 |
 
-The gate is on **entry** (layers 2 and 3), never on **exit** (layer 5). Work
-admitted before the pause must be allowed to run all the way to disk, or the
-drain in §2 blocks the very writes it is waiting for.
+G1 and G2 together mean that during the pause **no editor-originated database
+mutation occurs at all**, so there is nothing stale to replay on resume. G3
+remains as a backstop for non-editor transactions and as the ledger's
+registration point; it is not the primary gate.
 
-### 1.2 Uncontrolled paths — what a layer-2/3 gate does not reach
+### 1.2 Uncontrolled paths
 
-These write graph files **without passing through the outliner queue**. Each is
-a real bypass of the barrier and is listed so the first slice's boundary is
-explicit rather than optimistic.
+These write graph files without passing through the outliner queue. Each is a
+real bypass. §6 classifies each as inert-by-setup or outside the guarantee.
 
 **Renderer, through `fs/write-plain-text-file!` but bypassing layers 2–4**, most
 with `{:skip-compare? true}`, which also skips the disk-compare precondition
-entirely (`fs/node.cljs:25-36` — no `readFile`, no
-`:file/not-matched-from-disk`):
+(`fs/node.cljs:25-36` — no `readFile`, no `:file/not-matched-from-disk`):
+plugin API (`logseq/api.cljs:176`, `:196`, `:328`; `logseq/sdk/git.cljs:28`;
+`handler/plugin.cljs:563`; `handler/plugin_config.cljs:42`, `:49`); config
+(`handler/global_config.cljs:76`; `handler/file.cljs:129`);
+`util/persist_var.cljs:69`; PDF assets (`extensions/pdf/assets.cljs:70`,
+`:119`); drawings (`handler/draw.cljs:32`); `handler/events.cljs:901`;
+file-sync merges (`fs/sync.cljs:1598`, `:1648`, `:1675`).
 
-- Plugin API: `logseq/api.cljs:176`, `:196`, `:328`; `logseq/sdk/git.cljs:28`;
-  `handler/plugin.cljs:563`; `handler/plugin_config.cljs:42`, `:49`
-- Config: `handler/global_config.cljs:76`; `handler/file.cljs:129`
-  (`alter-global-file`)
-- `util/persist_var.cljs:69`
-- PDF assets: `extensions/pdf/assets.cljs:70`, `:119`
-- Drawings: `handler/draw.cljs:32`
-- `handler/events.cljs:901`
-- File-sync merges: `fs/sync.cljs:1598`, `:1648`, `:1675`
+**Renderer, bypassing `fs.cljs` entirely — no bridge cause exists at all:**
+asset writes, `ipc/ipc "writeFile"` at `handler/editor.cljs:1451`.
 
-**Renderer, bypassing `fs.cljs` altogether** — no bridge cause exists at all:
+**Main process:** `:backupDbFile` → `logseq/bak/**` (`electron/handler.cljs:94`,
+`backup_file.cljs:7`, `:19`, pruning `:27`); `:addVersionFile` →
+`logseq/version-files/local/**` (`electron/handler.cljs:118`); `unlink`,
+`rename`, `copyFile` (`fs/node.cljs:105`, `:128`, `:131`) — rename has a cause
+(`handler/page.cljs:221`), unlink and copy have none.
 
-- Asset writes: `ipc/ipc "writeFile"` at `handler/editor.cljs:1451`
+**A second OG window on the same graph.** `repo-listen-to-tx!`
+(`db.cljs:127-141`) sends every transaction to other windows over the `dbsync`
+IPC. A second window has its **own** write queue, its own rate limiter and its
+own barrier state. This renderer's pause does not reach it.
 
-**Main process, never initiated by the renderer write path:**
-
-- `:backupDbFile` → `logseq/bak/**` (`electron/handler.cljs:94`,
-  `backup_file.cljs:7`, `:19`, pruning at `:27`)
-- `:addVersionFile` → `logseq/version-files/local/**`
-  (`electron/handler.cljs:118`)
-- `unlink`, `rename`, `copyFile` (`fs/node.cljs:105`, `:128`, `:131`). Rename
-  has a bridge cause (`handler/page.cljs:221`); unlink and copy have none.
-
-**Outside the process entirely:** Finder, iCloud/Dropbox agents, an external
-editor, `git checkout`, a second Logseq instance. No in-app flag reaches any of
-them.
-
-### 1.3 The first slice's boundary
-
-The barrier covers layers 2–4 for note files under `pages/` and `journals/` —
-the same `ALLOWED_PARENTS` the accepted applier enforces
-(`incoming-application.js:44`). Everything in §1.2 is **outside** the barrier
-and is handled as it already is: **detected, not prevented**. The accepted
-applier refuses `unrelated-local-change` at publication when a file outside the
-transaction diverges from its accepted hash, and the anchored helper rechecks
-`EXPECT` immediately before `renameat`. The barrier narrows the window; those
-two checks are what actually protect bytes.
+**Outside the process:** Finder, iCloud/Dropbox agents, an external editor,
+`git checkout`, a second instance.
 
 ---
 
-## 2. Existing work: draining queued and in-flight saves
+## 2. Completion tracking
 
-### 2.1 There is currently no completion signal, and this is the core problem
+The review is correct: a stability window bounds waiting and proves nothing.
+What follows is ownership tracking from admission to settlement. Every drain
+condition below is a **positive fact about a tracked object**, never the absence
+of recent activity.
 
-- `*writes-finished?` (`outliner/file.cljs:99`, `:107-112`) marks **dispatch**.
-  The flush function calls `write-files!` and then sets `{:value true}`.
-- `write-files!` (`:73-82`) runs `do-write-file!` inside a `doseq` and discards
-  each returned promise.
-- `save-tree-aux!` (`modules/file/core.cljs:164`) calls `alter-files-handler!`
-  and discards its promise, although `alter-files-handler!`
-  (`handler/file.cljs:203-236`) genuinely returns one built from `p/all`.
-- Its absence for a repo is `nil`, not `true`.
+### 2.1 Why a ledger at layer 3 is complete for outliner-originated writes
 
-So nothing in OG today can answer "has every queued save landed?". The **only**
-real completion evidence in the process is the bridge cause lifecycle:
-`save-pending!` (`og_sync_bridge.cljs:269`) → `save-completed!` (`:301`) /
-`save-failed!` (`:305`), and `rename-intent!` (`:309`) → completed / failed.
-Those wrap the actual IPC call in `write-file-impl!` (`fs/node.cljs:26`, `:58`),
-`fs.cljs:99-117` and `fs/nfs.cljs:55-67`.
+The database listener chain is **synchronous**:
 
-### 2.2 The drain, in order
+```
+d/transact!  (outliner/datascript.cljc:155)
+  → d/listen! callback              db.cljs:127-141
+    → @*db-listener                 db.cljs:140  (wired at handler.cljs:197)
+      → after-transact-pipelines    outliner/datascript.cljc:30-33
+        → invoke-hooks              outliner/pipeline.cljs:85
+          → updated-page-hook       outliner/pipeline.cljs:111
+            → sync-to-file          outliner/file.cljs:86
+              → async/put!          outliner/file.cljs:97
+```
 
-1. **Close admission** (H2, H3). New commits and new queue entries for the owned
-   repo are refused and recorded as deferred pages. Layer 5 is untouched.
-2. **Flush immediately.** `<ratelimit` already implements a flush-now channel
-   (`util.cljc:1174`, `:1190-1194`); `<ratelimit-file-writes!`
-   (`outliner/file.cljs:101-115`) supplies none. Passing one is the entire
-   mechanism — no new machinery, and it removes the 1000 ms wait from the
-   critical path.
-3. **Await cause closure.** Every cause for the owned `ogRepo` must be closed.
-   Then observe a stability window: no new cause appears and none is pending
-   across a window longer than `batch-write-interval`, repeated to a bounded
-   limit.
+Nothing in that chain awaits. **A committed database mutation cannot exist
+without its queue admission having already happened**, before `transact!`
+returns. So a ledger entry created at `sync-to-file` has no window against the
+transaction that caused it. This is the fact that makes the ledger sound, and it
+is the reason a ledger is worth building at all.
 
-Step 3 is strictly stronger than the accepted `observeSettled`
-(`og-idle-probe.js`), because admission is closed: "nothing new surfaced" can no
-longer be defeated by a save arriving a moment later **on a path that consults
-the barrier**. It remains defeated by §1.2's paths, and that limit is stated in
-the results, not glossed.
+(`invoke-hooks` skips when `:from-disk?` is set, `pipeline.cljs:88`, which is
+what reconciliation's `alter-file` passes — `watcher_handler.cljs:52`. So
+reconciliation's own database write raises no admission. `set-missing-block-ids!`
+does, because `batch-set-block-property!` transacts without that flag; see §4.4.)
 
-**The honest gap that remains.** A cause only exists after `write-file-impl!`.
-A write already in flight between `alter-files-handler!` and `write-file-impl!`
-has no cause yet, so the stability window — not the cause count — is what covers
-it. That window is evidence, not proof, and the design says so.
+### 2.2 The ledger: admission → retirement
 
-### 2.3 Failed saves
+Entry key `[repo page-db-id]`, each entry carrying an admission id and a
+re-queue count.
 
-`save-failed!` closes a cause as `:failed`, not `:pending`
-(`og_sync_bridge.cljs:305`), so a pending-only check passes straight over it
-while the database holds new content and disk holds whatever the failure left.
-The accepted idle gate already refuses on failed causes; the pause keeps that.
+**Registered at** `sync-to-file` (`outliner/file.cljs:97`, before the put!) and
+at the re-queue inside `do-write-file!` (`:59`).
 
-A failed cause on the owned repo, on any path, during the pause window is a
-**refusal** (`failed-local-write`). The pause does not retry OG's save, does not
-clean up after it and does not apply. It **resumes editing immediately** and
-reports the failure. Editing is never held hostage to a failure the pause did
-not cause and cannot fix.
+`sync-to-file` has a second branch: while `:graph/importing` is set it calls
+`write-files!` directly (`:95-96`), bypassing the queue and the rate limiter
+entirely. The ledger must register that branch too, and the pause must refuse
+`graph-importing` outright rather than drain against a moving import.
 
-### 2.4 Pending renames
+**Retired at `do-write-file!`, which has exactly three terminal branches:**
 
-`rename-intent!` is opened **after** the database transact
-(`handler/page.cljs:212-218` then `:221`), so the database already holds the new
-path while disk still holds the old one. `unfinished-local-write?`
-(`og_sync_bridge.cljs:348`) and `register-incoming-cause!` (`:360`) already
-refuse on this as `unfinished-local-write`.
+| Branch | Source | Retirement |
+|---|---|---|
+| no write at all — `blocks-count` zero and not a deletion; or the single blank block guard | `outliner/file.cljs:54`, `:64-66` | `no-op`, retired |
+| re-queued — long page, or a busy whiteboard | `:55-59` | `requeued`, retired; a fresh entry is registered |
+| dispatched — `save-tree!` called | `:60-70` | **ownership transfers to a cause** (§2.3) |
 
-The first slice refuses on **any** rename cause for the owned repo that is not
-completed at the start of the pause, not only ones intersecting the
-transaction's paths, because a rename that lands mid-pause invalidates the
-before-image path binding the approval was issued against.
+**The re-queue terminates, and this is checkable.** The long-page branch
+requires `(not (state/input-idle? repo {:diff 3000}))`, and `input-idle?`
+returns true whenever no block is in edit mode (`state.cljs:1745-1755`) — which
+G1 and G2 guarantee during the pause. The whiteboard branch requires
+`(not (whiteboard-idle? repo))`, which is purely 3000 ms since the last persist
+(`state.cljs:1757-1763`). Both go true and stay true once admission is closed.
+The ledger still caps re-queues and refuses `drain-requeue-limit` rather than
+looping.
+
+### 2.3 Ownership transfer, and the one gap that is closed by construction
+
+After `save-tree!` the path is synchronous — `save-tree-aux!`
+(`modules/file/core.cljs:145`), `db/pull`, `tree->file-content`,
+`alter-files-handler!` (`handler/file.cljs:203`) — until `write-file-f`'s
+`p/let`, which defers to a microtask before calling `write-plain-text-file!`.
+So a cause **cannot** be opened before the first await.
+
+That gap is closed by not trying to bridge it: **the ledger entry is retired
+only when the cause opens.** A write sitting in the microtask gap has an
+unretired ledger entry, so the drain waits. A renderer killed inside that gap
+loses the write entirely — the database is ahead of the file, which is OG's
+ordinary crash behaviour, repaired by re-reading at the next graph load.
+
+**The cause must open before the first I/O.** Today
+`write-plain-text-file!` opens one only under `observation-only?`
+(`fs.cljs:99-101`). In a barrier build that branch must be taken under
+`enabled?`, because `protocol/write-file!` (`fs/node.cljs:117-125`) performs an
+IPC `stat` and an IPC `mkdir-recur!` **before** `write-file-impl!` opens its own
+cause at `:26`/`:58`. Without the outer cause, two IPC round trips would be
+covered by nothing.
+
+An admission token links the two so the transfer is explicit rather than
+inferred. It is carried by a dynamic binding established around `save-tree!` and
+captured eagerly in `alter-files-handler!` before its `p/let`, then passed in the
+options map — this avoids changing the `:file/writes` malli coercer
+(`state.cljs:34-39`) and `write-files!`'s dedupe (`outliner/file.cljs:75`), both
+of which a payload-threaded token would force.
+
+### 2.4 The drain condition
+
+Admission closed (G1, G2, G3) → flush-now → wait until **all three** hold:
+
+1. the ledger has no unretired admission for the owned repo;
+2. no bridge cause for the owned repo is `pending`;
+3. no bridge cause for the owned repo is `failed`.
+
+A quiet timer bounds the wait. **On expiry the drain refuses**
+(`drain-incomplete`) and resumes editing. It never passes.
+
+### 2.5 What this still does not cover, stated plainly
+
+- Writes that never reach `fs.cljs`: the asset IPC (`handler/editor.cljs:1451`).
+- Main-process writes: backups, version files, unlink, copy.
+- A second OG window's queue (§1.2).
+- **A completed cause does not prove a write happened.** The
+  `:file/not-matched-from-disk` branch (`fs/node.cljs:55`) returns without
+  writing while the outer `fs.cljs` cause still resolves as completed. Results
+  must not read cause-completed as bytes-written.
 
 ---
 
-## 3. Korean composition
+## 3. Unsaved buffers and pending database changes
 
-**Never force-save an active composition and never discard one.**
+### 3.1 Policy: refuse, do not defer-and-replay
 
-- `save-current-block!` already returns without saving while
-  `editor-in-composition?` is true (`editor.cljs:1328`, `state.cljs:1710`).
-  Forcing past that guard commits a half-assembled jamo sequence.
-- Composition state is set by the shared textarea wrapper: `compositionstart` /
-  `compositionupdate` set it true, `compositionend` sets it false and then fires
-  `on-change` (`ui.cljs:117-130`).
-- `clear-edit!` (`state.cljs:1244`) and `escape-editing`
-  (`editor.cljs:3742`) end the current edit. Either would unmount the textarea
-  whose DOM value is the only truth for text not yet pushed into
-  `:editor/content`. Neither is called by the barrier, in any state.
+The pause may close admission only over a state with nothing unsaved and nothing
+admitted. Preconditions, all of which must hold at the moment admission closes:
 
-**Design: defer, do not refuse and do not force.** A pause requested while
-`editor-in-composition?` is true enters `deferred`. Admission is **not yet
-closed**, so the user can finish the word normally. The message is explicit in
-both languages:
+| Precondition | Signal | On failure |
+|---|---|---|
+| no block in edit mode | `state/get-edit-input-id` nil (`state.cljs:930`) | refuse `unsaved-buffer-present` |
+| no IME composition | `state/editor-in-composition?` false (`state.cljs:1710`) | **defer**, §3.3 |
+| no editor action open | `state/get-editor-action` nil (guarded at `editor.cljs:1331`) | refuse `editor-action-open` |
+| ledger empty for the owned repo | §2.2 | refuse `local-work-pending` |
+| no pending or failed cause | `og_sync_bridge.cljs:348`, `:305` | refuse `unfinished-local-write` / `failed-local-write` |
+
+A refusal writes nothing, blocks nothing and resumes immediately.
+
+**There is no "deferred mutation" state in this slice.** Because G1 and G2 close
+before `outliner-tx/transact!`, the database is not mutated during the pause, so
+there is nothing to reconcile and nothing to replay. That is the answer to
+"prevented or reconciled, not merely re-queued": **prevented**, with the
+synchronous-listener fact of §2.1 as the reason it is checkable.
+
+### 3.2 The user's own settle path
+
+We never force-save. The user may settle the buffer themselves, by the ordinary
+means, and then re-request the pause. A convenience action may call the ordinary
+non-forced `save-current-block!` **only** on explicit user confirmation, never
+automatically, never during composition, and never with `force?`. Whichever way
+the edit settles, it flows to disk through the normal path, is observed through
+the ledger and causes, is **captured** through the existing capture path, and the
+plan, preview and approval are **regenerated** (§4.2).
+
+### 3.3 Korean composition
+
+Never force-end, never discard. `save-current-block!` already returns without
+saving while `editor-in-composition?` is true (`editor.cljs:1328`), and the flag
+is maintained by the shared textarea wrapper (`ui.cljs:117-130`). `clear-edit!`
+(`state.cljs:1244`) and `escape-editing` (`editor.cljs:3742`) would unmount the
+textarea whose DOM value is the only truth for text not yet in
+`:editor/content`; neither is called by the barrier in any state.
+
+A request during composition enters `deferred`. Admission is **not** closed, so
+the user finishes the word normally. Message:
 
 > 입력 중인 한글 조합이 끝나면 적용을 시작합니다.
 > Waiting for the current Korean input to finish before applying.
 
-The request re-checks on the existing state change (`ui.cljs:122` already sets
-the flag false at `compositionend`); no new event and no composition hook is
-added. After `composition-defer-timeout` with composition still active, the
-request is **abandoned** as `deferred-composition-timeout` — editing was never
-interrupted and nothing was written. No timer ever force-ends a composition.
+The re-check rides the existing flag change at `ui.cljs:122`; no composition hook
+is added and no timer force-ends anything. After
+`composition-defer-timeout` the request is abandoned — editing was never
+interrupted and nothing was written. Composition ending settles layer 1 only, so
+`deferred` transitions to the §3.1 precondition check, never to `applying`.
 
-Composition ending does not mean the text has reached disk: it means layer 1 is
-settled. `deferred` therefore transitions to `draining` (§4), never directly to
-`applying`.
+### 3.4 During the pause
 
----
-
-## 4. States and transitions
-
-A short, explicit **"Apply pending changes"** command. Not a background service.
-
-```
-                    ┌──────────────── (timeout / refusal / completion) ───────┐
-                    v                                                         │
-  idle ──request──> deferred ──composition ends──> draining ──ok──> base-validating
-   ^                   │                              │                  │
-   │           defer-timeout                     drain-failed            ├─ base unchanged ──> awaiting-approval
-   │                   │                              │                  └─ base changed ──> capture + recompute
-   └───────────────────┴──────────────────────────────┘                          (regenerate preview) ──> awaiting-approval
-                                                                                            │
-   idle <──resuming<── verifying <── reconciling <── applying <────approve─────┘
-                          │                                              │
-                          └── verification failed ──> held ──(bounded)──> resuming
-```
-
-| State | Entered when | Editing | Exit |
-|---|---|---|---|
-| `idle` | default | normal | user requests a pause |
-| `deferred` | composition active, or an editor action is open (`state/get-editor-action`, guarded at `editor.cljs:1331`) | **normal — admission not yet closed** | composition ends → `draining`; timeout → `idle` |
-| `draining` | admission closed, flush-now issued | blocked | all causes closed + stable window → `base-validating`; failed/pending/timeout → `drain-failed` |
-| `drain-failed` | §2.3 / §2.4 / timeout | — | always → `resuming`, nothing written |
-| `base-validating` | drain complete | blocked | stable two-read of every transaction path (`stableRead`, `incoming-application.js:172`) compared against the accepted records |
-| `awaiting-approval` | preview generated | blocked | approve → `applying`; reject or `approval-timeout` → `resuming` |
-| `applying` | approval bound | blocked | one approved transaction; helper `EXPECT` + `renameat` per file |
-| `reconciling` | each file verified on disk | blocked | the accepted `reconcile!` port awaited per file (`incoming-application.js:270`) |
-| `verifying` | all files reconciled | blocked | `revalidateIntendedState` + a later database sample at the completion boundary, per the accepted contract |
-| `held` | verification failed **and** an open buffer targets a path where disk and database disagree | blocked | bounded; then `resuming` with a report |
-| `resuming` | any terminal branch | reopening | deferred pages re-queued exactly once; admission reopened |
-
-### 4.1 Approval comes **after** the drain
-
-This is the one ordering change from the idle-app design, and it is deliberate.
-
-Draining is the only stage that can change the accepted base *by design*: it
-flushes the user's own pending edit to disk. A proposal approved before the
-drain is stale by construction. So the sequence is drain → validate base →
-**then** generate the preview and obtain approval. The user approves the preview
-that actually applies.
-
-If the drain changed the base, the change is **captured through the existing
-capture path** so the records advance, the plan and preview are **recomputed**,
-and a **fresh approval** is required. `planIncoming` already refuses
-`unknown-base` when an old approval is replayed against a moved base, and that
-refusal is retained as a second check at apply time — because the barrier is
-cooperative and §1.2's paths can still move a file between validation and
-application.
-
-`approved.runtimeMode` (accepted, persisted in the hashed approval-bound half)
-gains a third value, `app-paused`. An approval issued for one mode cannot apply
-in another, exactly as `app-idle` and `app-closed` cannot cross today.
+G1 refuses entry to edit mode, so no new buffer can be created on any page,
+including the transaction's own pages. Together with §3.1's precondition that no
+buffer existed at close time, the invariant for the whole blocked window is:
+**no editor buffer exists, and the database is unmodified.** Keystrokes reach
+nothing; the UI says so.
 
 ---
 
-## 5. Failure and restart
+## 4. The state machine
 
-### 5.1 What is preserved
+An explicit **"Apply pending changes"** command. Bounded; every state below
+names its exit and its bound.
 
-- **The editor buffer.** No transition calls `clear-edit!` or `escape-editing`.
-  The buffer survives because H3 declines to save — precisely the behaviour the
-  existing composition guard already has (`editor.cljs:1328`): leave the value
-  in the textarea and return.
-- **Before-images and the open journal.** Unchanged from the accepted slice:
-  retained before-images, whole-transaction preflight, roll-forward-only
-  recovery, and "a missing record is never success".
-- **Deferred pages.** Every page refused at layer 3 during the pause is recorded
-  and re-queued exactly once on `resuming`. Refusing the `async/put!` leaves the
-  database ahead of the file — the same state OG already reaches at
-  `:file/not-matched-from-disk` (`fs/node.cljs:55`) and at any crash — and
-  re-queueing is what repairs it.
+| State | Admission | Helper authorized | Exit | Bound |
+|---|---|---|---|---|
+| `idle` | open | no | user requests a pause | — |
+| `deferred` | **open** | no | composition ends → `checking`; timeout → `idle` | `composition-defer-timeout` |
+| `checking` | closing | no | §3.1 preconditions → `draining`; any failure → `resuming` | immediate |
+| `draining` | closed | no | §2.4 all three → `base-validating`; expiry → `resuming` (`drain-incomplete`) | `drain-timeout` |
+| `base-validating` | closed | no | stable two-read of every transaction path (`stableRead`, `incoming-application.js:172`) against the accepted records | `validate-timeout` |
+| `awaiting-approval` | closed | no | approve → `authorizing`; reject or expiry → `resuming` | `approval-timeout` |
+| `authorizing` | closed | **being granted** | authorization issued → `applying` | immediate |
+| `applying` | closed | **yes** | all files written and verified → `reconciling` | §5.2 |
+| `reconciling` | closed | revoked | per-file `reconcile!` (`incoming-application.js:270`) → `verifying` | §5.2 |
+| `verifying` | closed | revoked | `revalidateIntendedState` + a later database sample → `resuming` | §5.2 |
+| `held-unresolved` | **closed, or per-path** | unknown | §5.3 | user action |
+| `resuming` | reopening | no | → `idle` | immediate |
 
-### 5.2 The lockout problem, and why the barrier is deliberately non-durable
+The boundary between `awaiting-approval` and `authorizing` is the boundary
+between §5's two regimes and is the most important line in the design.
 
-Two facts pull in opposite directions:
+### 4.1 `awaiting-approval` is pre-write
 
-- If the barrier lives only in renderer memory, a reload clears it. That is
-  **fail-open**: editing resumes, possibly while a transaction is half applied.
-- If the barrier were made durable, a coordinator crash would leave editing
-  blocked forever with nobody to release it.
+No helper authorization exists yet, so an expiry here is a clean cancellation:
+nothing was written, nothing can have been written, and admission reopens safely.
+This is the only state that waits on a human, and it is deliberately placed
+entirely inside the safe regime.
 
-**Resolution: a non-durable, fail-open barrier plus a durable, fail-closed
-journal.** They protect different things.
+### 4.2 Approval comes after the drain
 
-- **Editing always resumes on restart.** There is no state in which OG comes up
-  unable to edit. Every blocked state also carries its own bounded timeout, so
-  there is no unexplained permanent lockout even without a restart.
-- **Application is what stays blocked.** The retained journal already refuses a
-  second proposal per owned run until `recoverIncoming` resolves it. That is the
-  accepted mechanism and needs no change.
+Draining is the only stage that can change the accepted base by design — it
+flushes the user's own settled edit to disk. A proposal approved beforehand is
+stale by construction. So: drain → validate base → generate preview → approve.
+If the drain changed the base, the change is captured, the plan and preview are
+recomputed, and a fresh approval is required. `planIncoming`'s `unknown-base`
+refusal is retained as a second check, because the barrier is cooperative and
+§1.2's writers can still move a file.
 
-| Restart during | Disk/database state | On restart |
-|---|---|---|
-| `deferred` / `awaiting-approval` | nothing written | editing normal; approval discarded; preview must be regenerated |
-| `draining` | queued saves may or may not have landed | editing normal; the next pause re-drains and re-validates the base |
-| `applying` | disk may be ahead of the database | editing normal; OG re-reads from disk at graph load — the accepted "written, not reconciled" state; the journal stays open |
-| `reconciling` / `verifying` | disk applied, publication not proven | editing normal; `recoverIncoming` re-runs the reconciliation wait for every file, as accepted |
+`approved.runtimeMode` gains a third value, `app-paused`, persisted in the hashed
+approval-bound half exactly as `app-closed` and `app-idle` are, so approvals
+cannot cross modes.
 
-### 5.3 Silent data loss is narrowed, not eliminated
-
-Fail-open means a reload during `applying` lets the user edit a file the helper
-is about to rename over. This is **not prevented**. It is detected: the helper
-rechecks `EXPECT` immediately before `renameat` and refuses, and the applier
-refuses `unrelated-local-change` at publication.
-
-The honest statement is the same one §2 of the app-running design makes: both
-sides are check-then-write, interleaving is neither prevented nor reliably
-detected, and the barrier narrows the window without closing it. Nothing in this
-document claims otherwise.
-
----
-
-## 6. Authority: the exact new hooks required
-
-All five are behind the existing `ENABLE-OG-SYNC-BRIDGE` goog-define
-(`og_sync_bridge.cljs:15`, default false). They are **not** placed under
-`ENABLE-OG-BRIDGE-OBSERVATION` (`:16`), because this mechanism suspends work
-rather than observing it, and the accepted observation-only package must stay
-byte-identical and truthfully observation-only.
-
-| # | Hook | Where | Size |
-|---|---|---|---|
-| H1 | `request-pause!` / `release-pause!` / `editing-paused?` | `og_sync_bridge.cljs`, a new **releasable** field in the existing runtime atom | new state, ~30 lines |
-| H2 | one consultation refusing the `async/put!` for a paused owned repo, recording the page as deferred | `outliner/file.cljs:86` (`sync-to-file`) | one branch |
-| H3 | one more disjunct in the `when-not` that already guards composition | `editor.cljs:1328` | one line |
-| H4 | pass `:flush-now-ch` to the existing `<ratelimit` and expose it | `outliner/file.cljs:101` | one argument |
-| H5 | a renderer-side **write** call so the pause can be requested | the exposed bridge object | see below |
-
-**H1 must not reuse the `blocked` latch.** `blocked?` / `block-runtime!`
-(`og_sync_bridge.cljs:82`, `:86`) is a fatal, unreleasable latch that also
-suppresses event emission (`emit!` → `invoke-sync-port`, `:96-110`). A barrier
-is releasable and must never suppress emission — the drain depends on causes
-still being emitted. They are separate fields, and a test asserts neither can
-become the other.
-
-**H3 has an exact precedent.** `:editor/skip-saving-current-block?`
-(`state.cljs:146`, set at `handler/code.cljs:16`, read at `editor.cljs:1329`)
-already skips saving by the same mechanism. It cannot be reused: it is one-shot
-and is cleared unconditionally at `editor.cljs:1360`. It does establish that the
-shape is acceptable in this code.
-
-**H5 is the one genuinely new capability, and it is an approval item.** The
-accepted observation package exposes a strictly read-only API
-(`__LOGSEQ_OG_BRIDGE_OBSERVATION__`, `og_sync_bridge.cljs:140`, `:250-265`) with
-`read` and `health` only.
-
-- **H5a (recommended):** add `requestPause` / `release` / `status` under a
-  separate new `ENABLE-OG-BRIDGE-BARRIER` goog-define, so the observation build
-  stays byte-identical when it is false.
-- **H5b:** drive the barrier only from an in-app UI command with no coordinator
-  channel at all, the app polling a file the coordinator wrote. Safer in
-  authority terms, but needs new UI and a polling loop — larger, not smaller.
-
-H5a is real new authority: a page evaluation can now suspend saving. It is
-constrained by (a) the graph binding already implemented as
-`app-on-another-graph`, refusing unless the live repo is the transaction's owned
-graph; (b) a mandatory self-release timeout in every blocked state; (c) the
-default-off define.
-
-### 6.1 Explicitly NOT required, and must not be added
-
-- No new Electron IPC channel and no new main-process handler.
-- No generic renderer filesystem access. Note bytes are still written **only** by
-  the anchored helper, outside the application.
-- No helper- or process-execution permission from the renderer. Child-process
-  launches and utility-process forks stay refused
-  (`f28-origin/NETWORK_CONTROL.md`).
-- No network permission. Loopback HTTP and WebSocket stay refused.
-- No change to `pilot/guard-source!` / `guard-fs!` main-process containment
-  (`electron/handler.cljs:94-110`).
-
-### 6.2 In-app cooperative barrier versus exclusion
-
-**What it is.** A flag that OG's own write paths *consult*. It makes those paths
-decline to start new work, and it gives this project its first real completion
-signal for work already started.
-
-**What it is not.** It is not a file lock, not an advisory lock, not `flock`.
-It excludes nothing. Finder, iCloud/Dropbox agents, an external editor,
-`git checkout`, a second Logseq instance, and every OG path in §1.2 are entirely
-outside it — including ones inside the same process. Cooperation is voluntary by
-construction: any path that does not read the flag is unaffected by it.
-
-For comparison: `app-closed` excludes exactly one application, by proving it
-exited. `app-idle` excludes nothing and reports evidence. `app-paused` excludes
-nothing either; it *suppresses* one specific application's cooperating write
-paths. That is a real improvement over `app-idle` and a real step down from
-`app-closed`, and the results must name the mode on every record, as the
-accepted contract already requires.
-
----
-
-## 7. OG reconciliation side effects
-
-### 7.1 The deadlock, precisely
+### 4.3 Deadlock: reconciliation writes into the channel G3 closes
 
 ```
 reconcile-from-disk!            watcher_handler.cljs:45
   → set-missing-block-ids!      watcher_handler.cljs:29
     → batch-set-block-property! handler/editor/property.cljs:76
-      → outliner-tx/transact! {:outliner-op :save-block}
-        → updated-page-hook     outliner/pipeline.cljs:12
-          → sync-to-file        outliner/file.cljs:86
-            → async/put! onto :file/writes   ← the channel H2 closes
+      → outliner-tx/transact!   (no :from-disk?, so invoke-hooks runs)
+        → updated-page-hook     outliner/pipeline.cljs:111
+          → sync-to-file        outliner/file.cljs:86   ← G3
 ```
 
-If the barrier is still engaged during `reconciling`, reconciliation-generated
-writes to **other pages** are refused and never flush. The transaction cannot
-converge, and the pause cannot release. That is a genuine deadlock, not a
-theoretical one.
-
-Three ways out; the first slice takes the third.
-
-1. **Admit reconciliation-originated writes.** Requires an origin tag threaded
-   through `outliner-tx`, which does not exist. Much larger than this slice.
-2. **Release the barrier before reconciling.** Reopens editing while disk and
-   database disagree — exactly what the pause exists to prevent.
-3. **Refuse the input.** ✅
-
-### 7.2 The narrow boundary
-
-`planIncoming` refuses `block-reference-in-payload` when the target content
-contains any `((uuid))` block reference, matched by the same function OG uses:
-`block-ref/get-all-block-ref-ids` (`watcher_handler.cljs:33`).
-
-The refusal is on the **payload shape**, not on graph state. Whether a referenced
-block currently lacks an `id::` property is a property of the graph at reconcile
-time and is not checkable before the write; the payload's shape is. Refusing on
-shape is conservative — it refuses some payloads that would have been harmless —
-and that is the correct direction for a first slice.
-
-This also makes the deadlock **unreachable** rather than merely unlikely, which
-is why case 7 in §8 asserts it directly.
-
-### 7.3 Writes that go around the barrier and must be inventoried, not blocked
-
-| Effect | When | Path | Barrier interaction |
-|---|---|---|---|
-| Backup `.md` | only when the diff contains a deletion (`string-some-deleted?`, `electron/handler.cljs:89`, `:113`) — an append-only change writes **none** | main process, `logseq/bak/<page>/<ISO>.Desktop.md` (`backup_file.cljs:7`, `:19`) | none: never passes `sync-to-file`, so it neither blocks nor deadlocks |
-| Backup pruning past six versions | as above | `backup_file.cljs:27` | none |
-| Version file | `:addVersionFile` | `logseq/version-files/local/**` | none |
-| `id::` writes to other pages | block refs in payload | §7.1 | **refused by construction** in this slice |
-| Assets, plugin and config writes | any time | §1.2 | outside the barrier; detected at publication as `unrelated-local-change` |
-
-Verification therefore asserts **per-file exact hashes for every accepted file,
-plus an explicit inventory of every extra `.md`**, each of which must be under
-`logseq/bak/` or `logseq/version-files/local/`. Whole-graph note hash cannot be
-asserted unchanged in any case that reconciles an update — that is already
-accepted and is unchanged here.
+If the barrier is engaged during `reconciling`, these writes to **other pages**
+are refused and never settle, so the transaction cannot converge and the pause
+cannot release. The first slice makes this unreachable: `planIncoming` refuses
+`block-reference-in-payload` for any payload containing `((uuid))`, matched with
+OG's own `block-ref/get-all-block-ref-ids` (`watcher_handler.cljs:33`). The
+refusal is on **payload shape**, not graph state, because whether a referenced
+block currently lacks `id::` is only knowable at reconcile time. It refuses some
+harmless payloads; that is the correct direction for a first slice.
 
 ---
 
-## 8. Verification
+## 5. Timeout and crash semantics
 
-### 8.1 Reuse, do not repeat
+### 5.1 Pre-write cancellation (`deferred`, `checking`, `draining`, `base-validating`, `awaiting-approval`)
 
-Reused unchanged, not re-litigated: `incoming-application.test.js` (64/64),
-`probe-binding-check.js` (15/15, supervisor-verified), `isolation-check.js`
-(42/42), and the pure suites (`core`, `planner`, `executor`, `persistence`).
-Baseline and platform validation are **not** repeated.
+No helper authorization has been issued, so no writer can start. Expiry, refusal
+and user cancellation all reopen admission immediately. This is safe without any
+proof about an external process, because there is nothing external to prove.
 
-### 8.2 New CLJS unit tests
+### 5.2 Post-write uncertainty (`authorizing`, `applying`, `reconciling`, `verifying`)
+
+From the moment authorization is issued, a helper write may be in progress. A
+renderer timeout **cannot** release admission here: the renderer has no way to
+observe the helper, and the retained journal constrains the coordinator, not OG's
+writer.
+
+Required, in order:
+
+1. **Stop further application.** No new file is authorized.
+2. **Establish writer termination or revocation** — one of:
+   - the coordinator explicitly reports completion or abort through the request
+     channel (normal path); or
+   - the authorization's own expiry has passed by more than the allowed clock
+     skew, so no helper operation can still be consuming it. The authorization
+     therefore carries a short, explicit lifetime, and the renderer's bound is
+     derived from it rather than chosen independently.
+3. **Preserve recovery evidence.** The journal, before-images and the
+   authorization record are untouched.
+4. **Reconcile before affected writes resume.** OG must hold the on-disk bytes
+   for each affected path — via the ordinary watcher path, confirmed by
+   `db/get-file` — before that path is writable again.
+
+**Admission reopens per path, not globally.** Once termination is established,
+editing of unaffected pages resumes; each transaction path stays write-blocked
+until step 4 holds for it. This is finer-grained and materially safer than
+revision 1's all-or-nothing release.
+
+### 5.3 `held-unresolved`: a bounded escape, not a lockout and not a silent release
+
+If the coordinator is silent past the derived bound and the authorization has
+**not** provably expired, the renderer cannot establish termination. It must not
+guess in either direction, so it does neither:
+
+- it does **not** auto-resume writes to affected paths;
+- it does **not** lock the application. Unaffected pages remain editable, and the
+  state is displayed with its reason.
+
+The escape is the user, who is the authority the renderer lacks: an explicit,
+confirmed **"Resume editing these files anyway"** action. Taking it is recorded,
+marks the transaction unresolved, and refuses further application until recovery
+runs. Not taking it costs the user nothing but those files.
+
+So: no unexplained permanent lockout, no silent release during an unresolved
+application, and no dependence on the renderer proving something it cannot.
+
+### 5.4 Process kill
+
+**A renderer kill destroys any unsaved DOM buffer.** Revision 1 implied
+otherwise; that is withdrawn. The pause neither improves nor worsens OG's
+existing behaviour here, and **no buffer-persistence mechanism is designed in
+this document**. If buffer survival across a kill is wanted, it is a separate
+design.
+
+The barrier itself is renderer memory and does not survive. That is unsafe on its
+own, because a restarted renderer would happily write to a path the helper may
+still be operating on. So a restart needs a durable, **fail-safe** signal:
+
+**A per-path marker**, written by the coordinator through the existing helper
+into the graph directory, naming the transaction's affected paths and the
+authorization expiry. On graph load OG reads it — an ordinary graph-file read,
+needing no new permission — and applies §5.2's per-path block with the same
+`held-unresolved` presentation and the same user escape. `recoverIncoming`
+clears it. Once the recorded expiry has passed, the block lapses to an advisory
+notice naming the files to verify.
+
+It is a non-note file in the graph, so it is excluded from note-hash assertions
+and is inventoried explicitly (§6, §8). It is new, and it is an approval item.
+
+| Kill during | State on disk | On restart |
+|---|---|---|
+| `deferred`, `checking`, `draining`, `base-validating`, `awaiting-approval` | nothing written | no marker exists; ordinary editing; approval discarded; preview regenerated |
+| `authorizing`, `applying` | a file may be written | marker present → affected paths blocked, others editable; `recoverIncoming` resolves |
+| `reconciling`, `verifying` | written, publication unproven | marker present; recovery re-runs the reconciliation wait for every file, as accepted |
+
+---
+
+## 6. What is controlled, what is inert, what is outside
+
+The review is right that `EXPECT` plus publication checks do not reliably detect
+the paths in §1.2. `revalidateIntendedState` (`incoming-application.js:1066`)
+iterates only `approved.files` and `approved.unchanged` — an enumerated set — and
+`checkNotePath` (`:119`) admits only direct-child `.md` files under `pages/` and
+`journals/`. A file created that was never in the accepted snapshot is not
+examined. `logseq/bak/<page>/<ISO>.Desktop.md` is three levels deep and is not
+even representable. `stableRead` (`:172`) is two reads that can agree on the same
+intermediate state. These are mitigations with known race gaps, not detection.
+
+| | Mechanism | Coverage |
+|---|---|---|
+| **Controlled** | G1/G2/G3 + the ledger + causes | outliner-originated writes to `pages/*.md` and `journals/*.md` in this renderer, for this repo |
+| **Inert in the synthetic setup — asserted, not assumed** | plugins: no native plugin loaded, marketplace and installation refused (`f28-origin/NETWORK_CONTROL.md`); file-sync: network and Electron `net` refused, no account enrolled; PDF assets, drawings, whiteboards, global/plugin config: not exercised by the experiment | each asserted at run start: plugin count zero, sync inactive, and an inventory showing no writes under these paths |
+| **Outside the guarantee — mitigated only, with known race gaps** | asset IPC (`handler/editor.cljs:1451`); main-process backups and version files; `unlink`/`copyFile`; a second OG window via `dbsync` (`db.cljs:127-141`); Finder, cloud agents, external editors, `git`, a second instance | helper `EXPECT` recheck before `renameat`; per-file hash revalidation for enumerated notes only; an explicit inventory of every extra `.md` |
+
+**Cooperative barrier versus exclusion.** The barrier makes OG's own write paths
+that consult it decline to start new work. It excludes nothing: it is not a file
+lock, not advisory locking, not `flock`. For comparison: `app-closed` excludes
+exactly one application by proving it exited; `app-idle` excludes nothing and
+reports evidence; `app-paused` excludes nothing either — it suppresses one
+renderer's cooperating write paths. Every result names its mode.
+
+---
+
+## 7. Actual scope
+
+Revision 1 claimed five seams. A pause whose central guarantee is resolved needs
+twelve, and this is stated rather than minimized.
+
+| # | Seam | Location | Note |
+|---|---|---|---|
+| H1 | barrier state: request / release / query, per repo | `og_sync_bridge.cljs` | must **not** reuse `blocked?`/`block-runtime!` (`:82`, `:86`) — that latch is fatal, unreleasable, and suppresses `emit!` (`:122`), which the drain depends on |
+| H2 | G1: refuse entry to edit mode | `state/set-editing!` `state.cljs:1921` | single chokepoint, four call sites |
+| H3 | G2: refuse the commit | `editor.cljs:1328` | one disjunct in the existing `when-not`; precedent is `:editor/skip-saving-current-block?` (`state.cljs:146`, set at `handler/code.cljs:16`), which cannot be reused because it is one-shot and cleared at `editor.cljs:1360` |
+| H4 | G3 + ledger registration, including the `:graph/importing` direct-write branch | `outliner/file.cljs:86-97` | |
+| H5 | ledger registration at re-queue; retirement at all three terminal branches | `outliner/file.cljs:54-70` | |
+| H6 | bind the admission token around `save-tree!` | `outliner/file.cljs:60-70` | **universal save path** |
+| H7 | capture the token before the `p/let`; pass it in options | `handler/file.cljs:203-213` | **universal save path** |
+| H8 | open the cause under `enabled?`, not only `observation-only?`; accept the token | `fs.cljs:93-101` | **universal save path** |
+| H9 | `:flush-now-ch` into the existing `<ratelimit` | `outliner/file.cljs:101`; `util.cljc:1174`, `:1190-1194` | machinery already exists |
+| H10 | request channel: a **write** call on an API that is currently read-only (`og_sync_bridge.cljs:140`, `:250-265`) | new `ENABLE-OG-BRIDGE-BARRIER` define | real new authority |
+| H11 | durable per-path marker: written by the coordinator through the helper, read by OG at graph load, cleared by recovery | new graph artifact + read at load | new artifact |
+| H12 | `held-unresolved` presentation and the confirmed user escape | new UI | new UI |
+
+All are behind the existing `ENABLE-OG-SYNC-BRIDGE` define
+(`og_sync_bridge.cljs:15`, default false) and deliberately **not** under
+`ENABLE-OG-BRIDGE-OBSERVATION` (`:16`), so the accepted observation-only package
+stays byte-identical and truthfully observation-only.
+
+**H6, H7 and H8 sit in the path every save in the product takes.** H8 in
+particular changes which builds open a cause. That is the risk concentration, and
+it is why §9 recommends what it does.
+
+### 7.1 Explicitly not required
+
+No new Electron IPC channel or main-process handler. No generic renderer
+filesystem access — note bytes are still written only by the anchored helper,
+outside the application, and H11's marker is read by OG as an ordinary graph
+file. No helper or process-execution permission from the renderer; child-process
+launches and utility-process forks stay refused. No network permission. No
+change to `pilot/guard-source!` / `guard-fs!` (`electron/handler.cljs:94-110`).
+
+---
+
+## 8. Test plan
+
+Central safety conditions are **mandatory**. Nothing below may be reported as
+"unverified but accepted".
+
+### 8.1 Reused unchanged
+
+`incoming-application.test.js` (64/64), `probe-binding-check.js` (15/15,
+supervisor-verified), `isolation-check.js` (42/42), and the pure suites. Baseline
+and platform validation are **not** repeated.
+
+### 8.2 CLJS unit tests — the ledger and the gates
 
 In the existing `src/test/frontend/fs/og_sync_bridge_test.cljs`:
 
-1. Barrier engage / release round-trip; `editing-paused?` is per-repo.
-2. `sync-to-file` refuses and records a deferred page while paused; releases
-   re-queue every deferred page **exactly once**.
-3. The barrier is distinct from the `blocked` latch in both directions: a
-   barrier never suppresses `emit!`; a blocked runtime never presents as a
-   releasable barrier.
-4. Every blocked state self-releases at its timeout.
-5. Graph binding: a pause requested for a repo the app is not on refuses
-   `app-on-another-graph`.
+1. Ledger: register on admission; retire on each of `do-write-file!`'s three
+   terminal branches; the drain condition is false while any entry is unretired.
+2. Re-queue termination: with no block in edit mode, `input-idle?` is true and the
+   long-page branch stops; `whiteboard-idle?` goes true after its interval. The
+   re-queue cap refuses `drain-requeue-limit`.
+3. Ownership transfer: the entry retires only when the cause opens; a write held
+   in the microtask gap keeps the drain false.
+4. `drain-timeout` **refuses**; there is no path by which expiry passes.
+5. G1 and G2 refuse while paused; the database is not mutated.
+6. The barrier is distinct from the `blocked` latch in both directions.
+7. A completed cause with no write (the `:file/not-matched-from-disk` branch)
+   is not counted as bytes written.
 
-### 8.3 New Node tests
+### 8.3 Node tests
 
-A new `f28-sync-prototype/tests/editing-pause.test.js` against a fake OG
-surface: every transition in §4, the composition deferral, the `base-changed`
-recompute-and-reapprove path, `approval-timeout`, and each timeout resuming.
+New `f28-sync-prototype/tests/editing-pause.test.js`: every transition in §4;
+each §3.1 precondition refusing; the composition deferral; `base-changed`
+regeneration; and each of §5.1, §5.2 and §5.3 reaching its required outcome.
 
-### 8.4 Live cases — one Intel host, synthetic, no transport
+### 8.4 Live cases — one Intel host, synthetic, each mutating case on its own owned run
 
-Each mutating case on its **own fresh owned run**, per the accepted constraint of
-one incoming transaction per owned run.
-
-| # | Case | Own run | Required outcome |
-|---|---|---|---|
-| 1 | English update; an open editor with genuinely unsaved text | yes | buffer intact throughout; `save-current-block!` declines; drain completes; applied; reconciled; resumed; the buffer then saves normally |
-| 2 | Korean create, Korean path, composition active at request | yes | `deferred` with the bilingual message; composition ends naturally; drain; apply; exact UTF-8 preserved |
-| 3 | **Genuinely queued save inside the 1000 ms batch window** | yes | flush-now drains it; exactly one cause opens and closes for that page; if it moved the base, §4.1 applies |
-| 4 | Failed save present on the owned repo | shared (no write) | refuses `failed-local-write`; nothing written; **editing resumes immediately** |
-| 5 | Pending rename on the owned repo | shared (no write) | refuses `unfinished-local-write`; nothing written |
-| 6 | The drain changes the accepted base | yes | edit captured, records advance, old approval refuses `unknown-base`, recomputed preview and fresh approval succeed |
-| 7 | Payload containing a block reference | shared (no write) | refuses `block-reference-in-payload` at plan time; nothing written; the §7.1 deadlock is unreachable |
-| 8 | Approval timeout | yes | auto-resume; nothing written; buffer intact |
-| 9 | Renderer reload while paused | yes | editing resumes; the open journal blocks re-application; **no lockout** |
-| 10 | **Genuine process kill during `applying`** | yes | restart resumes editing; no double write; journal open; `recoverIncoming` completes it |
-| 11 | Feature off (`ENABLE-OG-SYNC-BRIDGE` false) | shared | editing, saving, renaming and reopening behave exactly as before; assert the barrier symbols are absent from the build |
-
-### 8.5 Cases 3 and 10 are required, not optional — and why
-
-Both close gaps the accepted results record as open.
-
-**Case 3 — genuine queued/in-flight save.** RESULTS.md records that genuine
-pending-save capture is **not established**: sampling every 50 ms while driving a
-real save caught zero pending causes, because the `save-pending!` →
-`save-completed!` window is shorter than the automation channel can reach. The
-pause is the first mechanism that can close this, because with admission closed
-the window stops being a race. Flush-now also makes a queued item observable
-*after the fact*: engage the barrier, then flush, then assert exactly one cause
-for that page.
-
-The honest caveat: to construct a *genuinely queued* save the test must still get
-a page onto `:file/writes` and engage the barrier within the 1000 ms batch
-window, which is the same timing problem in a smaller form. If it cannot be
-constructed live, it is recorded as **unverified and the drain's central claim is
-narrowed** — not forced with a synthetic signal, which is what the accepted
-results already had to do and said so.
-
-**Case 10 — genuine crash and restart.** RESULTS.md records that calling
-`recoverIncoming` again in the same process is not a demonstrated crash and
-restart, because no process was killed. A real kill is required here, because
-§5.2's whole fail-open/fail-closed split is untested otherwise.
-
-**Korean.** The accepted results used synthetic `CompositionEvent`s (OG did
-report composition). If a real input method can be driven, case 2 uses it. If
-not, the synthetic path runs, is **labelled synthetic**, and the claim is
-narrowed to "OG reported composition and the barrier deferred" — never "a real
-IME was handled".
-
----
-
-## Alternative: the pause versus retaining app-closed application
-
-| | App-closed (accepted) | Editing pause (this design) |
+| # | Case | Mandatory assertion |
 |---|---|---|
-| Implementation cost | **zero** — already built and accepted | five application seams (H1–H5), a new state machine, ~11 live cases, plus the two hardest untested things in the project (§8.5) |
-| Data safety | strongest available: one writer, proven closed, before-images, roll-forward recovery. Still not exclusion of Finder/cloud/external editors | better than `app-idle` (which excludes nothing and asserts idleness from signals the accepted contract itself calls evidence); **worse than app-closed** — cooperative, fail-open on restart, and §1.2's paths bypass it |
-| Real technical gain | — | the **drain**: the first genuine completion signal for saves in this project, replacing a dispatch flag (`*writes-finished?`) and a "nothing surfaced" window (`observeSettled`) |
-| User usefulness | low: the user must quit Logseq to receive a change | the first thing a user could actually use — receive a change without quitting |
+| 1 | Unsaved text present at request | **refuses `unsaved-buffer-present`; nothing written; buffer intact.** (Revision 1's version of this case is withdrawn as unsafe.) |
+| 2 | User settles the edit, then re-requests | the edit is captured, the base advances, the old approval refuses `unknown-base`, a recomputed preview and fresh approval apply |
+| 3 | Korean composition active at request | `deferred` with the bilingual message; never force-ended; composition ends; preconditions re-checked |
+| 4 | **Queued save present at request** | the ledger is non-empty and the request **refuses `local-work-pending`**. This is now a positive assertion about a tracked object, not a race to catch through the automation channel — which is why it is mandatory and why the ledger earns its cost. |
+| 5 | **Drain with a genuine in-flight write** | admission closed with one write already dispatched; the drain waits until the ledger is empty and the cause closed, then passes. Assert the drain did **not** pass earlier. |
+| 6 | Typing during the pause | G1 refuses edit-mode entry; the database is unmodified throughout; on resume the page is editable and its file matches the applied content |
+| 7 | Failed save present | refuses `failed-local-write`; nothing written; editing resumes at once |
+| 8 | Pending rename | refuses `unfinished-local-write` |
+| 9 | Block-reference payload | refuses `block-reference-in-payload` at plan time; the §4.3 deadlock is unreachable |
+| 10 | `approval-timeout` | clean pre-write cancellation; nothing written; admission reopens |
+| 11 | **Coordinator killed during `applying`** | per-path block holds; unaffected pages remain editable; no auto-resume of affected paths; `held-unresolved` is displayed with its reason |
+| 12 | **Renderer killed during `applying`** | on restart the H11 marker blocks affected paths only; unaffected pages editable; `recoverIncoming` completes; **no claim that the unsaved buffer survived** |
+| 13 | Authorization expiry, coordinator silent | termination established by expiry alone; affected paths reconcile; admission reopens per path |
+| 14 | Setup assertions | plugin count zero; sync inactive; inventory shows no writes under the §6 inert paths |
+| 15 | Feature off | editing, saving, renaming and reopening behave exactly as before; barrier symbols absent from the build |
 
-**Recommendation: build the pause as an explicit "Apply pending changes"
-command, and keep app-closed application as the supported fallback rather than
-replacing it.**
-
-The reasoning: the accepted idle-app milestone has extracted what observation can
-give. Its own contract states that concurrent-edit safety is outside it and that
-idleness excludes nothing — and no further observation experiment converts that
-into safety, because the missing ingredient is control, not measurement. The
-pause is the smallest mechanism that supplies control, and its cost is
-concentrated in one place, behind a default-off define, rather than spread
-through the application. Keeping app-closed as the fallback means the pause never
-has to be the only safe path: `recoverIncoming`'s already-accepted explicit
-`fallback: 'app-closed'` selection, which requires proven closure, is exactly the
-escape hatch.
-
-**The counter-argument, stated fairly.** App-closed is finished and the pause is
-not. A supervisor optimizing purely for already-delivered safety should keep
-app-closed and stop here; that is a defensible call and this design does not
-pretend otherwise. The reason to proceed anyway is that app-closed cannot become
-daily-usable by any amount of further work *on app-closed*. The next milestone
-requires in-app authority whenever it is taken, and taking it now — bounded to
-one command, one transaction and five seams — is cheaper and far more reviewable
-than taking it later underneath a general synchronization service.
-
-**An unenforced idle window is not a third option.** It has already been
-measured, and the accepted contract records that its signals are evidence rather
-than exclusion. Repeating it changes nothing about that, so it is not offered
-here as a middle path.
+Per-file exact hashes for every accepted file, plus an explicit inventory of every
+extra file: each must be under `logseq/bak/`, `logseq/version-files/local/`, or
+be the H11 marker.
 
 ---
 
-## Limitations, stated plainly
+## 9. Recommendation
 
-1. The barrier is **cooperative and excludes nothing** (§6.2).
-2. §1.2's paths bypass it, including several inside the same process.
-3. It is **non-durable and fail-open on restart** by design (§5.2); the journal,
-   not the barrier, is what stays fail-closed.
-4. Check-then-write gaps remain on both sides; interleaving is narrowed, neither
-   prevented nor reliably detected (§5.3).
-5. The drain's cause-based completion signal does not cover a write in flight
-   before `write-file-impl!`; the stability window covers that, and it is
-   evidence (§2.2).
-6. No exactly-once claim. Reconciliation invocation counts remain UNAVAILABLE.
-7. Payloads containing block references are **refused**, not handled (§7.2).
-8. Concurrent-edit safety is **not** established by this design. It is a
-   proposal. Even fully implemented and passing, it would establish safety for a
-   short, explicit, user-initiated pause — not for continuous concurrent
-   editing.
+**Retain the accepted app-closed path for the next prototype. Do not build the
+pause yet.**
 
-## Bounded acceptance criteria
+| | App-closed (accepted) | Pause, with §1–§7 resolved |
+|---|---|---|
+| Application code | none | twelve seams, three of them (H6, H7, H8) in the path every save in the product takes |
+| New artifacts | none | a durable in-graph marker (H11) and new UI (H12) |
+| New authority | none | a write call on a read-only API (H10) |
+| Data safety | strongest available; not exclusion | better than `app-idle`; worse than `app-closed`; still excludes nothing (§6) |
+| Usefulness | low — the user must quit to receive a change | receive a change without quitting |
 
-1. Cases 1–11 pass, each mutating case on its own fresh owned run.
-2. No editor buffer is lost, cleared or force-saved in any case, including every
-   failure and timeout branch.
-3. No composition is ever force-ended or discarded; deferral is the only
-   behaviour, and it is bounded.
-4. No note is written while the pause gate is unsatisfied.
-5. Every blocked state has a bounded timeout that resumes editing. No case
-   reaches an unexplained permanent lockout, and case 9 proves a reload resumes.
-6. Approval is obtained **after** the drain; if the drain changed the base, the
-   preview is regenerated and re-approved, and the stale approval refuses
-   `unknown-base`.
-7. Deferred pages are re-queued exactly once on resume; the database and file
-   agree afterwards.
-8. Per-file exact hashes hold for every accepted file, and every extra `.md` is
-   inventoried under `logseq/bak/` or `logseq/version-files/local/`.
+Revision 1 recommended building the pause on the basis that it cost five seams
+concentrated behind a default-off define. That basis does not survive the review.
+The honest cost is roughly two and a half times larger and is concentrated in
+OG's universal save path, and two of the twelve seams are things this project has
+not built before at all — a durable in-graph coordination marker and a
+user-facing unresolved-state escape.
+
+Against that, the accepted app-closed path already delivers the safety the pause
+is reaching for, and delivers it more strongly.
+
+### If the pause is wanted anyway, build it in this order
+
+The completion tracking is worth building **on its own**, before any barrier:
+
+- **M1 — the ledger and cause coverage (H4, H5, H6, H7, H8, H9).** No barrier, no
+  pause, no new authority, no new UI. This alone closes the gap the accepted
+  results record as open: *"genuine pending-save capture is not established"*. It
+  turns that from a race to be caught into a tracked object to be read, and it is
+  independently verifiable with §8.2's tests plus a live case that asserts the
+  ledger's transitions against a real save. If M1 cannot be made sound, the pause
+  cannot be either, and this is found out before any authority is taken.
+- **M2 — the gates and the state machine (H1, H2, H3, H10).**
+- **M3 — durable restart semantics and the escape (H11, H12).**
+
+Attempting M2 without M1 is precisely what revision 1 did, and it produced a
+mechanism that looked like a barrier and behaved like an idle window.
+
+**An unenforced idle window remains not a third option.** The accepted contract
+already records that its signals are evidence rather than exclusion, and
+repeating it changes nothing about that.
+
+## Limitations
+
+1. The barrier would be cooperative and would exclude nothing (§6).
+2. §1.2's paths bypass it, including a second OG window on the same graph.
+3. Completion tracking covers outliner-originated writes only; assets,
+   main-process writes and a second window are outside it (§2.5).
+4. A completed cause does not prove bytes were written (§2.5).
+5. Publication checks cover an enumerated set of `pages/*.md` and
+   `journals/*.md`; new files and non-note files are not covered (§6).
+6. Check-then-write gaps remain on both sides. Interleaving is narrowed, neither
+   prevented nor reliably detected.
+7. An unsaved buffer does not survive a process kill, and no mechanism for that
+   is designed here (§5.4).
+8. **Concurrent-edit safety is not established by this design.** Fully built and
+   passing, it would establish safety for a short, explicit, user-initiated pause
+   under the §6 setup assumptions — not for continuous concurrent editing.
+
+## Acceptance criteria
+
+1. Live cases 1–15 pass, each mutating case on its own fresh owned run.
+2. No editor buffer is lost, cleared or force-saved in any branch, and no Korean
+   composition is ever force-ended.
+3. The database is provably unmodified for the whole blocked window (case 6).
+4. The drain passes only on §2.4's three positive conditions. `drain-timeout`
+   refuses in every test that reaches it.
+5. Case 4 and case 5 both pass. Neither may be reported as unverified.
+6. No admission reopens to an affected path during `applying`, `reconciling` or
+   `verifying` without §5.2's step 2 and step 4, or the recorded user escape.
+7. No case reaches a permanent lockout, and no case silently auto-releases during
+   an unresolved application.
+8. Case 14's setup assertions pass, so §6's "inert" column is asserted evidence.
 9. Every result names `mode: app-paused`; no paused run is described in
-   `app-closed` or `app-idle` terms, in either direction.
-10. Case 3's outcome is reported as either genuine or unverified — never
-    substituted with a forced signal.
-11. Results state plainly that concurrent-edit safety in general is still not
-    claimed.
+   `app-closed` or `app-idle` terms in either direction.
+10. Results state plainly that concurrent-edit safety in general is not claimed.
 
 ## Decisions requiring user approval
 
-1. **Take in-app write authority at all**, replacing the observation-only
-   posture with five cooperating seams behind a default-off define (§6).
-2. **H5: the barrier request channel.** H5a (extend the exposed bridge object
-   under a new `ENABLE-OG-BRIDGE-BARRIER` define) versus H5b (in-app UI command
-   only, no coordinator channel). H5a recommended; both are new authority.
-3. **Accept a fail-open barrier with a fail-closed journal** (§5.2) —
-   specifically, that editing always resumes on restart even while a transaction
-   is unresolved.
-4. **Accept that the barrier excludes nothing** and that §1.2's paths bypass it.
-5. **Refuse block-reference payloads in the first slice** (§7.2), accepting that
-   this refuses some harmless payloads to make the §7.1 deadlock unreachable.
-6. **Require a genuine process kill (case 10) and a genuine queued save
-   (case 3)**, accepting that case 3 may end as an explicit unverified
-   limitation rather than a pass.
-7. **Keep app-closed application as the supported fallback**, not replace it.
-8. Approve the `app-paused` runtime mode as a third persisted, approval-bound
-   `runtimeMode` value that cannot cross with the other two.
+1. **Whether to proceed at all**, given §9's recommendation to retain app-closed.
+2. If proceeding: **the M1/M2/M3 ordering**, and whether M1 may be approved alone.
+3. **H6/H7/H8 in the universal save path**, including H8 changing which builds
+   open a bridge cause.
+4. **H10**: a write call on a currently read-only API.
+5. **H11**: a durable non-note marker file inside the graph, written through the
+   helper and read by OG at load.
+6. **H12**: a user-confirmed escape that resumes writes to affected paths and
+   records that it happened.
+7. **Refusing block-reference payloads** in the first slice (§4.3), accepting that
+   some harmless payloads are refused to make the deadlock unreachable.
+8. **The `app-paused` runtime mode** as a third persisted, approval-bound value.
 
 Implementation requires approval. Nothing in this design is started.
 
----
-
-## 한국어 로드맵 현재 상태
-
-**수용됨:** 그래프 바인딩 수정과 제한적인 유휴 상태 관찰 결과를 감독자가
-수용했습니다. 메모리 전용 프로브 검사 15/15는 감독자가 직접 실행했습니다.
-집중 라이브 결과 14/14는 여전히 코더가 보고한 증거입니다. **전체 라이브
-관찰 행렬은 완료로 수용되지 않았고, 동시 편집 안전성은 검증되지 않은
-상태로 남아 있습니다.**
-
-**이번 작업:** 들어오는 변경 하나를 적용하기 위한 **제한적 편집/저장 일시
-중지** 설계를 제안했습니다. 명시적인 "대기 중인 변경 적용" 명령 하나이며,
-지속적인 동시 편집이나 일반 동기화 서비스가 아닙니다. 편집 버퍼와 한글 조합은
-절대 강제 저장하거나 버리지 않고, 조합 중이면 안내 메시지와 함께 적용을
-연기합니다. 저장 완료는 디스패치 플래그나 유휴 타이머가 아니라 실제 저장
-원인(cause)의 종료로 확인합니다.
-
-**아직 아님:** 이 설계는 **제안일 뿐이며 승인되지도 구현되지도 않았습니다.**
-새로운 인앱 권한 다섯 군데(H1–H5)가 필요하고, 그중 요청 채널(H5)은 실제로
-새로운 권한입니다. 네트워크·프로세스 제한, 렌더러 파일시스템 제한은 그대로
-유지됩니다. 장벽은 협조적일 뿐 Finder·클라우드 에이전트·외부 편집기를
-배제하지 못합니다.
-
-**다음 단계:** 구현 여부와 새 적용 권한에 대한 감독자/사용자 결정.
+한국어 진행 요약은 [`PROJECT_ROADMAP_KO.md`](../PROJECT_ROADMAP_KO.md)에
+있습니다.
