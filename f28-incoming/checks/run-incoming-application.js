@@ -272,10 +272,8 @@ async function run() {
       originReplicaId: 'replica-incoming-synthetic-b',
       targetMetadataRevision: 'metadata-2',
       changes: [
-        {fileId: 'file-english', path: englishPath, content: englishUpdate,
-         acceptedRevision: 'accepted-revision-incoming-english'},
-        {fileId: 'file-new-korean', path: newKoreanPath, content: newKoreanBody,
-         acceptedRevision: 'accepted-revision-incoming-new-korean'},
+        {fileId: 'file-english', path: englishPath, content: englishUpdate},
+        {fileId: 'file-new-korean', path: newKoreanPath, content: newKoreanBody},
       ],
     });
     out.proposal = {proposalId: proposal.proposalId, planId: proposal.planId,
@@ -338,16 +336,14 @@ async function run() {
     // ------------------------------------------------------- application
     phase('apply');
     const notesBeforeApply = PI.hashGraphNotes(context);
-    const supersededJournals = [];
     const applied = IA.applyIncoming(context, {
       proposal, approve: previewed.preview.previewFingerprint, gate,
-      supersededSink: item => supersededJournals.push(item),
     });
     assert(applied.outcome === 'applied',
       `application did not complete: ${applied.code} ${applied.reason || ''}`);
     out.applied = {applied: applied.applied, transactionId: applied.transactionId,
-      metadataRevision: applied.metadataRevision, journalHash: applied.journalHash};
-    out.supersededJournals = supersededJournals;
+      metadataRevision: applied.metadataRevision,
+      snapshotFingerprint: applied.snapshotFingerprint, journalHash: applied.journalHash};
 
     const englishAfter = IA.stableRead(context, englishPath);
     const newKoreanAfter = IA.stableRead(context, newKoreanPath);
@@ -372,6 +368,32 @@ async function run() {
         'file-english,file-korean,file-new-korean',
       out.acceptedAfterApply);
 
+    // The approval bound an exact transaction, snapshot and record pair before
+    // anything was written. The store must have published precisely those.
+    const bound = previewed.preview.target;
+    out.boundTarget = bound;
+    record('published-records-are-exactly-the-ones-the-approval-bound',
+      accepted2.sidecar.acceptedTransactionId === bound.transactionId &&
+      accepted2.sidecar.acceptedSnapshotFingerprint === bound.snapshotFingerprint &&
+      PI.readRecords(context).sidecarHash === bound.sidecarHash &&
+      PI.readRecords(context).deviceHash === bound.deviceHash &&
+      accepted2.device.acceptedTransactionId === bound.transactionId &&
+      PI.readRecords(context).outstandingIntents.length === 0,
+      {bound, observedTransaction: accepted2.sidecar.acceptedTransactionId,
+       observedSnapshot: accepted2.sidecar.acceptedSnapshotFingerprint});
+
+    // Every stored revision comes from the executed comparison plan.
+    const storedRevisions = Object.fromEntries(
+      Object.entries(accepted2.sidecar.identity.files)
+        .map(([id, entry]) => [id, entry.acceptedRevision]));
+    out.storedRevisions = storedRevisions;
+    record('stored-revisions-come-from-the-plan-not-the-proposal',
+      previewed.preview.files.every(file =>
+        storedRevisions[file.fileId] === file.acceptedRevision &&
+        /^compare-revision-[0-9a-f]{32}$/.test(file.acceptedRevision)),
+      {previewRevisions: previewed.preview.files.map(f => ({fileId: f.fileId,
+        acceptedRevision: f.acceptedRevision})), storedRevisions});
+
     const sidecarText = PI.readRecords(context).sidecarBytes.toString('utf8');
     record('sidecar-remains-portable',
       !sidecarText.includes('replica-incoming-synthetic-b') &&
@@ -387,9 +409,30 @@ async function run() {
        transactionId: journal.value?.progress?.transactionId});
 
     const nothingToRecover = IA.recoverIncoming(context, {gate});
-    record('recovery-has-nothing-to-do-after-a-clean-application',
-      nothingToRecover.outcome === 'none' && nothingToRecover.code === 'journal-closed',
+    record('recovery-verifies-the-closed-journal-rather-than-trusting-its-label',
+      nothingToRecover.outcome === 'none' && nothingToRecover.code === 'journal-closed' &&
+      nothingToRecover.verified === true &&
+      nothingToRecover.transactionId === previewed.preview.target.transactionId,
       nothingToRecover);
+
+    // The slot holds one transaction per owned run and is never reused.
+    const secondProposal = IA.buildProposal({
+      accepted: accepted2.sidecar, snapshot: accepted2.snapshot,
+      originReplicaId: 'replica-incoming-synthetic-b',
+      targetMetadataRevision: 'metadata-3',
+      changes: [{fileId: 'file-korean', path: koreanPath,
+        content: `${koreanAfter.bytes.toString('utf8')}- 두 번째 제안입니다.\n`}],
+    });
+    const refusedSecond = IA.planIncoming(context, secondProposal);
+    const journalStillFirst = PI.readJournal(context);
+    record('a-retained-journal-is-not-reused-or-overwritten',
+      refusedSecond.outcome === 'refused' &&
+      refusedSecond.code === 'journal-slot-occupied' &&
+      refusedSecond.mutated === false &&
+      journalStillFirst.hash === applied.journalHash &&
+      IA.stableRead(context, koreanPath).hash === koreanSeed.hash,
+      {code: refusedSecond.code, retainedJournalHash: journalStillFirst.hash,
+       note: 'another experiment uses a fresh owned run'});
 
     // ------------------------------------------------------------ reopen
     phase('reopen');

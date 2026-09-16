@@ -78,6 +78,18 @@ and unchanged accepted identity.
 
 ## Limits
 
+**One incoming transaction per owned run.** The journal slot is never reused: a
+retained journal — open, closed or unparseable — refuses a second proposal at
+both the preview and the application phase, because it holds the only retained
+copy of its transaction's before-images and this slice has no approved way to
+archive that durably. Another experiment uses a fresh owned run.
+
+**Not every recovery case has a regression.** The graph-first device-step
+boundary, an unrelated outstanding transaction, a falsely-closed journal and a
+substituted binding are covered. The uncertain-clear branch, `profile-first`
+ordering, an intent-step failure and a failure during recovery's own roll-forward
+write are handled by the same typed refusals but have no test of their own.
+
 One host, one fresh synthetic graph, one coherent batch. Per-file application is
 not whole-graph atomicity: an interruption leaves a mixed state. The cooperative
 lock serializes participating helper invocations only — Finder, cloud agents and

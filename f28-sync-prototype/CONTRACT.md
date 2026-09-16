@@ -731,15 +731,19 @@ contract without weakening any of it.
   bytes that do not are refused `non-roundtrip-bytes`, never replaced. Per note
   256 KiB, per serialized journal 2 MiB, both enforced before the first note
   write.
-- **One bounded journal at one compile-time name.** `write-journal` and
-  `read-journal` reach only `<profileDir>/incoming-journal.json`; the caller
-  expresses no path. The immutable `approved` half is guarded by `approvedHash`;
-  `progress` is the only mutable part and is a claim, never proof. The journal
-  slot is the transaction lock: creation requires `absent` or the exact hash of
-  a `closed` journal, so an unfinished transaction refuses a fresh proposal with
-  `transaction-outstanding`, and a resumed coordinator discovers it by reading
-  one fixed path with no listing. A closed journal is retained and superseded,
-  never deleted; there is no `clear-journal` command.
+- **One bounded journal at one compile-time name, never reused.**
+  `write-journal` and `read-journal` reach only
+  `<profileDir>/incoming-journal.json`; the caller expresses no path. The
+  immutable `approved` half is guarded by `approvedHash`; `progress` is the only
+  mutable part and is a claim, never proof. Creation requires `absent`. A journal
+  that is present at all — open, closed or unparseable — refuses a new proposal
+  at **both** the preview and the application phase
+  (`transaction-outstanding`, `journal-slot-occupied`, `journal-malformed`), and
+  is preserved byte-for-byte, because it holds the only retained copy of its
+  transaction's before-images. There is no `clear-journal` command and no
+  supersession. **The limitation this leaves is one incoming transaction per
+  owned run**; another experiment uses a fresh owned run. A resumed coordinator
+  discovers the journal by reading one fixed path with no listing.
 - **Recovery earns the right to write.** Schema, exact key sets, bounds, hex and
   hash well-formedness, `approvedHash`, graph and profile bindings including
   device and inode, graph lineage, accepted base, a recomputed plan and a
@@ -747,6 +751,35 @@ contract without weakening any of it.
   **consistency, not authenticity**: a forger with write access to the owned
   profile directory can produce a self-consistent journal and nothing here
   detects it.
+- **A revision label is never acceptance, and a `closed` label is never proof.**
+  The approval binds the exact intended transaction ID, projected snapshot
+  fingerprint, sidecar bytes hash and device bytes hash, all derived before the
+  first write. Recovery resolves an outstanding identity transaction through the
+  record store's own `recover` contract when it is the bound one, refuses
+  `unrelated-outstanding-transaction` when it is not, refuses
+  `multiple-outstanding-transactions` for more than one, and returns
+  `unresolved` — journal left open, every record retained — for any store outcome
+  other than `recovered`. Nothing closes until a reopen proves no outstanding
+  intent, no malformed record, `openGraph` accepted, and all four bound values
+  equal. A `closed` journal is re-proved and refuses `closed-journal-not-verified`
+  if its records do not verify. An uncertain state is never converted into
+  success.
+- **The proposal cannot name what gets stored.** `acceptedRevision` is not a
+  field of `f28-incoming-proposal/1`; the stored revision is the deterministic
+  `compare-revision-<32 hex>` the executed plan assigns, and untouched files keep
+  the sidecar's existing revision. `proposalId` is recomputed over the whole
+  canonical body on every read, so a changed body cannot keep a valid identity or
+  produce a previously valid approval fingerprint. `planId` must match
+  `plan-[0-9a-f]{32}`.
+- **The complete intended state is revalidated before publication.** Transaction
+  files must still hold their approved target (`target-divergence`), files
+  outside the transaction must still hold their accepted bytes
+  (`unrelated-local-change`), the result must fingerprint as the approved
+  projection (`projection-mismatch`), and the transaction and record bytes these
+  inputs produce must equal the binding, re-derived **before** publishing so a
+  mismatch refuses with nothing written (`transaction-mismatch`). This narrows
+  the window against writers outside the cooperative lock; it does not close it,
+  and no such claim is made.
 - **Whole-transaction preflight, roll-forward only.** Every file is classified
   from disk before any is written. A single `third-state` anywhere stops
   recovery before any further note mutation, including files earlier in the

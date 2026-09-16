@@ -1,6 +1,11 @@
 # Incoming change application design
 
-Status: **approved and implemented**, 2026-09-15. The user approved the first
+Status: **approved, implemented, and corrected after supervisor review**,
+2026-09-16. Three findings from that review are fixed and the contracts they
+touched are restated below; see "Supervisor review corrections" at the end and
+RESULTS.md for what was actually reproduced and verified.
+
+Status: approved and implemented, 2026-09-15. The user approved the first
 slice; the ambiguities the review raised were resolved in this document before
 implementation, and the sections below describe what was built, not what was
 proposed. Results are recorded in
@@ -81,12 +86,24 @@ Any other base is refused `unknown-base`. A proposal is **never** rebased onto a
 different accepted state in this slice: the proposer recomputes it, or it is
 discarded.
 
-**The proposal never names revisions on its own authority.** The applier
-reconstructs the source snapshot from the accepted sidecar, reconstructs the
-proposer's target state, and recomputes the plan with `compareSnapshots`. If the
-recomputed plan is not byte-identical to `plan`, the proposal is refused
-`plan-mismatch` and nothing is written. This is the `:revalidate-plan!`
-discipline the end-to-end adapter already verifies; it is not weakened here.
+**The proposal never names revisions on its own authority.** It cannot even
+express one: `acceptedRevision` is not a field of `f28-incoming-proposal/1`. The
+applier reconstructs the source snapshot from the accepted sidecar, reconstructs
+the proposer's target state, and recomputes the plan with `compareSnapshots`. If
+the recomputed plan is not byte-identical to `plan`, the proposal is refused
+`plan-mismatch` and nothing is written. The revision each file is **stored**
+under is then taken from that executed plan's action for that file — a
+deterministic `compare-revision-<32 hex>` — and files the plan does not touch
+keep the revision the accepted sidecar already names. This is the
+`:revalidate-plan!` discipline the end-to-end adapter already verifies; it is not
+weakened here.
+
+**The proposal's identity is recomputed, not trusted.** `proposalId` is a digest
+over the proposal's whole canonical body. It is recomputed on every read and a
+mismatch refuses `proposal-identity-mismatch`, so a changed body cannot keep a
+previously valid identity — and therefore cannot produce a previously valid
+approval fingerprint. `planId` must match `plan-[0-9a-f]{32}` exactly; every
+identifier, revision label and fingerprint is type- and shape-checked.
 
 **Per-file identity rules.** A `fileId` already tombstoned locally is refused
 `tombstoned-file`. A `fileId` unknown locally is admissible only as a create. An
@@ -242,17 +259,19 @@ approved      IMMUTABLE after creation — the approved inputs
   graphBinding    { runName, graphDirectory, graphDevice, graphInode }
   profileBinding  { runName, profileDirectory, profileDevice, profileInode }
   base          { metadataRevision, snapshotFingerprint, acceptedTransactionId }
-  target        { metadataRevision }
+  target        { metadataRevision, snapshotFingerprint,
+                  transactionId, sidecarHash, deviceHash }
   applyOrder    [fileId, ...]  complete, unique, byte-ordered
   files         fileId -> { kind, path, precondition,
                             beforeImage { presence, contentHash, contentHex },
-                            targetContentHash, targetContentHex }
+                            targetContentHash, targetContentHex,
+                            acceptedRevision }
+  unchanged     fileId -> { path, contentHash, acceptedRevision }
 approvedHash  "sha256:<64 hex>" over stableStringify(approved)
-supersedes    { proposalId, journalHash } | null
 progress      MUTABLE — what this device believes it has done
   applied         [fileId, ...]
   recordsAccepted boolean
-  transactionId   null until updateIdentity accepts
+  transactionId   null until the bound transaction is proven accepted
 ```
 
 **Immutable inputs and mutable progress are separated on purpose.** `approved`
@@ -266,20 +285,26 @@ to cross-check that conclusion and to report a disagreement.
 string decoding sits between the journal and the file. They live only in the
 profile tree — device-local, never in the sidecar, never portable.
 
-**The journal slot is the transaction lock.** Creation writes with the
-precondition `absent`, or with the exact content hash of a journal whose `state`
-is `closed`. Every progress update writes with the exact content hash of the
-journal bytes just read. So an unfinished transaction for this owned
-graph/profile cannot be bypassed by a fresh proposal: the slot is occupied by an
-`open` journal and the create precondition fails. Discovery needs no listing —
-the name is fixed, and `read-journal` addresses it with no caller-supplied path.
+**The journal slot is the transaction lock, and it is never reused.** Creation
+writes with the precondition `absent` and nothing else. A journal that is
+present at all — `open`, `closed`, or unparseable — refuses a new proposal, at
+both the preview and the application phase, with `transaction-outstanding`,
+`journal-slot-occupied` or `journal-malformed`. Every progress update writes
+with the exact content hash of the journal bytes just read. Discovery needs no
+listing — the name is fixed, and `read-journal` addresses it with no
+caller-supplied path.
 
-**Retention.** A closed journal is retained in place until a later proposal
-supersedes it. Before that replacement the coordinator copies the superseded
-bytes into its local evidence file (outside Git, beside the checkout) and the
-new journal records `supersedes: { proposalId, journalHash }`, so the chain is
-auditable. The anchored journal is operational state for recovery; the evidence
-file is the archive. Nothing is deleted by this code.
+**Retention is unconditional, because the journal holds the only copy of its
+transaction's before-images.** This slice has no approved way to archive that
+copy durably first, so it does not overwrite it at all: a second experiment on
+the same owned run is refused, and another experiment uses a **fresh owned
+run**. That is a real limitation of this slice, not a property of the design —
+durable archival would need additional native command or path authority, which
+is not approved and is not implemented.
+
+A `closed` label is not proof of anything. Recovery re-proves a closed journal
+against the records before reporting it complete, and no code path treats the
+label as permission to overwrite.
 
 **Bounds, checked before any note write.** Every note's bytes must be valid
 UTF-8 that round-trips exactly through the string APIs the existing modules
@@ -357,19 +382,22 @@ hold, and any failure refuses with a typed code and mutates nothing:
    trees. A journal from another run, another graph directory, another profile,
    or a relocated copy is `journal-binding-mismatch`.
 5. `approved.graphId` equals the accepted sidecar's `graphId`.
-6. `approved.base` equals the accepted sidecar's `metadataRevision`,
-   `acceptedSnapshotFingerprint` and `acceptedTransactionId` — unless the
-   records have already advanced to `approved.target.metadataRevision`, which is
-   the legitimate "records accepted, journal not closed" case and is the only
-   accepted deviation.
+6. The records are either **provably at the bound target** or exactly at the
+   base. "Provably at the target" is not a revision label: it requires no
+   outstanding intent, no malformed record, `openGraph` returning `accepted`,
+   and the sidecar's `acceptedTransactionId`, `acceptedSnapshotFingerprint`,
+   sidecar bytes and device bytes all equalling what `approved.target` bound.
+   Anything else refuses.
 7. The plan is **recomputed** with `compareSnapshots` from the accepted sidecar
    and the journal's target state, and must reproduce `approved.planId` exactly.
    A journal naming a plan the modules do not reproduce is `journal-plan-mismatch`.
-8. `approved.previewFingerprint` is recomputed from the approved inputs and must
-   match. The identity transaction ID is deliberately **not** in `approved`: it
-   is derived by `updateIdentity` from the bytes on disk *after* application, so
-   it cannot be known when the journal is created. It is recorded in
-   `progress.transactionId` once the store accepts it.
+8. `approved.target` binds the exact intended transaction ID, projected snapshot
+   fingerprint, sidecar bytes hash and device bytes hash — all derived **before
+   the first write** from the projected post-application state, so they can be
+   proven afterwards rather than discovered from whatever the store published.
+   Before publishing, recovery re-derives them from the state it is about to
+   commit and refuses `transaction-mismatch` with nothing written if they
+   differ.
 
 **These checks establish consistency, not authenticity.** Every value compared
 here lives in the same profile tree the recovering process can write. An
@@ -412,20 +440,60 @@ disagreement is reported. A file the journal calls applied but disk calls
 pending is the expected outcome of an interruption between a note write and its
 progress update; it is resolved by disk, not by the journal.
 
+### Resolving the record store, not stepping around it
+
+Notes and records are two separate durable steps, so recovery must finish both.
+
+- **An outstanding identity transaction is never ignored.** If exactly one is
+  outstanding and it is `approved.target.transactionId`, recovery resolves it
+  through the record store's own contract — `PI.recover` with that exact
+  transaction — and requires `recovered`. Anything else (`refused`, an uncertain
+  classification, a post-recovery refusal) returns `unresolved`, leaves the
+  incoming journal **open**, and retains every record, intent, evidence file and
+  before-image. An uncertain state is never converted into success.
+- **An outstanding transaction that is not ours is refused**
+  (`unrelated-outstanding-transaction`) and left exactly as it was. More than one
+  outstanding transaction refuses as `multiple-outstanding-transactions`.
+- **Files pending while the records have moved on** is not a roll-forward
+  situation; it refuses for review.
+- **Nothing closes without proof.** After the record step, recovery reopens and
+  re-proves the full binding of item 6. Only then is the journal closed, and the
+  closed journal names the real transaction ID — never `null`.
+- **A `closed` journal is re-proved too.** If its records do not verify, recovery
+  refuses `closed-journal-not-verified` and retains everything, instead of
+  reporting a completed transaction.
+
 Recovery is **roll-forward only**. There is no automatic rollback. The
 before-images exist so that a restoration can be offered to the user later, as
 its own design and its own approval — not so that recovery can silently revert a
 file.
 
-### Identity is derived from disk, not from the proposal
+### Identity is derived from disk, and the complete intended state is revalidated
 
-After every file verifies, the new records are produced by calling the existing
-`updateIdentity` with the file list the recomputed plan projects.
-`snapshotFromDisk` re-reads every note through the helper and
-`enrollIdentityMetadata` verifies the supplied content against that snapshot, so
-a file whose bytes do not match is refused at that point rather than recorded.
-The proposal's bytes are the input to the write; the disk's bytes are the input
-to the record.
+Before the records are published, the **whole** intended state is revalidated
+from disk, not just the files in the transaction:
+
+- every transaction file must still hold its approved target bytes, or the
+  publication refuses `target-divergence`;
+- every file *outside* the transaction must still hold its accepted bytes, or it
+  refuses `unrelated-local-change` — an unrelated local edit is never silently
+  adopted into the accepted metadata by being reread and stamped with the
+  intended revision;
+- the resulting state must fingerprint as `approved.target.snapshotFingerprint`,
+  or it refuses `projection-mismatch`;
+- the transaction, sidecar bytes and device bytes these inputs produce must
+  equal what the approval bound, checked by re-deriving them **before**
+  publishing, so a mismatch refuses with nothing written.
+
+Only then is `updateIdentity` called, with the file list the recomputed plan
+projects and the revisions that plan assigned. `snapshotFromDisk` re-reads every
+note through the helper and `enrollIdentityMetadata` verifies the content
+against that snapshot.
+
+This narrows the window between validation and publication. It does **not**
+close it: a writer that does not honour the cooperative lock can still change a
+file between this revalidation and the store's own reads, and that race is
+unchanged by these checks.
 
 ## 5. OG reconciliation and watcher-echo handling
 
@@ -612,16 +680,17 @@ binds this experiment.
    `EXPECT` precondition exactly as every other record write does.
    **No new root, no new reachable location, no relaxed guard.**
 
-   There is deliberately **no** `clear-journal` command. A finished journal is
-   marked `closed` and retained; the next proposal replaces it with the closed
-   journal's exact hash as its precondition, recording `supersedes`. Nothing in
-   this code deletes a journal, which matches the approved "retained without
-   cleanup" policy and keeps the command surface at two.
+   There is deliberately **no** `clear-journal` command, and no journal is ever
+   replaced either. A finished journal is marked `closed` and retained forever;
+   a second proposal on the same owned run is refused rather than allowed to
+   overwrite it. Nothing in this code deletes or replaces a journal, which
+   matches the approved "retained without cleanup" policy and keeps the command
+   surface at two.
 
    The fixed name is also what makes [§4](#4-per-file-application-retained-before-images-interrupted-recovery)'s
    discovery rule work: a resumed coordinator reads one exact path and needs no
-   directory listing, and a fresh proposal cannot start while that slot holds an
-   `open` journal.
+   directory listing, and a fresh proposal cannot start while that slot holds a
+   journal of any kind.
 
    Two alternatives, both rejected and recorded: putting the journal in the graph
    tree under `logseq/.og-sync/` would put device-local operational state into
@@ -664,6 +733,8 @@ application involved — the pattern
 | 26 | Note bytes that are not valid UTF-8 or do not round-trip | `non-roundtrip-bytes`; refused before any write |
 | 27 | Oversized: one note over 256 KiB, and a journal over 2 MiB | refused before the first note write; `mutated: false` |
 | 28 | An `open` journal present, then an unrelated new proposal is submitted | refused `transaction-outstanding`; the new proposal never reaches a note write; the existing journal is unchanged |
+| 28a | A `closed` journal present, then a second proposal | refused `journal-slot-occupied` at BOTH preview and application; the retained journal is byte-identical afterwards; the second proposal's file is untouched |
+| 28b | An unparseable journal present, then a second proposal | refused `journal-malformed`; the bytes are retained exactly |
 | 29 | Three-file proposal where the **last** file is in a third state | recovery refuses `third-state` before writing the earlier still-pending file; **zero** further note writes; every before-image retained |
 | 30 | Interruption after a note write but before its progress update | recovery reads the target hash from disk, classifies `applied`, reports the disagreement with `progress.applied`, and does not rewrite the file |
 | 31 | Interruption after records accepted but before the journal closes | recovery accepts the advanced base, performs no note write, no second `updateIdentity`, and closes the journal |
@@ -768,3 +839,52 @@ only; none of them generalizes to personal data, a second host, or daily use.
 Enabling the OG bridge, any app-running application, any real transport, any
 personal-data enrollment and any daily use remain separate approvals that this
 document does not request.
+
+
+## Supervisor review corrections (2026-09-16)
+
+Three findings from the supervisor's review of the first implementation. Each
+was reproduced against the real modules and the real anchored helper before it
+was changed, and each now has focused regressions. What was actually verified,
+and what remains unverified, is recorded in RESULTS.md.
+
+### 1. Recovery could close an unresolved record-store transaction
+
+`recoverIncoming` treated `sidecar.metadataRevision === approved.target.metadataRevision`
+as acceptance. Because `openGraph` returns no sidecar when an intent is
+outstanding, the code fell back to the raw parsed record, ignored the
+`recovery-required` result, skipped record recovery entirely, and closed the
+journal reporting `recovered` with `transactionId: null` — while the store still
+held an outstanding intent and a device record at base.
+
+Corrected as described in "Recovery authority" and "Resolving the record store":
+the target binding is now an exact transaction, snapshot and record-bytes pair
+computed before the first write; an outstanding transaction is resolved through
+`PI.recover` or refused; and nothing closes without reopening and proving both
+records.
+
+### 2. Approval did not bind the revision that would be stored
+
+`acceptedRevision` travelled from the proposal into the stored metadata, and
+`proposalId` was never recomputed. Two proposals differing only in that field
+produced the **same** approval fingerprint, and the caller's arbitrary string was
+stored as the accepted revision.
+
+Corrected as described in §1: proposals cannot express a revision at all,
+revisions come from the executed plan, proposal identity is recomputed over the
+whole canonical body, and the permissive `planId` check — which could never throw
+for any string — is replaced by an exact shape.
+
+### 3. Previous journal retention was optional and not durable
+
+A second proposal overwrote a `closed` journal, destroying the only retained copy
+of the first transaction's before-images. Retention depended on an optional
+`supersededSink` callback whose only verified effect was appending to an
+in-memory array.
+
+Corrected by refusing journal-slot reuse outright, at both the preview and the
+application phase, for open, closed and unparseable journals alike. The callback
+is removed. **The limitation this leaves is explicit: one incoming transaction
+per owned run.** A second experiment uses a fresh owned run. Durable archival
+would need additional native command or path authority; that is not approved, not
+requested here, and not implemented.

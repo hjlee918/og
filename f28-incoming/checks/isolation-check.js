@@ -99,10 +99,8 @@ const proposal = IA.buildProposal({
   accepted: accepted.sidecar, snapshot: accepted.snapshot,
   originReplicaId: 'replica-iso-synthetic-b', targetMetadataRevision: 'metadata-2',
   changes: [
-    {fileId: 'file-english', path: englishPath, content: englishUpdate,
-     acceptedRevision: 'ar-english-incoming'},
-    {fileId: 'file-new-korean', path: newKoreanPath, content: newKoreanBody,
-     acceptedRevision: 'ar-new-korean-incoming'},
+    {fileId: 'file-english', path: englishPath, content: englishUpdate},
+    {fileId: 'file-new-korean', path: newKoreanPath, content: newKoreanBody},
   ],
 });
 
@@ -155,8 +153,82 @@ check('recovered-records-are-exact',
 
 check('journal-is-closed-and-retained',
   PI.readJournal(context).value.state === 'closed', {});
-check('a-second-recovery-has-nothing-to-do',
-  IA.recoverIncoming(context, {gate: CLOSED}).outcome === 'none', {});
+const closedVerify = IA.recoverIncoming(context, {gate: CLOSED});
+check('a-closed-journal-is-verified-not-trusted',
+  closedVerify.outcome === 'none' && closedVerify.code === 'journal-closed' &&
+  closedVerify.verified === true, closedVerify);
+
+const firstJournal = PI.readJournal(context);
+const after = PI.openGraph(context);
+const secondProposal = IA.buildProposal({
+  accepted: after.sidecar, snapshot: after.snapshot,
+  originReplicaId: 'replica-iso-synthetic-b', targetMetadataRevision: 'metadata-3',
+  changes: [{fileId: 'file-korean', path: koreanPath, content: `${koreanSeed}- 추가\n`}],
+});
+const refusedSecond = IA.planIncoming(context, secondProposal);
+check('the-retained-journal-slot-is-never-reused',
+  refusedSecond.outcome === 'refused' && refusedSecond.code === 'journal-slot-occupied' &&
+  refusedSecond.mutated === false &&
+  PI.readJournal(context).hash === firstJournal.hash &&
+  PI.readNote(context, koreanPath) === koreanSeed, refusedSecond);
+
+// ------------------- the record store's own transaction must be resolved
+const second = {helper, runName, ownerToken,
+  graphDirectory: 'graph-devfail', profileDirectory: 'identity-state-devfail'};
+PI.initializeOwnedRun(second);
+PI.putNoteFixture(second, englishPath, englishSeed);
+PI.putNoteFixture(second, koreanPath, koreanSeed);
+check('second-scratch-graph-enrolled', PI.enrollGraph(second, {
+  graphId: `f28-incoming-iso-2-${crypto.randomBytes(4).toString('hex')}`,
+  replicaId: 'replica-iso-local-2', deviceId: 'device-iso-local-2',
+  metadataRevision: 'metadata-1',
+  files: [
+    {fileId: 'file-english', path: englishPath, content: englishSeed, acceptedRevision: 'ar-english'},
+    {fileId: 'file-korean', path: koreanPath, content: koreanSeed, acceptedRevision: 'ar-korean'},
+  ],
+}).outcome === 'accepted', {});
+
+const opened2 = PI.openGraph(second);
+const proposal2 = IA.buildProposal({
+  accepted: opened2.sidecar, snapshot: opened2.snapshot,
+  originReplicaId: 'replica-iso-synthetic-b', targetMetadataRevision: 'metadata-2',
+  changes: [{fileId: 'file-english', path: englishPath, content: englishUpdate}],
+});
+const preview2 = IA.planIncoming(second, proposal2);
+const bound = preview2.preview.target;
+const devFail = IA.applyIncoming(second, {
+  proposal: proposal2, approve: preview2.preview.previewFingerprint, gate: CLOSED,
+  recordFailure: {step: 'device', point: 'after-stage'},
+});
+const mid = PI.readRecords(second);
+check('graph-first-device-step-failure-leaves-the-transaction-outstanding',
+  devFail.outcome === 'interrupted' && devFail.code === 'records-uncertain' &&
+  mid.sidecar.metadataRevision === 'metadata-2' &&
+  mid.device.metadataRevision === 'metadata-1' &&
+  mid.outstandingIntents.length === 1 &&
+  mid.outstandingIntents[0] === bound.transactionId &&
+  PI.readJournal(second).value.state === 'open',
+  {outcome: devFail.outcome, code: devFail.code,
+   sidecar: mid.sidecar.metadataRevision, device: mid.device.metadataRevision,
+   intents: mid.outstandingIntents.length});
+
+const resolved = IA.recoverIncoming(second, {gate: CLOSED});
+check('recovery-resolves-it-through-the-record-store-contract',
+  resolved.outcome === 'recovered' &&
+  resolved.resolution === 'store-recovered:graph-applied' &&
+  resolved.transactionId === bound.transactionId &&
+  resolved.wrote.length === 0, resolved);
+
+const settled = PI.openGraph(second);
+check('both-records-are-proven-accepted-before-the-journal-closes',
+  PI.readRecords(second).outstandingIntents.length === 0 &&
+  settled.outcome === 'accepted' &&
+  settled.sidecar.acceptedTransactionId === bound.transactionId &&
+  settled.sidecar.acceptedSnapshotFingerprint === bound.snapshotFingerprint &&
+  settled.device.acceptedTransactionId === bound.transactionId &&
+  PI.readJournal(second).value.state === 'closed' &&
+  PI.readJournal(second).value.progress.transactionId === bound.transactionId,
+  {transactionId: settled.sidecar?.acceptedTransactionId});
 
 console.log(`\nIsolation check passed: ${passed} checks on scratch run ${runName}`);
 console.log(`Retained scratch run: ${path.join(PI.PROFILE_ROOT, runName, 'identity-state')}`);

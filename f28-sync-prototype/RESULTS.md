@@ -1825,3 +1825,175 @@ One host, one fresh synthetic graph, one coherent batch, Intel only.
 - Nothing is enabled in any normal or existing package, no personal graph,
   backup, export or profile was read or altered, and this is still not usable
   cross-device synchronization.
+
+## Incoming change application — supervisor review corrections (2026-09-16)
+
+Three findings from the supervisor's review of the slice recorded above, plus
+the related consistency check. The slice is **not accepted**; this records the
+correction for review.
+
+### How each finding was established
+
+Three distinct kinds of evidence are kept separate here.
+
+- **Supervisor memory reproductions.** The supervisor reproduced findings 1 and
+  2 in memory using the actual incoming module, and reported the exact
+  observations. Those reports are restated in the task, not reproduced here.
+- **This batch's filesystem reproductions.** Before changing any behaviour, all
+  three findings were reproduced against the **real anchored helper** and the
+  real modules on fresh owned synthetic cases. Observed, verbatim:
+  - finding 1: sidecar at `metadata-2`, device record at `metadata-1`, one
+    outstanding intent, `openGraph` → `recovery-required`; `recoverIncoming`
+    returned `{outcome: recovered, recordsAlreadyAccepted: true,
+    transactionId: null}`, wrote the journal to `closed`, and left the intent
+    outstanding — `openGraph` still `recovery-required` afterwards;
+  - finding 2: two proposals differing only in `acceptedRevision`, sharing a
+    `proposalId`, both previewed successfully with the **same** approval
+    fingerprint; applying the second under the first's fingerprint stored
+    `arbitrary-B` as the accepted revision. `validateProposal` accepted
+    `planId: 'not-a-plan-id-at-all'`;
+  - finding 3: a second proposal overwrote the `closed` journal with no sink
+    supplied; the first journal's bytes, and with them its before-images, were
+    gone.
+- **This batch's live application run.** One focused rerun, reported below.
+
+### What changed
+
+**Finding 1 — recovery authority over the record store.**
+`persistent-identity.js` gained two extractions, both behaviour-preserving for
+existing callers (51/51 unchanged): `snapshotFromFiles`, the pure half of
+`snapshotFromDisk`, and `deriveUpdate`, the deterministic derivation an update
+publishes. The incoming applier uses them at plan time to compute, **before the
+first write**, the exact transaction ID, projected snapshot fingerprint, sidecar
+bytes hash and device bytes hash the transaction intends, and binds all four into
+the approval and the journal's immutable half.
+
+`recoverIncoming` now: refuses `multiple-outstanding-transactions`; refuses
+`unrelated-outstanding-transaction` for an intent that is not the bound one and
+leaves it untouched; resolves the bound one through the store's own
+`recover(context, {transactionId})` and requires `recovered`, returning
+`unresolved` with the journal left **open** for any other store outcome; refuses
+to roll forward when files are pending while the records have moved on; and
+reopens and proves the complete binding — no outstanding intent, no malformed
+record, `openGraph` accepted, and transaction, snapshot, sidecar bytes and device
+bytes all equal to what was bound — before closing. A `closed` journal is
+re-proved on every recovery and refuses `closed-journal-not-verified` if its
+records do not verify.
+
+**Finding 2 — approval binds what is stored.** `acceptedRevision` was removed
+from the proposal schema entirely; the stored revision is the
+`compare-revision-<32 hex>` the executed plan assigns, and unchanged files keep
+the sidecar's existing revision. `proposalId` is recomputed over the whole
+canonical body on every read (`proposal-identity-mismatch`). The `planId` check
+that could never throw for any string was replaced by `plan-[0-9a-f]{32}`, and
+every identifier, revision label and fingerprint is type- and shape-checked.
+
+**Finding 3 — the journal slot is never reused.** A journal that is present at
+all — open, closed or unparseable — refuses a new proposal at both the preview
+and the application phase. The `supersededSink` callback is removed. The
+limitation is explicit and documented: **one incoming transaction per owned
+run**; another experiment uses a fresh owned run. Durable archival would need
+additional native command or path authority, which was not requested.
+
+**Related consistency check.** Before publishing, the complete intended state is
+revalidated from disk: transaction files must still hold their approved target
+(`target-divergence`), files outside the transaction must still hold their
+accepted bytes (`unrelated-local-change`), the result must fingerprint as the
+approved projection (`projection-mismatch`), and the transaction and record bytes
+these inputs produce must equal the binding — re-derived **before** publishing,
+so a mismatch refuses with nothing written (`transaction-mismatch`). The
+documented external-writer race is preserved and explicitly not claimed to be
+closed.
+
+### Tests actually run
+
+Real anchored helper, real modules, fresh owned synthetic cases, Intel
+(x86_64, macOS 14.8.3).
+
+| Suite | Result |
+|---|---|
+| `tests/incoming-application.test.js` | **34/34** (24 before, 10 added) |
+| `f28-incoming/checks/isolation-check.js` | **22/22** (17 before, 5 added) |
+| `tests/persistent-identity.test.js` | 51/51 |
+| pure: core, planner, executor, identity-capture, snapshot-comparison, read-response | 75/75 |
+| `tests/persistence.test.js` | 8/8 |
+| `tests/filesystem-application.test.js` | 23/23 |
+| `tests/compare-workflow.test.js` | 7/7 |
+| `tests/read-selected.test.js` | 5/5 |
+| `tests/stable-working-tree.test.js` | 12/12 |
+| `f28-identity-capture/checks/isolation-check.js` | 22/22 |
+
+Added regressions, one per finding boundary: a graph-first device-step failure
+after the sidecar advances and before the device record completes, resolved
+through the store contract and only then closed; an outstanding transaction that
+is not ours, refused and left untouched; a journal labelled closed whose records
+moved on, refused; the stored revision proven equal to the plan's
+compare-revision; four changed proposal bodies keeping their identity, refused;
+eight strict-type and plan-identity refusals; a retained journal refused at both
+phases with byte-identical preservation; an unparseable retained journal refused;
+an unrelated local change classified rather than adopted; a transaction file
+diverged from its target classified as `target-divergence`; and a substituted
+recovery target — transaction, sidecar hash or device hash — refused **before**
+anything is published, with the records still at base and the journal open.
+
+Three pre-existing tests began failing when proposal identity became
+recomputed, because they mutated a proposal body without re-sealing it. They now
+re-seal, so they still exercise their original paths; the identity check itself
+is exercised separately by *not* re-sealing.
+
+### Live rerun
+
+The tooling changed materially, so one focused rerun was run. **39/39 checks,
+passed on the first attempt** (36 before, 3 added). No failed attempt preceded
+it, and the earlier run's evidence and owned run are preserved untouched.
+
+- owned run `f28-incoming-application-2026-09-16T00-07-00-820Z-0d3db1`;
+- the same accepted IdentityCapture package, **reused unmodified and not
+  rebuilt**: manifest `2026-09-15T22-55-52-952Z-eb60e451`, clean commit
+  `e62dbbdadd157b368e3a8c03a3fa78437a079c4c`, bridge `observation-only`;
+- helper `sha256:0117ca48ba468e15a55091fa76d9fa6a07360b19ddda60d9bccc2ca8e94ff959`;
+- evidence
+  `development/evidence/f28-incoming-application-2026-09-16T00-07-00-820Z.json`
+  (local, never a Git input); the previous run's evidence file is retained.
+
+The three added live checks: the published records are **exactly** the ones the
+approval bound (transaction `ab48a2b8…`, snapshot `sha256:d908aecc…`, sidecar and
+device byte hashes, zero outstanding intents); the stored revisions come from the
+plan, not the proposal (`file-english` and `file-new-korean` at
+`compare-revision-…`, the untouched `file-korean` keeping
+`accepted-revision-enrollment-korean`); and a retained journal is not reused —
+a second proposal refused `journal-slot-occupied` with the journal byte-identical
+and its target file untouched. Recovery now verifies the closed journal rather
+than trusting its label.
+
+Closure was confirmed with a directory-existence check on the exact recorded
+owned paths and a process check on the exact packaged executable name: zero
+processes. Neither shared root was listed. One unrelated experimental app
+(`Logseq-OG-F28-OriginExp`) was running throughout and was not touched.
+
+### What is verified, and what is not
+
+Verified by the regressions above: the graph-first device-step boundary; an
+unrelated outstanding transaction; a falsely-closed journal; a substituted
+binding refused before publication; drift inside and outside the transaction;
+proposal identity and strict typing; journal-slot refusal in all three states.
+
+**Not verified, and not claimed:**
+
+- **Not all recovery cases are covered.** The uncertain-clear branch, a
+  `profile-first` ordering failure, an injected failure at the intent step, a
+  failure during recovery's own roll-forward write, and a store `recover`
+  returning `post-recovery-refusal` are reachable code paths with no regression
+  of their own. They are handled by the same typed refusals, but that is
+  reasoning, not evidence.
+- Injected failures establish recovery classification, **not** power-loss
+  durability. No power-loss and no simultaneous-host test was run.
+- The journal's validations establish **consistency, not authenticity**. A writer
+  who can reach the owned profile directory can produce a self-consistent
+  journal; nothing detects that.
+- The revalidation before publication narrows but does **not** close the race
+  against writers outside the cooperative lock. Recheck-then-rename is still not
+  a compare-and-swap.
+- No whole-graph atomicity, no cross-process serialization, no transport, no
+  second device. Creates and updates only.
+- One incoming transaction per owned run — the retention limitation above.

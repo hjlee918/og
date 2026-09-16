@@ -96,13 +96,22 @@ function standardProposal(opened, changes) {
     targetMetadataRevision: 'metadata-2',
     changes: changes || [
       { fileId: 'file-english', path: 'pages/Incoming Anchor.md',
-        content: '- incoming anchor page\n- edited on the synthetic second replica\n',
-        acceptedRevision: 'accepted-revision-incoming-english' },
+        content: '- incoming anchor page\n- edited on the synthetic second replica\n' },
       { fileId: 'file-new-korean', path: 'pages/수신 새 문서.md',
-        content: '- 두 번째 복제본이 새로 만든 문서입니다\n',
-        acceptedRevision: 'accepted-revision-incoming-new-korean' },
+        content: '- 두 번째 복제본이 새로 만든 문서입니다\n' },
     ],
   });
+}
+
+/*
+ * A proposal's identity is a digest over its own body, so a test that changes
+ * the body must re-seal it -- otherwise every such case would refuse as
+ * `proposal-identity-mismatch` before reaching the behaviour it is about. The
+ * identity check itself is exercised separately, by NOT re-sealing.
+ */
+function reseal(proposal) {
+  const body = IA.proposalBody(proposal);
+  return { ...body, proposalId: sha256(stableStringify(body)) };
 }
 
 function applyApproved(context, proposal, extra = {}) {
@@ -180,13 +189,13 @@ test('a proposal against any other accepted base is refused, never rebased', () 
   const { context, opened } = enrolled('base');
   for (const mutate of [
     (p) => { p.base.metadataRevision = 'metadata-99'; },
-    (p) => { p.base.snapshotFingerprint = 'a'.repeat(64); },
+    (p) => { p.base.snapshotFingerprint = `sha256:${'a'.repeat(64)}`; },
     (p) => { p.base.acceptedTransactionId = 'b'.repeat(64); },
     (p) => { p.graphId = 'graph-somewhere-else'; },
   ]) {
     const proposal = standardProposal(opened);
     mutate(proposal);
-    const result = IA.planIncoming(context, proposal);
+    const result = IA.planIncoming(context, reseal(proposal));
     assert.equal(result.outcome, 'refused');
     assert.equal(result.code, 'unknown-base');
     assert.equal(result.mutated, false);
@@ -198,7 +207,7 @@ test('a proposal carrying a plan the modules do not reproduce is refused', () =>
   const { context, opened } = enrolled('plan');
   const proposal = standardProposal(opened);
   proposal.planId = 'plan-0123456789abcdef0123456789abcdef';
-  const result = IA.planIncoming(context, proposal);
+  const result = IA.planIncoming(context, reseal(proposal));
   assert.equal(result.code, 'plan-mismatch');
   assert.equal(result.mutated, false);
 });
@@ -307,7 +316,7 @@ test('every disallowed target path shape is refused before the helper is called'
       (error) => error.code === 'invalid-path', `${shape} must be refused`);
     const proposal = standardProposal(opened);
     proposal.files[1].path = shape;
-    const result = IA.planIncoming(context, proposal);
+    const result = IA.planIncoming(context, reseal(proposal));
     assert.equal(result.outcome, 'refused', `${shape} reached application`);
     assert.equal(result.mutated, false);
   }
@@ -323,7 +332,7 @@ test('a target whose parent no accepted file proves is refused', () => {
     accepted: opened.sidecar, snapshot: opened.snapshot,
     originReplicaId: 'replica-b', targetMetadataRevision: 'metadata-2',
     changes: [{ fileId: 'file-new-journal', path: 'journals/2026_09_16.md',
-      content: '- 새 일지\n', acceptedRevision: 'accepted-revision-new-journal' }],
+      content: '- 새 일지\n' }],
   });
   const result = IA.planIncoming(context, proposal);
   assert.equal(result.code, 'unproven-parent-directory');
@@ -364,7 +373,7 @@ test('an oversized note refuses before any note write', () => {
   const { context, opened } = enrolled('oversize');
   const proposal = standardProposal(opened);
   proposal.files[1].targetContentHex = Buffer.from('x'.repeat(IA.MAX_NOTE_BYTES + 1)).toString('hex');
-  const result = IA.planIncoming(context, proposal);
+  const result = IA.planIncoming(context, reseal(proposal));
   assert.equal(result.code, 'note-too-large');
   assert.equal(result.mutated, false);
   assert.equal(PI.readNote(context, 'pages/수신 새 문서.md'), null);
@@ -384,8 +393,7 @@ test('an unfinished transaction blocks an unrelated new proposal', () => {
     accepted: opened.sidecar, snapshot: opened.snapshot,
     originReplicaId: 'replica-c', targetMetadataRevision: 'metadata-9',
     changes: [{ fileId: 'file-journal', path: 'journals/2026_09_15.md',
-      content: '- a completely different proposal\n',
-      acceptedRevision: 'accepted-revision-other' }],
+      content: '- a completely different proposal\n' }],
   });
   const blocked = IA.planIncoming(context, unrelated);
   assert.equal(blocked.code, 'transaction-outstanding');
@@ -538,11 +546,11 @@ test('a third state anywhere in the transaction prevents ALL further note writes
     originReplicaId: 'replica-b', targetMetadataRevision: 'metadata-2',
     changes: [
       { fileId: 'file-english', path: 'pages/Incoming Anchor.md',
-        content: '- first of three\n', acceptedRevision: 'ar-1' },
+        content: '- first of three\n' },
       { fileId: 'file-korean', path: 'pages/수신 기준 문서.md',
-        content: '- 세 개 중 두 번째\n', acceptedRevision: 'ar-2' },
+        content: '- 세 개 중 두 번째\n' },
       { fileId: 'file-journal', path: 'journals/2026_09_15.md',
-        content: '- last of three\n', acceptedRevision: 'ar-3' },
+        content: '- last of three\n' },
     ],
   });
   const run = applyApproved(context, proposal, { failAt: 'before-file:file-english' });
@@ -599,26 +607,55 @@ test('interruption after the records are accepted closes without a second write'
   assert.equal(journalValue(context).value.state, 'closed');
 });
 
-test('a closed journal is superseded by the next proposal under its exact hash', () => {
-  const { context, opened } = enrolled('supersede');
+test('a retained journal is never overwritten and a second proposal is refused', () => {
+  const { context, opened } = enrolled('slot');
   assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
-  const closed = PI.readJournal(context);
-  assert.equal(closed.value.state, 'closed');
+  const first = PI.readJournal(context);
+  assert.equal(first.value.state, 'closed');
 
   const next = PI.openGraph(context);
   const second = IA.buildProposal({
     accepted: next.sidecar, snapshot: next.snapshot,
     originReplicaId: 'replica-b', targetMetadataRevision: 'metadata-3',
     changes: [{ fileId: 'file-korean', path: 'pages/수신 기준 문서.md',
-      content: '- 두 번째 수신 적용\n', acceptedRevision: 'ar-second' }],
+      content: '- 두 번째 수신 적용\n' }],
   });
-  const retained = [];
-  const result = applyApproved(context, second, { supersededSink: (item) => retained.push(item) });
-  assert.equal(result.outcome, 'applied');
-  assert.equal(retained.length, 1, 'the superseded journal bytes were handed to the archive sink');
-  assert.equal(retained[0].hash, closed.hash);
-  assert.equal(journalValue(context).value.supersedes.journalHash, closed.hash);
-  assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-3');
+  // Refused at BOTH phases, so no approvable preview is ever produced for work
+  // that application will refuse.
+  const preview = IA.planIncoming(context, second);
+  assert.equal(preview.outcome, 'refused');
+  assert.equal(preview.code, 'journal-slot-occupied');
+  const applied = IA.applyIncoming(context, {
+    proposal: second, approve: 'sha256:' + '0'.repeat(64), gate: CLOSED,
+  });
+  assert.equal(applied.outcome, 'refused');
+  assert.equal(applied.code, 'journal-slot-occupied');
+  assert.equal(applied.mutated, false);
+
+  assert.equal(PI.readJournal(context).hash, first.hash,
+    'the retained journal is preserved byte-for-byte, before-images included');
+  assert.equal(PI.readNote(context, 'pages/수신 기준 문서.md'), NOTES[1].content,
+    'the refused proposal never touched its file');
+  assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
+});
+
+test('a retained journal that does not parse also refuses a new proposal', () => {
+  const { context, opened } = enrolled('slot-malformed');
+  assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
+  const before = PI.readJournal(context);
+  PI.writeJournal(context, Buffer.from('{ not json\n', 'utf8'),
+    before.hash.replace(/^sha256:/, ''));
+  const next = PI.openGraph(context);
+  const second = IA.buildProposal({
+    accepted: next.sidecar, snapshot: next.snapshot,
+    originReplicaId: 'replica-b', targetMetadataRevision: 'metadata-3',
+    changes: [{ fileId: 'file-korean', path: 'pages/수신 기준 문서.md', content: '- 또 다른 변경\n' }],
+  });
+  const result = IA.planIncoming(context, second);
+  assert.equal(result.code, 'journal-malformed');
+  assert.equal(result.mutated, false);
+  assert.equal(PI.readJournal(context).bytes.toString('utf8'), '{ not json\n',
+    'the unparseable journal is retained exactly');
 });
 
 // ====================================================== app-closed gate
@@ -667,4 +704,276 @@ test('the incoming path writes only inside the owned run', () => {
   assert.ok(fs.existsSync(profilePath(context, 'incoming-journal.json')),
     'the journal is at its fixed name in the owned profile directory');
   assert.ok(fs.existsSync(graphPath(context, 'logseq/.og-sync/identity-v1.json')));
+});
+
+// ============================================ supervisor findings, corrected
+
+/*
+ * Finding 1. Recovery used to treat a target metadata revision as acceptance.
+ * It ignored an outstanding identity transaction, skipped record recovery
+ * entirely, and closed the incoming journal as recovered with a null
+ * transaction ID. These are the boundaries that must now hold.
+ */
+test('a device-step failure after the sidecar advances is resolved, not declared complete', () => {
+  const { context, opened } = enrolled('device-step');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  assert.equal(preview.outcome, 'preview');
+  const bound = preview.preview.target;
+  assert.match(bound.transactionId, /^[0-9a-f]{64}$/);
+  assert.match(bound.snapshotFingerprint, /^sha256:[0-9a-f]{64}$/);
+
+  // graph-first publication fails after the sidecar lands, before the device record
+  const run = IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    recordFailure: { step: 'device', point: 'after-stage' },
+  });
+  assert.equal(run.outcome, 'interrupted');
+  assert.equal(run.code, 'records-uncertain');
+
+  const mid = PI.readRecords(context);
+  assert.equal(mid.sidecar.metadataRevision, 'metadata-2', 'the sidecar advanced');
+  assert.equal(mid.device.metadataRevision, 'metadata-1', 'the device record did not');
+  assert.equal(mid.outstandingIntents.length, 1);
+  assert.equal(mid.outstandingIntents[0], bound.transactionId,
+    'the outstanding transaction is the one the approval bound');
+  assert.equal(PI.openGraph(context).outcome, 'recovery-required');
+  assert.equal(journalValue(context).value.state, 'open',
+    'the incoming journal is NOT closed while the record transaction is unresolved');
+
+  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
+  assert.equal(recovered.resolution, 'store-recovered:graph-applied',
+    'the record store resolved it through its own recovery contract');
+  assert.deepEqual(recovered.wrote, [], 'no note was rewritten');
+  assert.equal(recovered.transactionId, bound.transactionId);
+
+  assert.equal(PI.readRecords(context).outstandingIntents.length, 0);
+  const accepted = PI.openGraph(context);
+  assert.equal(accepted.outcome, 'accepted');
+  assert.equal(accepted.sidecar.acceptedTransactionId, bound.transactionId);
+  assert.equal(accepted.sidecar.acceptedSnapshotFingerprint, bound.snapshotFingerprint);
+  assert.equal(journalValue(context).value.state, 'closed');
+  assert.equal(journalValue(context).value.progress.transactionId, bound.transactionId,
+    'the closed journal names the real transaction, not null');
+});
+
+test('an outstanding transaction that is not ours is never resolved or ignored', () => {
+  const { context, opened } = enrolled('foreign-tx');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const run = IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    failAt: 'after-file:file-english',
+  });
+  assert.equal(run.outcome, 'interrupted');
+
+  // an unrelated identity transaction becomes outstanding
+  const files = Object.entries(PI.readRecords(context).sidecar.identity.files)
+    .map(([fileId, entry]) => ({ fileId, path: entry.path,
+      content: PI.readNote(context, entry.path), acceptedRevision: entry.acceptedRevision }));
+  const foreign = PI.updateIdentity(context, {
+    expectedMetadataRevision: 'metadata-1', metadataRevision: 'metadata-77',
+    files, tombstones: [],
+  }, { ordering: 'graph-first', failure: { step: 'device', point: 'after-stage' } });
+  assert.equal(foreign.outcome, 'uncertain-write');
+
+  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'unrelated-outstanding-transaction');
+  assert.equal(result.mutated, false);
+  assert.equal(PI.readRecords(context).outstandingIntents.length, 1,
+    'the foreign transaction is left exactly as it was');
+  assert.equal(journalValue(context).value.state, 'open');
+});
+
+test('a journal labelled closed whose records moved on is not trusted', () => {
+  const { context, opened } = enrolled('false-closed');
+  assert.equal(applyApproved(context, standardProposal(opened)).outcome, 'applied');
+  assert.equal(journalValue(context).value.state, 'closed');
+  assert.equal(IA.recoverIncoming(context, { gate: CLOSED }).code, 'journal-closed',
+    'a genuinely complete transaction verifies');
+
+  const now = PI.openGraph(context);
+  const files = Object.entries(now.sidecar.identity.files)
+    .map(([fileId, entry]) => ({ fileId, path: entry.path,
+      content: PI.readNote(context, entry.path), acceptedRevision: entry.acceptedRevision }));
+  assert.equal(PI.updateIdentity(context, {
+    expectedMetadataRevision: 'metadata-2', metadataRevision: 'metadata-9', files, tombstones: [],
+  }).outcome, 'accepted');
+
+  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'closed-journal-not-verified');
+  assert.equal(result.mutated, false);
+});
+
+/*
+ * Finding 2. The approval used to carry whatever revision the proposal named,
+ * and the proposal's own identity was never recomputed, so a changed body kept
+ * a valid-looking ID and produced an identical approval fingerprint.
+ */
+test('the stored revision is derived from the plan, not chosen by the proposal', () => {
+  const { context, opened } = enrolled('derived-revision');
+  const proposal = standardProposal(opened);
+  assert.ok(!('acceptedRevision' in proposal.files[0]),
+    'a proposal cannot express a revision at all');
+
+  const preview = IA.planIncoming(context, proposal);
+  for (const file of preview.preview.files) {
+    assert.match(file.acceptedRevision, /^compare-revision-[0-9a-f]{32}$/,
+      'the revision is the deterministic compare-revision');
+  }
+  assert.equal(applyApproved(context, proposal).outcome, 'applied');
+  const stored = PI.openGraph(context).sidecar.identity.files;
+  for (const file of preview.preview.files) {
+    assert.equal(stored[file.fileId].acceptedRevision, file.acceptedRevision,
+      'exactly the revision the approval bound was stored');
+  }
+});
+
+test('a changed proposal body keeping its identity is refused', () => {
+  const { context, opened } = enrolled('proposal-identity');
+  const proposal = standardProposal(opened);
+  for (const mutate of [
+    (p) => { p.files[0].targetContentHex = Buffer.from('- forged\n').toString('hex'); },
+    (p) => { p.target.metadataRevision = 'metadata-88'; },
+    (p) => { p.originReplicaId = 'replica-somewhere-else'; },
+    (p) => { p.files[0].path = 'pages/수신 기준 문서.md'; },
+  ]) {
+    const forged = JSON.parse(JSON.stringify(proposal));
+    mutate(forged);
+    const result = IA.planIncoming(context, forged);
+    assert.equal(result.outcome, 'refused');
+    assert.equal(result.code, 'proposal-identity-mismatch', result.reason);
+    assert.equal(result.mutated, false);
+  }
+  assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content);
+});
+
+test('proposal field types and the plan identity are validated strictly', () => {
+  const { context, opened } = enrolled('strict-types');
+  const base = standardProposal(opened);
+  const reid = (p) => { delete p.proposalId; return p; };
+  for (const [label, mutate] of [
+    ['bad planId', (p) => { p.planId = 'not-a-plan-id'; }],
+    ['planId wrong length', (p) => { p.planId = 'plan-abc'; }],
+    ['empty graphId', (p) => { p.graphId = ''; }],
+    ['empty fileId', (p) => { p.files[0].fileId = ''; }],
+    ['non-string target revision', (p) => { p.target.metadataRevision = 7; }],
+    ['bad base fingerprint', (p) => { p.base.snapshotFingerprint = 'nope'; }],
+    ['bad base transaction', (p) => { p.base.acceptedTransactionId = 'nope'; }],
+    ['extra file key', (p) => { p.files[0].acceptedRevision = 'chosen-by-caller'; }],
+  ]) {
+    const forged = reid(JSON.parse(JSON.stringify(base)));
+    mutate(forged);
+    forged.proposalId = base.proposalId;
+    const result = IA.planIncoming(context, forged);
+    assert.equal(result.outcome, 'refused', label);
+    assert.ok(['malformed-record', 'proposal-identity-mismatch'].includes(result.code),
+      `${label}: ${result.code}`);
+  }
+});
+
+/*
+ * The related consistency check: acceptRecords used to reread current bytes and
+ * stamp the intended revision on them, whichever bytes those happened to be.
+ */
+test('drift is classified honestly and never silently adopted', () => {
+  const { context, opened } = enrolled('drift');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const run = IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    failAt: 'after-file:file-new-korean',
+  });
+  assert.equal(run.outcome, 'interrupted');
+
+  // a file OUTSIDE the transaction changes before the record step is retried
+  PI.putNoteFixture(context, 'pages/수신 기준 문서.md', '- 사용자가 직접 고친 내용\n');
+  const verdict = IA.revalidateIntendedState(context, journalValue(context).value.approved);
+  assert.equal(verdict.code, 'unrelated-local-change');
+  assert.equal(verdict.detail.drift[0].fileId, 'file-korean');
+
+  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.notEqual(recovered.outcome, 'recovered',
+    'an unrelated local change is never adopted into the accepted metadata');
+  assert.equal(PI.readNote(context, 'pages/수신 기준 문서.md'), '- 사용자가 직접 고친 내용\n',
+    'the local edit is preserved exactly');
+  assert.equal(journalValue(context).value.state, 'open');
+});
+
+test('a transaction file that no longer holds its approved target is target-divergence', () => {
+  const { context, opened } = enrolled('divergence');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const run = IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    failAt: 'after-file:file-new-korean',
+  });
+  assert.equal(run.outcome, 'interrupted');
+  const approved = journalValue(context).value.approved;
+  const applied = approved.applyOrder.find((id) => run.applied.includes(id));
+  PI.putNoteFixture(context, approved.files[applied].path, '- a third value\n');
+  const verdict = IA.revalidateIntendedState(context, approved);
+  assert.equal(verdict.code, 'target-divergence');
+  assert.equal(verdict.detail.drift[0].fileId, applied);
+});
+
+test('the journal binds the exact intended transaction, snapshot and record bytes', () => {
+  const { context, opened } = enrolled('bound-target');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const run = IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    failAt: 'before-file:file-english',
+  });
+  assert.equal(run.outcome, 'interrupted');
+  assert.deepEqual(run.applied, []);
+  const target = journalValue(context).value.approved.target;
+  assert.deepEqual(Object.keys(target).sort(),
+    ['deviceHash', 'metadataRevision', 'sidecarHash', 'snapshotFingerprint', 'transactionId']);
+  assert.equal(target.transactionId, preview.preview.target.transactionId);
+
+  const pristine = PI.readJournal(context);
+  const restore = () => PI.writeJournal(context, pristine.bytes,
+    PI.readJournal(context).hash.replace(/^sha256:/, ''));
+
+  // A substituted recovery target must be refused BEFORE anything is published.
+  for (const [label, mutate] of [
+    ['transactionId', (v) => { v.approved.target.transactionId = 'f'.repeat(64); }],
+    ['sidecarHash', (v) => { v.approved.target.sidecarHash = `sha256:${'d'.repeat(64)}`; }],
+    ['deviceHash', (v) => { v.approved.target.deviceHash = `sha256:${'c'.repeat(64)}`; }],
+  ]) {
+    rewriteJournal(context, (v) => {
+      mutate(v);
+      v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
+    });
+    const result = IA.recoverIncoming(context, { gate: CLOSED });
+    assert.equal(result.outcome, 'refused', label);
+    assert.equal(result.code, 'records-refused', `${label}: ${result.code}`);
+    assert.equal(result.storeCode, 'transaction-mismatch', label);
+    assert.equal(PI.readRecords(context).sidecar.metadataRevision, 'metadata-1',
+      `${label}: nothing was published`);
+    assert.equal(PI.readRecords(context).outstandingIntents.length, 0, label);
+    assert.equal(journalValue(context).value.state, 'open', label);
+    restore();
+  }
+
+  // A substituted projected snapshot is refused at the state revalidation.
+  rewriteJournal(context, (v) => {
+    v.approved.target.snapshotFingerprint = `sha256:${'e'.repeat(64)}`;
+    v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
+  });
+  const snapshotResult = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(snapshotResult.outcome, 'refused');
+  assert.equal(snapshotResult.storeCode, 'projection-mismatch', snapshotResult.reason);
+  assert.equal(PI.readRecords(context).sidecar.metadataRevision, 'metadata-1');
+  restore();
+
+  // The pristine journal still completes normally.
+  const good = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(good.outcome, 'recovered', good.reason || '');
+  assert.equal(good.transactionId, target.transactionId);
+  assert.equal(PI.openGraph(context).sidecar.acceptedTransactionId, target.transactionId);
 });

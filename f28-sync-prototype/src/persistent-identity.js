@@ -370,15 +370,21 @@ function readRecords(context, transactionId = NO_TRANSACTION) {
  * The caller names the files; the adapter never discovers them, and the
  * content it validates is what the graph really contains.
  */
-function snapshotFromDisk(context, graphId, files) {
+/*
+ * The pure half of snapshotFromDisk: the caller supplies the exact content. The
+ * incoming applier uses this to compute, BEFORE any write, the exact snapshot
+ * that snapshotFromDisk will produce afterwards, so the intended transaction can
+ * be bound to the approval instead of discovered after the fact.
+ */
+function snapshotFromFiles(graphId, files) {
   let state = createState(graphId);
   const sorted = [...files].sort((left, right) =>
     Buffer.from(left.fileId).compare(Buffer.from(right.fileId)));
   const materialized = [];
   for (const [index, file] of sorted.entries()) {
-    const content = readNote(context, file.path);
-    if (content === null) {
-      throw new PersistentIdentityError('missing-note', `${file.path} is absent from the graph`);
+    const content = file.content;
+    if (typeof content !== 'string') {
+      throw new PersistentIdentityError('missing-note', `${file.path} has no content`);
     }
     state = applyOperation(state, {
       operationId: `disk-op-${index}`, kind: 'create', fileId: file.fileId,
@@ -396,6 +402,16 @@ function snapshotFromDisk(context, graphId, files) {
     state,
     files: materialized,
   };
+}
+
+function snapshotFromDisk(context, graphId, files) {
+  return snapshotFromFiles(graphId, files.map((file) => {
+    const content = readNote(context, file.path);
+    if (content === null) {
+      throw new PersistentIdentityError('missing-note', `${file.path} is absent from the graph`);
+    }
+    return { ...file, content };
+  }));
 }
 
 function assertPortable(sidecar, bytes) {
@@ -812,6 +828,53 @@ function recover(context, options = {}) {
  * current accepted state to validate against the graph's actual bytes, an
  * explicit expected metadata revision, and an explicit complete file list.
  */
+/*
+ * The deterministic derivation an update publishes: the transaction ID, the
+ * sidecar bytes and the device bytes, for one accepted base, one device record
+ * and one complete post-update snapshot.
+ *
+ * It is pure with respect to the store. `updateIdentity` calls it with the
+ * snapshot read from disk; the incoming applier calls it with the snapshot it
+ * PROJECTS before writing, so the exact transaction, snapshot fingerprint and
+ * record bytes can be bound to the operator's approval and proven afterwards
+ * rather than discovered from whatever the store happened to publish.
+ */
+function deriveUpdate({ accepted, probe, request, snapshot }) {
+  const { metadata, replica } = enrollIdentityMetadata({
+    schema: 'f28-identity-enrollment/1',
+    complete: true,
+    graphId: accepted.graphId,
+    replicaId: probe.device.replicaId,
+    metadataRevision: request.metadataRevision,
+    files: request.files.map((file) => ({
+      fileId: file.fileId, path: file.path, content: file.content,
+      acceptedRevision: file.acceptedRevision,
+    })),
+  }, snapshot);
+
+  const transactionId = transactionFor('update', {
+    graphId: accepted.graphId, replicaId: probe.device.replicaId,
+    deviceId: probe.device.deviceId, expected: accepted.metadataRevision,
+    metadataRevision: request.metadataRevision, metadata,
+    snapshotFingerprint: snapshot.snapshotFingerprint, generation: snapshot.generation,
+  });
+
+  const sidecar = buildSidecar({
+    graphId: accepted.graphId, metadataRevision: request.metadataRevision,
+    transactionId, snapshot, identity: metadata,
+  });
+  const sidecarBytes = serialize(sidecar);
+  assertPortable(sidecar, sidecarBytes);
+  const deviceBytes = serialize(buildDeviceRecord({
+    deviceId: probe.device.deviceId, replicaId: probe.device.replicaId,
+    graphId: accepted.graphId, graphBinding: probe.graphBinding,
+    profileBinding: probe.profileBinding, transactionId,
+    metadataRevision: request.metadataRevision, snapshot,
+    sidecarHash: bytesHash(sidecarBytes), replica,
+  }));
+  return { transactionId, sidecarBytes, deviceBytes, snapshot, metadata };
+}
+
 function updateIdentity(context, request, options = {}) {
   const probe = readRecords(context);
   if (probe.malformed.length) {
@@ -833,40 +896,11 @@ function updateIdentity(context, request, options = {}) {
     }
   }
   const snapshot = snapshotFromDisk(context, accepted.graphId, request.files);
-  const { metadata, replica } = enrollIdentityMetadata({
-    schema: 'f28-identity-enrollment/1',
-    complete: true,
-    graphId: accepted.graphId,
-    replicaId: probe.device.replicaId,
-    metadataRevision: request.metadataRevision,
-    files: request.files.map((file) => ({
-      fileId: file.fileId, path: file.path, content: file.content,
-      acceptedRevision: file.acceptedRevision,
-    })),
-  }, snapshot);
-
-  const transactionId = transactionFor('update', {
-    graphId: accepted.graphId, replicaId: probe.device.replicaId,
-    deviceId: probe.device.deviceId, expected: accepted.metadataRevision,
-    metadataRevision: request.metadataRevision, metadata,
-    snapshotFingerprint: snapshot.snapshotFingerprint, generation: snapshot.generation,
-  });
+  const { transactionId, sidecarBytes, deviceBytes } =
+    deriveUpdate({ accepted, probe, request, snapshot });
   const outstanding = outstandingDecision(context, probe, transactionId);
   if (outstanding) return outstanding;
 
-  const sidecar = buildSidecar({
-    graphId: accepted.graphId, metadataRevision: request.metadataRevision,
-    transactionId, snapshot, identity: metadata,
-  });
-  const sidecarBytes = serialize(sidecar);
-  assertPortable(sidecar, sidecarBytes);
-  const deviceBytes = serialize(buildDeviceRecord({
-    deviceId: probe.device.deviceId, replicaId: probe.device.replicaId,
-    graphId: accepted.graphId, graphBinding: probe.graphBinding,
-    profileBinding: probe.profileBinding, transactionId,
-    metadataRevision: request.metadataRevision, snapshot,
-    sidecarHash: bytesHash(sidecarBytes), replica,
-  }));
   return publish(context, {
     kind: 'update', transactionId, ordering: options.ordering,
     graphId: accepted.graphId, replicaId: probe.device.replicaId,
@@ -1041,6 +1075,7 @@ module.exports = {
   buildDeviceRecord,
   buildSidecar,
   bytesHash,
+  deriveUpdate,
   enrollGraph,
   hashGraphNotes,
   initializeOwnedRun,
@@ -1059,6 +1094,7 @@ module.exports = {
   serialize,
   setDiagnosticCase,
   snapshotFromDisk,
+  snapshotFromFiles,
   transactionFor,
   updateIdentity,
   writeJournal,

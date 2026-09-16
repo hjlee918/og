@@ -210,6 +210,30 @@ function assertAppClosed(gate, stage) {
 
 // ---------------------------------------------------------- proposal shape
 
+function requireText(value, label) {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
+    throw new IncomingError('malformed-record', `${label} must be a non-empty string without NUL`);
+  }
+  return value;
+}
+
+/*
+ * The canonical body a proposal's identity is computed over: every field except
+ * the identity itself. Recomputing it is what makes a changed body a changed
+ * proposal, instead of the same proposal wearing its old ID.
+ */
+function proposalBody(proposal) {
+  return {
+    schema: proposal.schema,
+    graphId: proposal.graphId,
+    base: proposal.base,
+    target: proposal.target,
+    originReplicaId: proposal.originReplicaId,
+    planId: proposal.planId,
+    files: proposal.files,
+  };
+}
+
 function validateProposal(input) {
   const proposal = clone(input);
   exactKeys(proposal, ['schema', 'proposalId', 'graphId', 'base', 'target',
@@ -220,19 +244,41 @@ function validateProposal(input) {
   if (!isHash(proposal.proposalId)) {
     throw new IncomingError('malformed-record', 'proposalId must be 64 hex');
   }
+  requireText(proposal.graphId, 'proposal.graphId');
+  requireText(proposal.originReplicaId, 'proposal.originReplicaId');
+  /*
+   * The plan identity is a fixed shape produced by the planner. The earlier
+   * placeholder condition here could never throw for any string, which let a
+   * proposal name an arbitrary plan; it is replaced by the exact form.
+   */
+  if (typeof proposal.planId !== 'string' || !/^plan-[0-9a-f]{32}$/.test(proposal.planId)) {
+    throw new IncomingError('malformed-record', 'planId is not a well-formed plan identity');
+  }
   exactKeys(proposal.base,
     ['metadataRevision', 'snapshotFingerprint', 'acceptedTransactionId'], 'proposal.base');
+  requireText(proposal.base.metadataRevision, 'proposal.base.metadataRevision');
+  if (!/^sha256:[0-9a-f]{64}$/.test(String(proposal.base.snapshotFingerprint))) {
+    throw new IncomingError('malformed-record', 'proposal.base.snapshotFingerprint is malformed');
+  }
+  if (!isHash(proposal.base.acceptedTransactionId)) {
+    throw new IncomingError('malformed-record', 'proposal.base.acceptedTransactionId must be 64 hex');
+  }
   exactKeys(proposal.target, ['metadataRevision'], 'proposal.target');
+  requireText(proposal.target.metadataRevision, 'proposal.target.metadataRevision');
+
   if (!Array.isArray(proposal.files) || proposal.files.length === 0) {
     throw new IncomingError('malformed-record', 'proposal names no files');
   }
   const seen = new Set();
   for (const file of proposal.files) {
-    exactKeys(file, ['fileId', 'kind', 'path', 'baseContentHash', 'targetContentHex',
-      'acceptedRevision'], 'proposal file');
-    if (typeof file.fileId !== 'string' || !file.fileId) {
-      throw new IncomingError('malformed-record', 'file identity is invalid');
-    }
+    /*
+     * `acceptedRevision` is deliberately NOT part of a proposal. The revision
+     * that gets stored is derived from the executed comparison plan, never
+     * chosen by whoever sent the change.
+     */
+    exactKeys(file, ['fileId', 'kind', 'path', 'baseContentHash', 'targetContentHex'],
+      'proposal file');
+    requireText(file.fileId, 'proposal file fileId');
     if (seen.has(file.fileId)) {
       throw new IncomingError('malformed-record', `duplicate fileId ${file.fileId}`);
     }
@@ -247,11 +293,17 @@ function validateProposal(input) {
     if (file.kind === 'update' && !isHash(file.baseContentHash)) {
       throw new IncomingError('malformed-record', 'an update needs a 64-hex base hash');
     }
+    if (typeof file.targetContentHex !== 'string') {
+      throw new IncomingError('malformed-record', 'targetContentHex must be a string');
+    }
     checkNotePath(file.path, `proposal path for ${file.fileId}`);
   }
-  if (!isHash(String(proposal.planId || '').replace(/^plan-/, '').padEnd(64, '0'))
-      && typeof proposal.planId !== 'string') {
-    throw new IncomingError('malformed-record', 'planId is invalid');
+
+  const recomputed = digest(stableStringify(proposalBody(proposal)));
+  if (recomputed !== proposal.proposalId) {
+    throw new IncomingError('proposal-identity-mismatch',
+      'the proposal identity does not match its own contents',
+      { recomputed, claimed: proposal.proposalId });
   }
   return proposal;
 }
@@ -294,7 +346,6 @@ function buildProposal({ accepted, snapshot, originReplicaId, targetMetadataRevi
           snapshot.files.find((item) => item.path === existing.path).content, 'utf8'))
         : null,
       targetContentHex: encoded.hex,
-      acceptedRevision: change.acceptedRevision,
     });
   }
   const comparison = compareSnapshots(snapshot, {
@@ -321,7 +372,7 @@ function buildProposal({ accepted, snapshot, originReplicaId, targetMetadataRevi
     planId: comparison.plan.planId,
     files: files.sort((a, b) => Buffer.from(a.fileId).compare(Buffer.from(b.fileId))),
   };
-  return { ...body, proposalId: digest(stableStringify(body)) };
+  return { ...body, proposalId: digest(stableStringify(proposalBody(body))) };
 }
 
 // ----------------------------------------------------------------- preview
@@ -336,15 +387,27 @@ function planIncoming(context, input, options = {}) {
   catch (error) { return refuse(error.code || 'malformed-record', error.message, error.detail); }
 
   try {
+    /*
+     * The journal slot holds one transaction per owned run and is never reused,
+     * so a retained journal of ANY kind refuses here too. Producing an
+     * approvable preview for something application will refuse would only invite
+     * an operator to approve it.
+     */
     const journal = PI.readJournal(context);
-    if (journal.malformed) {
-      return refuse('journal-malformed',
-        'a journal is present that does not parse; it is retained for review');
-    }
-    if (journal.value && journal.value.state === 'open') {
-      return refuse('transaction-outstanding',
-        'an unfinished incoming transaction holds the journal slot for this owned graph',
-        { outstandingProposalId: journal.value.approved?.proposalId || null });
+    if (journal.bytes) {
+      const openJournal = Boolean(journal.value) && !journal.malformed
+        && journal.value.state === 'open';
+      const unparseable = journal.malformed || !journal.value;
+      return refuse(
+        unparseable ? 'journal-malformed' : openJournal ? 'transaction-outstanding'
+          : 'journal-slot-occupied',
+        unparseable
+          ? 'a journal is present that does not parse; it is retained for review'
+          : openJournal
+            ? 'an unfinished incoming transaction holds the journal slot for this owned graph'
+            : 'a retained journal holds the slot; it is not overwritten, so use a fresh owned run',
+        { retainedJournalHash: journal.hash,
+          retainedProposalId: journal.value?.approved?.proposalId || null });
     }
 
     const opened = PI.openGraph(context);
@@ -386,6 +449,7 @@ function planIncoming(context, input, options = {}) {
       return refuse('unknown-base', 'the proposal target revision equals the accepted revision');
     }
 
+    const records = PI.readRecords(context);
     const acceptedFiles = Object.entries(sidecar.identity.files)
       .map(([fileId, entry]) => ({ fileId, path: entry.path, acceptedRevision: entry.acceptedRevision }));
     const acceptedById = new Map(acceptedFiles.map((file) => [file.fileId, file]));
@@ -466,7 +530,6 @@ function planIncoming(context, input, options = {}) {
         targetContentHash: target.hash,
         targetContentHex: target.hex,
         targetText: target.text,
-        acceptedRevision: file.acceptedRevision,
       });
     }
 
@@ -503,6 +566,76 @@ function planIncoming(context, input, options = {}) {
         `the executor refused the recomputed plan: ${execution.result.code}`);
     }
 
+    /*
+     * The accepted revision each file will be STORED under comes from the
+     * executed comparison plan -- a deterministic compare-revision -- never from
+     * the proposal. Files the plan does not touch keep the revision the accepted
+     * sidecar already names.
+     */
+    const plannedRevision = new Map(comparison.plan.actions
+      .map((action) => [action.operation.fileId, action.operation.revisionId]));
+    for (const file of files) {
+      const revision = plannedRevision.get(file.fileId);
+      if (!revision) {
+        return refuse('plan-mismatch',
+          `the recomputed plan contains no action for ${file.fileId}`, { fileId: file.fileId });
+      }
+      file.acceptedRevision = revision;
+    }
+    const changedIds = new Set(files.map((file) => file.fileId));
+    const unchanged = {};
+    for (const entry of acceptedFiles) {
+      if (changedIds.has(entry.fileId)) continue;
+      unchanged[entry.fileId] = {
+        path: entry.path,
+        contentHash: sidecar.identity.files[entry.fileId].acceptedContentHash,
+        acceptedRevision: plannedRevision.get(entry.fileId) || entry.acceptedRevision,
+      };
+    }
+
+    /*
+     * The exact snapshot, transaction and record bytes this transaction intends
+     * to publish, computed BEFORE anything is written, so the approval binds
+     * them and recovery can prove them afterwards instead of inferring
+     * completion from a revision label.
+     */
+    const projectedFiles = [
+      ...Object.entries(unchanged).map(([fileId, entry]) => ({
+        fileId, path: entry.path, acceptedRevision: entry.acceptedRevision,
+        content: snapshot.files.find((item) => item.path === entry.path).content,
+      })),
+      ...files.map((file) => ({
+        fileId: file.fileId, path: file.path,
+        acceptedRevision: file.acceptedRevision, content: file.targetText,
+      })),
+    ];
+    let intended;
+    try {
+      const projectedSnapshot = PI.snapshotFromFiles(sidecar.graphId, projectedFiles);
+      const derived = PI.deriveUpdate({
+        accepted: sidecar,
+        probe: records,
+        request: {
+          metadataRevision: proposal.target.metadataRevision,
+          files: projectedFiles.map((file) => ({
+            fileId: file.fileId, path: file.path, content: file.content,
+            acceptedRevision: file.acceptedRevision,
+          })),
+        },
+        snapshot: projectedSnapshot,
+      });
+      intended = {
+        metadataRevision: proposal.target.metadataRevision,
+        snapshotFingerprint: projectedSnapshot.snapshotFingerprint,
+        transactionId: derived.transactionId,
+        sidecarHash: PI.bytesHash(derived.sidecarBytes),
+        deviceHash: PI.bytesHash(derived.deviceBytes),
+      };
+    } catch (error) {
+      return refuse('projection-failed',
+        `the intended post-application state could not be derived: ${error.message}`);
+    }
+
     const graphNotes = PI.hashGraphNotes(context);
     const applyOrder = files
       .map((file) => file.fileId)
@@ -518,7 +651,8 @@ function planIncoming(context, input, options = {}) {
         snapshotFingerprint: sidecar.acceptedSnapshotFingerprint,
         acceptedTransactionId: sidecar.acceptedTransactionId,
       },
-      target: { metadataRevision: proposal.target.metadataRevision },
+      target: intended,
+      unchanged,
       graphNotes,
       applyOrder,
       files: applyOrder.map((fileId) => {
@@ -532,6 +666,7 @@ function planIncoming(context, input, options = {}) {
           oldLength: file.beforeImage.contentHex ? file.beforeImage.contentHex.length / 2 : 0,
           newContentHash: file.targetContentHash,
           newLength: Buffer.from(file.targetContentHex, 'hex').length,
+          acceptedRevision: file.acceptedRevision,
         };
       }),
       limits: [
@@ -557,13 +692,12 @@ function planIncoming(context, input, options = {}) {
 
 // ------------------------------------------------------------------ journal
 
-function journalBody(approved, progress, supersedes) {
+function journalBody(approved, progress) {
   const body = {
     schema: JOURNAL_SCHEMA,
     state: progress.recordsAccepted && progress.closed ? 'closed' : 'open',
     approved,
     approvedHash: `sha256:${digest(stableStringify(approved))}`,
-    supersedes: supersedes || null,
     progress: {
       applied: [...progress.applied],
       recordsAccepted: Boolean(progress.recordsAccepted),
@@ -574,9 +708,11 @@ function journalBody(approved, progress, supersedes) {
 }
 
 const APPROVED_KEYS = ['proposalId', 'planId', 'previewFingerprint', 'graphId',
-  'graphBinding', 'profileBinding', 'base', 'target', 'applyOrder', 'files'];
+  'graphBinding', 'profileBinding', 'base', 'target', 'applyOrder', 'files', 'unchanged'];
 const APPROVED_FILE_KEYS = ['kind', 'path', 'precondition', 'beforeImage',
   'targetContentHash', 'targetContentHex', 'acceptedRevision'];
+const TARGET_KEYS = ['metadataRevision', 'snapshotFingerprint', 'transactionId',
+  'sidecarHash', 'deviceHash'];
 
 /*
  * Validate a journal hard enough to earn the right to write. Every check below
@@ -599,7 +735,7 @@ function validateJournal(context, journal, records) {
     throw new IncomingError('journal-too-large', 'the journal exceeds its bound');
   }
   const value = journal.value;
-  exactKeys(value, ['schema', 'state', 'approved', 'approvedHash', 'supersedes', 'progress'], 'journal');
+  exactKeys(value, ['schema', 'state', 'approved', 'approvedHash', 'progress'], 'journal');
   if (value.schema !== JOURNAL_SCHEMA) {
     throw new IncomingError('unsupported-schema', 'journal schema is not supported');
   }
@@ -627,7 +763,28 @@ function validateJournal(context, journal, records) {
   }
   exactKeys(approved.base,
     ['metadataRevision', 'snapshotFingerprint', 'acceptedTransactionId'], 'journal.approved.base');
-  exactKeys(approved.target, ['metadataRevision'], 'journal.approved.target');
+  exactKeys(approved.target, TARGET_KEYS, 'journal.approved.target');
+  requireText(approved.target.metadataRevision, 'journal.approved.target.metadataRevision');
+  if (!/^sha256:[0-9a-f]{64}$/.test(String(approved.target.snapshotFingerprint))
+      || !isHash(approved.target.transactionId)
+      || !/^sha256:[0-9a-f]{64}$/.test(String(approved.target.sidecarHash))
+      || !/^sha256:[0-9a-f]{64}$/.test(String(approved.target.deviceHash))) {
+    throw new IncomingError('malformed-record',
+      'the journal target does not bind a well-formed snapshot, transaction and record pair');
+  }
+  if (!approved.unchanged || typeof approved.unchanged !== 'object'
+      || Array.isArray(approved.unchanged)) {
+    throw new IncomingError('malformed-record', 'journal.approved.unchanged is invalid');
+  }
+  for (const [fileId, entry] of Object.entries(approved.unchanged)) {
+    exactKeys(entry, ['path', 'contentHash', 'acceptedRevision'],
+      `journal.approved.unchanged.${fileId}`);
+    requireText(entry.path, `unchanged path for ${fileId}`);
+    requireText(entry.acceptedRevision, `unchanged acceptedRevision for ${fileId}`);
+    if (!/^sha256:[0-9a-f]{64}$/.test(String(entry.contentHash))) {
+      throw new IncomingError('malformed-record', `unchanged contentHash for ${fileId} is malformed`);
+    }
+  }
   exactKeys(approved.graphBinding,
     ['runName', 'graphDirectory', 'graphDevice', 'graphInode'], 'journal.approved.graphBinding');
   exactKeys(approved.profileBinding,
@@ -655,6 +812,11 @@ function validateJournal(context, journal, records) {
       throw new IncomingError('malformed-record', `${fileId} has an unsupported kind`);
     }
     checkNotePath(file.path, `journal path for ${fileId}`);
+    requireText(file.acceptedRevision, `journal acceptedRevision for ${fileId}`);
+    if (Object.prototype.hasOwnProperty.call(approved.unchanged, fileId)) {
+      throw new IncomingError('malformed-record',
+        `${fileId} appears both as a changed and an unchanged file`);
+    }
     exactKeys(file.beforeImage, ['presence', 'contentHash', 'contentHex'],
       `journal.approved.files.${fileId}.beforeImage`);
     const target = decodeNoteHex(file.targetContentHex, `journal target for ${fileId}`);
@@ -693,45 +855,190 @@ function applyOneFile(context, file) {
   }
 }
 
-function acceptRecords(context, approved, sidecar, files) {
+/*
+ * Revalidate the complete intended state, then publish.
+ *
+ * Rereading current bytes and stamping the intended revision on them would
+ * silently adopt whatever happens to be on disk -- an unrelated local edit to a
+ * file outside the transaction, or a transaction file that no longer holds its
+ * approved target. Both are refused here and named for what they are.
+ *
+ * This narrows the window; it does not remove it. A writer that does not honour
+ * the cooperative lock can still change a file between this validation and the
+ * store's own reads, and that race is unchanged by this check.
+ */
+function revalidateIntendedState(context, approved) {
+  const drift = [];
+  const projected = [];
+  for (const fileId of approved.applyOrder) {
+    const file = approved.files[fileId];
+    const disk = stableRead(context, file.path);
+    if (!disk.stable) {
+      return { code: 'unstable-read', reason: `${file.path} did not read back identically twice`,
+        detail: { fileId } };
+    }
+    if (!disk.present || disk.hash !== file.targetContentHash) {
+      drift.push({ fileId, path: file.path, kind: 'target-divergence',
+        expected: file.targetContentHash, observed: disk.present ? disk.hash : null });
+      continue;
+    }
+    projected.push({ fileId, path: file.path, content: disk.bytes.toString('utf8'),
+      acceptedRevision: file.acceptedRevision });
+  }
+  for (const [fileId, entry] of Object.entries(approved.unchanged)) {
+    const disk = stableRead(context, entry.path);
+    if (!disk.stable) {
+      return { code: 'unstable-read', reason: `${entry.path} did not read back identically twice`,
+        detail: { fileId } };
+    }
+    if (!disk.present || `sha256:${disk.hash}` !== entry.contentHash) {
+      drift.push({ fileId, path: entry.path, kind: 'unrelated-local-change',
+        expected: entry.contentHash, observed: disk.present ? `sha256:${disk.hash}` : null });
+      continue;
+    }
+    projected.push({ fileId, path: entry.path, content: disk.bytes.toString('utf8'),
+      acceptedRevision: entry.acceptedRevision });
+  }
+  if (drift.length) {
+    const unrelated = drift.some((item) => item.kind === 'unrelated-local-change');
+    return {
+      code: unrelated ? 'unrelated-local-change' : 'target-divergence',
+      reason: unrelated
+        ? 'a file outside this transaction differs from the accepted record; it is not adopted'
+        : 'a file in this transaction no longer holds its approved target bytes',
+      detail: { drift },
+    };
+  }
+  const snapshot = PI.snapshotFromFiles(approved.graphId, projected);
+  if (snapshot.snapshotFingerprint !== approved.target.snapshotFingerprint) {
+    return { code: 'projection-mismatch',
+      reason: 'the state on disk does not fingerprint as the approved projection',
+      detail: { observed: snapshot.snapshotFingerprint,
+        approved: approved.target.snapshotFingerprint } };
+  }
+  return { ok: true, projected, snapshot };
+}
+
+function acceptRecords(context, approved, options = {}) {
+  const verdict = revalidateIntendedState(context, approved);
+  if (verdict.code) return { outcome: 'refused', code: verdict.code, reason: verdict.reason,
+    detail: verdict.detail };
   const request = {
     expectedMetadataRevision: approved.base.metadataRevision,
     metadataRevision: approved.target.metadataRevision,
-    files: [],
+    files: verdict.projected.map((file) => ({
+      fileId: file.fileId, path: file.path, content: file.content,
+      acceptedRevision: file.acceptedRevision,
+    })).sort((a, b) => Buffer.from(a.fileId).compare(Buffer.from(b.fileId))),
     tombstones: [],
   };
-  const known = new Map(Object.entries(sidecar.identity.files)
-    .map(([fileId, entry]) => [fileId, entry]));
-  for (const [fileId, entry] of known) {
-    const incoming = approved.files[fileId];
-    if (incoming) continue;
-    const bytes = PI.readNoteBytes(context, entry.path);
-    if (bytes === null) {
-      throw new IncomingError('missing-note', `${entry.path} vanished before the record step`);
-    }
-    request.files.push({ fileId, path: entry.path, content: bytes.toString('utf8'),
-      acceptedRevision: entry.acceptedRevision });
+
+  /*
+   * Check the binding BEFORE publishing, not after. Re-deriving here costs one
+   * pure computation and means a journal naming a transaction, snapshot or
+   * record pair other than the one these inputs produce is refused with nothing
+   * written, instead of being caught after the store has already published.
+   */
+  const probe = PI.readRecords(context);
+  if (!probe.sidecar || !probe.device) {
+    return { outcome: 'refused', code: 'not-enrolled', reason: 'the records are not both present' };
   }
-  for (const fileId of approved.applyOrder) {
-    const file = approved.files[fileId];
-    const bytes = PI.readNoteBytes(context, file.path);
-    if (bytes === null) {
-      throw new IncomingError('missing-note', `${file.path} vanished before the record step`);
-    }
-    request.files.push({ fileId, path: file.path, content: bytes.toString('utf8'),
-      acceptedRevision: file.acceptedRevision });
+  let derived;
+  try {
+    derived = PI.deriveUpdate({ accepted: probe.sidecar, probe, request, snapshot: verdict.snapshot });
+  } catch (error) {
+    return { outcome: 'refused', code: 'projection-failed', reason: error.message };
   }
-  request.files.sort((a, b) => Buffer.from(a.fileId).compare(Buffer.from(b.fileId)));
-  void files;
-  return PI.updateIdentity(context, request);
+  const bindingMismatch = [];
+  if (derived.transactionId !== approved.target.transactionId) bindingMismatch.push('transactionId');
+  if (PI.bytesHash(derived.sidecarBytes) !== approved.target.sidecarHash) bindingMismatch.push('sidecarHash');
+  if (PI.bytesHash(derived.deviceBytes) !== approved.target.deviceHash) bindingMismatch.push('deviceHash');
+  if (bindingMismatch.length) {
+    return { outcome: 'refused', code: 'transaction-mismatch',
+      reason: 'these inputs do not produce the transaction and records the approval bound',
+      detail: { bindingMismatch,
+        derived: { transactionId: derived.transactionId,
+          sidecarHash: PI.bytesHash(derived.sidecarBytes),
+          deviceHash: PI.bytesHash(derived.deviceBytes) },
+        approved: approved.target } };
+  }
+
+  const result = PI.updateIdentity(context, request, options);
+  if (result.outcome === 'accepted'
+      && result.transactionId !== approved.target.transactionId) {
+    return { outcome: 'refused', code: 'transaction-mismatch',
+      reason: 'the store published a transaction other than the approved one',
+      detail: { published: result.transactionId, approved: approved.target.transactionId } };
+  }
+  return result;
+}
+
+/*
+ * The post-condition. Nothing closes an incoming journal without this passing.
+ *
+ * A metadata revision label is not acceptance: an outstanding intent, a
+ * malformed record, a device record left at base, or record bytes other than the
+ * ones the approval bound all mean the record-store transaction is unresolved.
+ */
+function proveRecordsAccepted(context, approved) {
+  const records = PI.readRecords(context);
+  if (records.malformed.length) {
+    return { accepted: false, code: 'malformed-record',
+      reason: 'a record does not parse', detail: { malformed: records.malformed } };
+  }
+  if (records.outstandingIntents.length) {
+    return { accepted: false, code: 'outstanding-intent',
+      reason: 'an identity transaction is still outstanding in the record store',
+      detail: { outstandingIntents: records.outstandingIntents }, records };
+  }
+  const opened = PI.openGraph(context);
+  if (opened.outcome !== 'accepted') {
+    return { accepted: false, code: opened.code || 'records-not-accepted',
+      reason: `the store does not classify the graph as accepted (${opened.outcome})`,
+      detail: { outcome: opened.outcome, storeCode: opened.code || null } };
+  }
+  const { sidecar, device } = opened;
+  const target = approved.target;
+  const mismatches = [];
+  if (sidecar.graphId !== approved.graphId) mismatches.push('graphId');
+  if (sidecar.metadataRevision !== target.metadataRevision) mismatches.push('sidecar.metadataRevision');
+  if (sidecar.acceptedSnapshotFingerprint !== target.snapshotFingerprint) {
+    mismatches.push('sidecar.acceptedSnapshotFingerprint');
+  }
+  if (sidecar.acceptedTransactionId !== target.transactionId) {
+    mismatches.push('sidecar.acceptedTransactionId');
+  }
+  if (records.sidecarHash !== target.sidecarHash) mismatches.push('sidecarBytes');
+  if (records.deviceHash !== target.deviceHash) mismatches.push('deviceBytes');
+  if (device.metadataRevision !== target.metadataRevision) mismatches.push('device.metadataRevision');
+  if (device.acceptedTransactionId !== target.transactionId) {
+    mismatches.push('device.acceptedTransactionId');
+  }
+  if (mismatches.length) {
+    return { accepted: false, code: 'records-do-not-match-approval',
+      reason: 'the accepted records are not the ones this approval bound',
+      detail: { mismatches,
+        observed: { metadataRevision: sidecar.metadataRevision,
+          snapshotFingerprint: sidecar.acceptedSnapshotFingerprint,
+          transactionId: sidecar.acceptedTransactionId,
+          sidecarHash: records.sidecarHash, deviceHash: records.deviceHash },
+        approved: target } };
+  }
+  return { accepted: true, opened, records };
 }
 
 /*
  * Phase two. Requires the exact preview fingerprint the operator approved, and
  * proves the owned app is closed before the journal is created and again before
  * every single note write.
+ *
+ * The journal slot holds ONE transaction per owned run and is never reused. A
+ * journal that is present at all -- open, closed or unparseable -- refuses a new
+ * proposal, because it carries the only copy of that transaction's before-images
+ * and this slice has no approved way to archive it durably first. Another
+ * experiment uses a fresh owned run.
  */
-function applyIncoming(context, { proposal, approve, gate, failAt = null, supersededSink = null }) {
+function applyIncoming(context, { proposal, approve, gate, failAt = null, recordFailure = null }) {
   const planned = planIncoming(context, proposal);
   if (planned.outcome !== 'preview') return planned;
   if (!approve) {
@@ -744,7 +1051,7 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, supers
       { approved: approve, recomputed: planned.preview.previewFingerprint });
   }
 
-  const { sidecar, files } = planned.internal;
+  const { files } = planned.internal;
   const records = PI.readRecords(context);
   const approved = {
     proposalId: planned.preview.proposalId,
@@ -756,6 +1063,7 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, supers
     base: planned.preview.base,
     target: planned.preview.target,
     applyOrder: planned.preview.applyOrder,
+    unchanged: planned.preview.unchanged,
     files: Object.fromEntries(files.map((file) => [file.fileId, {
       kind: file.kind,
       path: file.path,
@@ -767,22 +1075,30 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, supers
     }])),
   };
 
+  /*
+   * The slot is claimed only when it is empty. A retained journal -- including a
+   * `closed` one -- is never overwritten: the label is not proof of completion,
+   * and the record it holds is the only retained copy of its before-images.
+   */
   const existing = PI.readJournal(context);
-  let supersedes = null;
-  let slotExpect = 'absent';
-  if (existing.value) {
-    if (existing.value.state !== 'closed') {
-      return refuse('transaction-outstanding', 'the journal slot holds an unfinished transaction');
-    }
-    supersedes = { proposalId: existing.value.approved.proposalId, journalHash: existing.hash };
-    slotExpect = existing.hash.replace(/^sha256:/, '');
-    if (typeof supersededSink === 'function') {
-      supersededSink({ hash: existing.hash, bytes: existing.bytes.toString('base64') });
-    }
+  if (existing.bytes) {
+    const openJournal = Boolean(existing.value) && !existing.malformed
+      && existing.value.state === 'open';
+    const unparseable = existing.malformed || !existing.value;
+    return refuse(
+      unparseable ? 'journal-malformed' : openJournal ? 'transaction-outstanding'
+        : 'journal-slot-occupied',
+      unparseable
+        ? 'a journal is present that does not parse; it is retained for review'
+        : openJournal
+          ? 'an unfinished incoming transaction holds the journal slot for this owned graph'
+          : 'a retained journal holds the slot; it is not overwritten, so use a fresh owned run',
+      { retainedJournalHash: existing.hash,
+        retainedProposalId: existing.value?.approved?.proposalId || null });
   }
 
   const progress = { applied: [], recordsAccepted: false, transactionId: null, closed: false };
-  let bytes = journalBody(approved, progress, supersedes);
+  let bytes = journalBody(approved, progress);
   if (bytes.length > MAX_JOURNAL_BYTES) {
     return refuse('journal-too-large',
       `the serialized journal would be ${bytes.length} bytes; the limit is ${MAX_JOURNAL_BYTES}`);
@@ -795,7 +1111,7 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, supers
     return refuse('injected-failure', 'injected failure before the journal was created');
   }
 
-  try { PI.writeJournal(context, bytes, slotExpect); }
+  try { PI.writeJournal(context, bytes, 'absent'); }
   catch (error) {
     return refuse('journal-write-failed', error.message, { storeCode: error.code });
   }
@@ -815,32 +1131,50 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, supers
           `injected failure after writing ${fileId} and before its progress update`);
       }
       progress.applied.push(fileId);
-      bytes = journalBody(approved, progress, supersedes);
+      bytes = journalBody(approved, progress);
       PI.writeJournal(context, bytes, journalHash.replace(/^sha256:/, ''));
       journalHash = `sha256:${sha256(bytes)}`;
     }
 
     assertAppClosed(gate, 'record-step');
-    const accepted = acceptRecords(context, approved, sidecar, files);
+    const accepted = acceptRecords(context, approved,
+      recordFailure ? { ordering: 'graph-first', failure: recordFailure } : {});
     if (accepted.outcome !== 'accepted') {
-      throw new IncomingError('records-refused',
-        `the store refused the identity update: ${accepted.code}`, { storeCode: accepted.code });
+      throw new IncomingError(
+        String(accepted.outcome || '').startsWith('uncertain')
+          ? 'records-uncertain' : 'records-refused',
+        `the store did not accept the identity update: ${accepted.code}`,
+        { storeOutcome: accepted.outcome, storeCode: accepted.code,
+          storeReason: accepted.reason || null, storeDetail: accepted.detail || null });
     }
     if (failAt === 'after-records') {
       throw new IncomingError('injected-failure',
         'injected failure after the records were accepted and before the journal closed');
     }
+
+    /*
+     * Prove it, do not assume it. The journal closes only when both records are
+     * accepted AND are the exact ones this approval bound.
+     */
+    const proof = proveRecordsAccepted(context, approved);
+    if (!proof.accepted) {
+      throw new IncomingError('records-not-proven',
+        `the records could not be proven accepted: ${proof.code}`,
+        { proofCode: proof.code, proofReason: proof.reason, proofDetail: proof.detail });
+    }
+
     progress.recordsAccepted = true;
-    progress.transactionId = accepted.transactionId || accepted.recovered?.transactionId || null;
+    progress.transactionId = approved.target.transactionId;
     progress.closed = true;
-    bytes = journalBody(approved, progress, supersedes);
+    bytes = journalBody(approved, progress);
     PI.writeJournal(context, bytes, journalHash.replace(/^sha256:/, ''));
     return {
       outcome: 'applied',
       mutated: true,
       applied: appliedNow,
-      transactionId: progress.transactionId,
+      transactionId: approved.target.transactionId,
       metadataRevision: approved.target.metadataRevision,
+      snapshotFingerprint: approved.target.snapshotFingerprint,
       preview: planned.preview,
       journalHash: `sha256:${sha256(bytes)}`,
     };
@@ -849,11 +1183,13 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, supers
       applied: appliedNow,
       recordsAccepted: progress.recordsAccepted,
       proposalId: approved.proposalId,
+      transactionId: approved.target.transactionId,
       detail: error.detail || null,
-      note: 'the journal is retained; recovery reads it and classifies from the bytes on disk',
+      note: 'the journal is retained open; recovery reads it, resolves any outstanding identity transaction and classifies from the bytes on disk',
     });
   }
 }
+
 
 // -------------------------------------------------------------- recovery
 
@@ -947,6 +1283,12 @@ function recomputePlan(context, sidecar, approved) {
 /*
  * Roll-forward only. Classifies EVERY file before applying ANY of them, so a
  * third state anywhere in the transaction prevents all further note writes.
+ *
+ * Nothing here treats a label as a fact. A target metadata revision is not
+ * acceptance, and a `closed` journal is not proof of completion: both are
+ * checked against the records the approval bound, and an outstanding identity
+ * transaction is resolved through the record store's own recovery contract
+ * before this layer will close anything.
  */
 function recoverIncoming(context, { gate } = {}) {
   let journal;
@@ -960,28 +1302,66 @@ function recoverIncoming(context, { gate } = {}) {
   } catch (error) {
     return refuse(error.code || 'journal-invalid', error.message, error.detail);
   }
-  if (value.state === 'closed') {
-    return { outcome: 'none', mutated: false, code: 'journal-closed',
-      proposalId: value.approved.proposalId };
-  }
 
   const approved = value.approved;
-  const opened = PI.openGraph(context);
-  const sidecar = opened.sidecar || records.sidecar;
-  if (!sidecar) return refuse('records-not-accepted', 'no accepted sidecar is present');
+
+  /*
+   * A closed journal still has to prove itself. If the records it claims are not
+   * the accepted ones, the label is wrong and the state is retained for review
+   * rather than reported as a completed transaction.
+   */
+  if (value.state === 'closed') {
+    const proof = proveRecordsAccepted(context, approved);
+    if (!proof.accepted) {
+      return refuse('closed-journal-not-verified',
+        `the journal is labelled closed but the records do not prove it: ${proof.code}`,
+        { proofCode: proof.code, proofReason: proof.reason, proofDetail: proof.detail,
+          proposalId: approved.proposalId });
+    }
+    return { outcome: 'none', mutated: false, code: 'journal-closed', verified: true,
+      proposalId: approved.proposalId, transactionId: approved.target.transactionId };
+  }
+
+  const sidecar = records.sidecar;
+  if (!sidecar) return refuse('records-not-accepted', 'no sidecar is present');
+  if (records.malformed.length) {
+    return refuse('malformed-record', 'a record does not parse; it is retained for review',
+      { malformed: records.malformed });
+  }
   if (sidecar.graphId !== approved.graphId) {
     return refuse('journal-graph-mismatch', 'the journal names a different graph lineage');
   }
 
-  const atBase = sidecar.metadataRevision === approved.base.metadataRevision
+  /*
+   * An outstanding identity transaction is only ever OURS or someone else's.
+   * Someone else's is never resolved here, and never ignored either.
+   */
+  const outstanding = records.outstandingIntents;
+  if (outstanding.length > 1) {
+    return refuse('multiple-outstanding-transactions',
+      'more than one identity transaction is outstanding; this needs review',
+      { outstanding });
+  }
+  if (outstanding.length === 1 && outstanding[0] !== approved.target.transactionId) {
+    return refuse('unrelated-outstanding-transaction',
+      'an identity transaction unrelated to this journal is outstanding; nothing is resolved here',
+      { outstanding, approvedTransactionId: approved.target.transactionId });
+  }
+
+  const proofBefore = proveRecordsAccepted(context, approved);
+  const recordsAlreadyAccepted = proofBefore.accepted;
+  const atBase = !recordsAlreadyAccepted
+    && outstanding.length === 0
+    && sidecar.metadataRevision === approved.base.metadataRevision
     && sidecar.acceptedSnapshotFingerprint === approved.base.snapshotFingerprint
     && sidecar.acceptedTransactionId === approved.base.acceptedTransactionId;
-  const atTarget = sidecar.metadataRevision === approved.target.metadataRevision;
-  if (!atBase && !atTarget) {
+
+  if (!recordsAlreadyAccepted && !atBase && outstanding.length === 0) {
     return refuse('journal-base-mismatch',
-      'the journal base matches neither the accepted records nor its own target',
+      'the records are neither at this journal\'s base nor provably at its target',
       { accepted: sidecar.metadataRevision, base: approved.base.metadataRevision,
-        target: approved.target.metadataRevision });
+        target: approved.target.metadataRevision,
+        proofCode: proofBefore.code, proofReason: proofBefore.reason });
   }
 
   // ---- whole-transaction preflight: classify every file before writing any
@@ -1032,15 +1412,20 @@ function recoverIncoming(context, { gate } = {}) {
   }
 
   const pending = classified.filter((item) => item.state === 'pending');
-  let wrote = [];
+  const wrote = [];
   try {
     if (pending.length) {
-      assertAppClosed(gate, 'recovery-note-writes');
-      if (atTarget) {
+      if (recordsAlreadyAccepted) {
         return refuse('journal-base-mismatch',
-          'the records already advanced while files remain unapplied; this needs review, not a roll-forward',
+          'the records are already accepted at the target while files remain unapplied; this needs review, not a roll-forward',
           { classified });
       }
+      if (outstanding.length) {
+        return refuse('outstanding-transaction-with-unapplied-files',
+          'an identity transaction is outstanding while files remain unapplied; this needs review',
+          { classified, outstanding });
+      }
+      assertAppClosed(gate, 'recovery-note-writes');
       for (const item of pending) {
         assertAppClosed(gate, `recovery-note-write:${item.fileId}`);
         const file = approved.files[item.fileId];
@@ -1055,40 +1440,103 @@ function recoverIncoming(context, { gate } = {}) {
       { wrote, classified, detail: error.detail || null });
   }
 
-  let transactionId = value.progress.transactionId;
-  let recordsAccepted = atTarget;
+  // ---- resolve the record store, through its own recovery contract
+  let resolution = recordsAlreadyAccepted ? 'already-accepted' : null;
   try {
-    if (!atTarget) {
-      assertAppClosed(gate, 'recovery-record-step');
-      const accepted = acceptRecords(context, approved, sidecar, null);
-      if (accepted.outcome !== 'accepted') {
-        return interrupted('records-refused',
-          `the store refused the identity update during recovery: ${accepted.code}`,
-          { wrote, classified, storeCode: accepted.code });
+    if (!recordsAlreadyAccepted && outstanding.length === 1) {
+      assertAppClosed(gate, 'recovery-record-recovery');
+      const recoveredStore = PI.recover(context,
+        { transactionId: approved.target.transactionId });
+      if (recoveredStore.outcome !== 'recovered') {
+        return {
+          outcome: 'unresolved',
+          mutated: wrote.length > 0,
+          code: 'identity-transaction-unresolved',
+          reason: `the record store did not resolve the outstanding transaction: ${recoveredStore.code || recoveredStore.outcome}`,
+          storeOutcome: recoveredStore.outcome,
+          storeCode: recoveredStore.code || null,
+          wrote,
+          classified,
+          transactionId: approved.target.transactionId,
+          note: 'the incoming journal stays open and every record, intent and before-image is retained',
+        };
       }
-      transactionId = accepted.transactionId || accepted.recovered?.transactionId || null;
-      recordsAccepted = true;
+      resolution = `store-recovered:${recoveredStore.classification}`;
+    } else if (!recordsAlreadyAccepted) {
+      assertAppClosed(gate, 'recovery-record-step');
+      const accepted = acceptRecords(context, approved);
+      if (accepted.outcome !== 'accepted') {
+        return {
+          outcome: String(accepted.outcome || '').startsWith('uncertain') ? 'unresolved' : 'refused',
+          mutated: wrote.length > 0,
+          code: String(accepted.outcome || '').startsWith('uncertain')
+            ? 'identity-transaction-unresolved' : 'records-refused',
+          reason: `the store did not accept the identity update during recovery: ${accepted.code}`,
+          storeOutcome: accepted.outcome,
+          storeCode: accepted.code,
+          storeDetail: accepted.detail || null,
+          wrote,
+          classified,
+          note: 'the incoming journal stays open and every retained record is preserved',
+        };
+      }
+      resolution = 'published';
     }
-    const closed = journalBody(approved,
-      { applied: approved.applyOrder, recordsAccepted, transactionId, closed: true },
-      value.supersedes);
-    PI.writeJournal(context, closed, journal.hash.replace(/^sha256:/, ''));
-    return {
-      outcome: 'recovered',
-      mutated: wrote.length > 0,
-      wrote,
-      classified,
-      progressDisagreement,
-      recordsAlreadyAccepted: atTarget,
-      transactionId,
-      metadataRevision: approved.target.metadataRevision,
-      proposalId: approved.proposalId,
-    };
   } catch (error) {
-    return interrupted(error.code || 'recovery-failed', error.message,
+    return interrupted(error.code || 'recovery-record-failed', error.message,
       { wrote, classified, detail: error.detail || null });
   }
+
+  /*
+   * Reopen and prove. Both records must be accepted and must be the exact ones
+   * this approval bound before the incoming journal may be closed.
+   */
+  const proof = proveRecordsAccepted(context, approved);
+  if (!proof.accepted) {
+    return {
+      outcome: 'unresolved',
+      mutated: wrote.length > 0,
+      code: 'records-not-proven',
+      reason: `the records could not be proven accepted after recovery: ${proof.code}`,
+      proofCode: proof.code,
+      proofReason: proof.reason,
+      proofDetail: proof.detail,
+      wrote,
+      classified,
+      resolution,
+      note: 'the incoming journal stays open; nothing is reported as completed',
+    };
+  }
+
+  try {
+    const closed = journalBody(approved, {
+      applied: approved.applyOrder,
+      recordsAccepted: true,
+      transactionId: approved.target.transactionId,
+      closed: true,
+    });
+    PI.writeJournal(context, closed, journal.hash.replace(/^sha256:/, ''));
+  } catch (error) {
+    return interrupted(error.code || 'journal-close-failed', error.message,
+      { wrote, classified, detail: error.detail || null,
+        note: 'the records are accepted and proven; only the journal close failed' });
+  }
+
+  return {
+    outcome: 'recovered',
+    mutated: wrote.length > 0,
+    wrote,
+    classified,
+    progressDisagreement,
+    recordsAlreadyAccepted,
+    resolution,
+    transactionId: approved.target.transactionId,
+    metadataRevision: approved.target.metadataRevision,
+    snapshotFingerprint: approved.target.snapshotFingerprint,
+    proposalId: approved.proposalId,
+  };
 }
+
 
 module.exports = {
   IncomingError,
@@ -1104,8 +1552,11 @@ module.exports = {
   encodeNote,
   journalBody,
   planIncoming,
+  proposalBody,
+  proveRecordsAccepted,
   recomputePlan,
   recoverIncoming,
+  revalidateIntendedState,
   stableRead,
   validateJournal,
   validateProposal,
