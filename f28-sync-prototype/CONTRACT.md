@@ -821,6 +821,22 @@ Awaiting supervisor review; not accepted. It extends the incoming contract above
 without weakening any of it. Results are in `RESULTS.md`, section "Idle-app
 incoming observation experiment".
 
+- **Three graph identities are named and never conflated.** `sidecarGraphId` is
+  our lineage and appears in no OG state; `ogRepo` is OG's repo identifier and is
+  what a bridge cause's `graph-id` holds, because `write-file-impl!` and
+  `rename-file!` pass `repo` to the bridge; `canonicalGraphPath` is the resolved
+  owned directory. Pending/failed cause checks bind to the **OG repo** and refuse
+  `missing-og-repo` rather than defaulting. A cause with no graph identity is
+  `unbound`: an unbound cause that is still pending or failed refuses
+  (`unattributable-open-cause`), while unbound COMPLETED causes -- which OG emits
+  against its `local` placeholder repo before a graph is bound, and which remain
+  in the append-only stream forever -- are reported without being treated as
+  outstanding.
+- **The live gate speaks only for the graph the app is actually on.** It refuses
+  `app-on-another-graph` when the live repo is not the transaction's owned graph
+  and `owned-graph-binding-unknown` when that cannot be determined. An owned case
+  OG does not have open must use an explicitly synthetic gate, marked
+  `synthetic: true` and classified as synthetic in results.
 - **The runtime gate is awaited and freshly evaluated at every boundary.**
   `assertRuntimeGate` is asynchronous, so a live gate takes a new reading at
   `journal-create`, at each note write, at the completion boundary and at the

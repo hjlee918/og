@@ -119,31 +119,81 @@ async function readIdleSignals(page, repo) {
   }, {repo});
 }
 
-/* Pending local save/rename causes, from the read-only observation stream. */
-async function pendingLocalCauses(page, graphId) {
-  return page.evaluate(({name, graphId}) => {
+/*
+ * Pending local save/rename causes, bound to the exact OG REPO.
+ *
+ * THREE DIFFERENT IDENTITIES are involved and must never be conflated:
+ *
+ *   sidecarGraphId      our own lineage id, e.g. "f28-idle-graph-2026-..."
+ *                       It lives in the sidecar and appears in NO OG state.
+ *   ogRepo              OG's repo identifier, e.g.
+ *                       "logseq_local_/Users/.../Logseq Test/<run>/<graph>".
+ *                       `write-file-impl!` passes THIS to `save-pending!`
+ *                       (fs/node.cljs) and `rename-file!` passes it to
+ *                       `rename-intent!` (handler/page.cljs), so it is what a
+ *                       cause's `graph-id` actually holds.
+ *   canonicalGraphPath  the resolved directory on disk.
+ *
+ * Filtering causes by the sidecar graph id therefore matches NOTHING and makes a
+ * busy graph look quiet. This function takes the OG repo and requires it.
+ *
+ * Causes that carry no graph identity at all are counted as `unbound`. An unbound
+ * cause that is still PENDING or FAILED is unattributable outstanding work and
+ * the caller must refuse on it (`unboundOpen`). An unbound COMPLETED cause is
+ * settled history -- OG emits such causes against its `local` placeholder repo
+ * before a graph is bound -- and is reported but not treated as outstanding.
+ */
+async function pendingLocalCauses(page, ogRepo) {
+  if (typeof ogRepo !== 'string' || ogRepo.length === 0) {
+    return {error: 'missing-og-repo',
+      reason: 'pending-cause checks require the exact OG repo identifier'};
+  }
+  return page.evaluate(({name, ogRepo}) => {
     const api = window[name];
     if (!api || typeof api.read !== 'function') return null;
     const events = api.read() || [];
-    const open = new Map();
     // The sanitized record carries `event`, `cause` and `observation` as
     // SIBLINGS -- `event` is the event name, not a container.
+    const mine = new Map();
+    const unbound = new Map();
+    let otherRepos = 0;
     for (const record of events) {
       const cause = record && record.cause;
       if (!cause || !cause['cause-id']) continue;
-      if (graphId && cause['graph-id'] && cause['graph-id'] !== graphId) continue;
       const kind = cause.kind;
       if (kind !== 'save' && kind !== 'rename') continue;
-      open.set(cause['cause-id'], cause.status);
+      const causeRepo = cause['graph-id'];
+      if (causeRepo === ogRepo) mine.set(cause['cause-id'], cause.status);
+      else if (causeRepo === undefined || causeRepo === null || causeRepo === '') {
+        unbound.set(cause['cause-id'], cause.status);
+      } else otherRepos += 1;
     }
-    let pending = 0;
-    let failed = 0;
-    for (const status of open.values()) {
-      if (status === 'pending') pending += 1;
-      if (status === 'failed') failed += 1;
-    }
-    return {pending, failed, total: open.size};
-  }, {name: OBSERVATION_API, graphId});
+    const tally = (map) => {
+      let pending = 0; let failed = 0;
+      for (const status of map.values()) {
+        if (status === 'pending') pending += 1;
+        if (status === 'failed') failed += 1;
+      }
+      return {pending, failed, total: map.size};
+    };
+    const own = tally(mine);
+    const loose = tally(unbound);
+    return {
+      ogRepo,
+      pending: own.pending,
+      failed: own.failed,
+      total: own.total,
+      unbound: loose.total,
+      unboundPending: loose.pending,
+      unboundFailed: loose.failed,
+      // Only an OPEN unbound cause is unattributable outstanding work. OG emits
+      // causes before a graph is bound (its `local` placeholder repo), and those
+      // stay in the append-only stream as COMPLETED history forever; refusing on
+      // them would block every run permanently for no safety gain.
+      unboundOpen: loose.pending + loose.failed,
+      otherRepoCauses: otherRepos,
+    };
+  }, {name: OBSERVATION_API, ogRepo});
 }
 
 /*

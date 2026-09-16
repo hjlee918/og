@@ -119,6 +119,23 @@ function makeIdleGate(readIdle) {
       failing.push('pending-bridge-cause');
     }
     if (signals.failedCauses) failing.push('failed-local-save');
+    /*
+     * A cause carrying no graph identity cannot be attributed to any graph. An
+     * OPEN one (pending or failed) is unattributable outstanding work and
+     * refuses. A COMPLETED one is settled history -- OG emits these against its
+     * `local` placeholder repo before a graph is bound, and they remain in the
+     * append-only stream forever -- so it is reported, not treated as pending.
+     */
+    if (signals.unboundOpenCauses) failing.push('unattributable-open-cause');
+    /*
+     * The live app must actually be on THIS transaction's owned graph before its
+     * state can authorize a write here.
+     */
+    if (signals.repoMatchesOwnedGraph === false) failing.push('app-on-another-graph');
+    if (signals.repoMatchesOwnedGraph === null
+        || signals.repoMatchesOwnedGraph === undefined) {
+      failing.push('owned-graph-binding-unknown');
+    }
     return {
       mode,
       idle: failing.length === 0,

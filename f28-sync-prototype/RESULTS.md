@@ -2494,3 +2494,114 @@ corrected**: it holds only for changes that delete content.
   Creates and updates only; one incoming transaction per owned case.
 - The app-closed live coordinator was updated for the async API and syntax
   checked; it was **not** re-run live in this session.
+
+## Idle-app experiment — pending-cause graph binding correction (2026-09-16)
+
+**Awaiting supervisor review; not accepted.** One focused correction; the
+observation matrix was **not** repeated.
+
+### The defect, confirmed twice
+
+`run-idle-incoming.js` set `currentGraphId` to the generated **sidecar** graph id
+and passed it to `pendingLocalCauses`. But `write-file-impl!` passes OG's **repo**
+to `save-pending!` (`fs/node.cljs:26`, `:58`) and `rename-file!` passes it to
+`rename-intent!` (`handler/page.cljs:221`), so a cause's `graph-id` holds the OG
+repo. The filter therefore matched nothing and made a busy graph look quiet. The
+earlier watcher-observation binding fix did not touch this separate filter.
+
+Confirmed in the headless probe check (injected records) and then **against the
+running application**: for one owned graph, causes filtered by the OG repo
+totalled **12**, and the same stream filtered by the sidecar id totalled **0**.
+
+### The fix
+
+- **Three identities are now named and separated everywhere** — in code, in the
+  gate signals and in evidence: `sidecarGraphId` (our lineage, present in no OG
+  state), `ogRepo` (OG's repo identifier, what a cause's `graph-id` holds), and
+  `canonicalGraphPath` (the resolved owned directory).
+- `pendingLocalCauses` **requires** the OG repo and refuses `missing-og-repo`
+  rather than defaulting.
+- The gate now also refuses `app-on-another-graph` when the live repo is not the
+  transaction's owned graph, and `owned-graph-binding-unknown` when that cannot
+  be determined — the live app's state cannot authorize a write to a graph it is
+  not on.
+- **Unattributable causes.** A cause with no graph identity is reported as
+  `unbound`. A refinement found while testing: OG emits causes against its
+  `local` placeholder repo **before a graph is bound**, and those remain in the
+  append-only stream as COMPLETED history forever. Refusing on any unbound cause
+  would block every run permanently for no safety gain, so the gate refuses on
+  `unboundOpen` — unbound causes that are still pending or failed — and reports
+  completed unbound causes without treating them as outstanding. The live run
+  observed `unbound: 3, unboundOpen: 0`.
+- **Synthetic graphs no longer borrow the live gate.** Owned cases that OG does
+  not have open now use an explicitly synthetic gate, marked `synthetic: true`,
+  and each such case is classified as synthetic in evidence.
+
+### Focused regressions
+
+| Check | Result |
+|---|---|
+| `f28-incoming/checks/probe-binding-check.js` (new, headless, injected records) | **15/15** |
+| `f28-incoming/checks/isolation-check.js` (real helper) | **42/42** |
+| `tests/incoming-application.test.js` | 64/64 |
+| `f28-incoming/checks/run-idle-binding-check.js` (new, one focused owned-app run) | **14/14** |
+
+The probe check pins all seven required cases: matching repo, the sidecar id
+matching nothing, a different repo, missing identity, pending save, failed save,
+pending rename and a completed cause — plus the gate refusing on each finding.
+The isolation check proves a **real** pending save, failed save and pending
+rename reach the applier and refuse **before any mutation**, with the owned case,
+helper and gate real and only the observation records injected; a completed cause
+does not block.
+
+### Honest disposition: genuine pending-save capture
+
+**Not established.** The live check sampled the observation stream every 50 ms
+while driving a real save and caught **zero** causes while still `pending`: the
+window between `save-pending!` and `save-completed!` is shorter than the interval
+reachable through the automation channel, and narrowing it would need new in-app
+hooks, which are not authorized. The pending-cause **gate path** is proven with
+injected records; **capturing a genuinely pending save from the running
+application remains unverified** and is retained as a limitation, not claimed.
+
+### Reporting correction to the earlier 37/37
+
+The 37/37 aggregate combined different kinds of evidence. Corrected breakdown:
+
+**Actual OG/UI observations (real):** the idle update and Korean create with
+database convergence and rendering; a genuinely open editor observed and
+refused; genuine Korean composition, with OG itself reporting
+`editor-in-composition?`; feature-off ordinary behaviour; and, from this batch,
+the cause/watcher identity binding and the corrected gate.
+
+**Real-helper tests with injected reconciliation verdicts:** the stalled-hook
+refusal, the delayed-older-payload regression, the restart case and the
+whitespace-only classification. Real owned cases, real helper, real applier —
+injected verdicts.
+
+**Source predictions, not observed behaviour:** that a whitespace-only edge
+change cannot be reconciled (from the trimmed-string comparison in
+`watcher_handler.cljs`); that `set-missing-block-ids!` writes `id::` into other
+pages. Case 8 injected a write *in that shape* — it does **not** demonstrate OG's
+missing-ID behaviour.
+
+**Untested integration behaviour:** calling `recoverIncoming` again in the same
+process is **not** a demonstrated coordinator crash and restart — no process was
+killed. Naturally occurring duplicate or delayed watcher payloads were never
+observed. Reconciliation invocation and completion counts remain unavailable.
+
+### Remaining gaps, for supervisor disposition
+
+Not scheduled, not started:
+
+1. Genuine pending/in-flight save capture from the running application.
+2. A real IME rather than synthetic `CompositionEvent`s (OG did report
+   composition, but a real input method may differ).
+3. A genuine coordinator crash and restart across process boundaries.
+4. OG's actual `set-missing-block-ids!` behaviour with a real block reference.
+5. Naturally occurring duplicate or delayed watcher payloads.
+6. OG's `:file/not-matched-from-disk` path reached from a real OG save.
+7. Reconciliation invocation/completion counts, which need package changes.
+
+**The approved live matrix is not complete.** Concurrent-edit safety remains
+untested and unclaimed.

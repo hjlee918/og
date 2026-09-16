@@ -16,6 +16,8 @@ const crypto = require('crypto');
 const path = require('path');
 const {makeGate, makeIdleGate, ownedProcesses} = require('./app-closed-gate');
 const PI = require('../../f28-sync-prototype/src/persistent-identity');
+const PROBE = require('./og-idle-probe');
+const PROBE_API = PROBE.OBSERVATION_API;
 const IA = require('../../f28-sync-prototype/src/incoming-application');
 
 const helper = process.env.F28_IDENTITY_HELPER;
@@ -235,7 +237,8 @@ async function main() {
 
   // ------------------------------------------------- the app-idle gate itself
   const idleSignals = {editing: false, composing: false, inputIdle: true,
-    writesFinished: true, pendingCauses: 0};
+    writesFinished: true, pendingCauses: 0, failedCauses: 0, unboundOpenCauses: 0,
+    repoMatchesOwnedGraph: true};
   const idleGate = makeIdleGate(() => idleSignals);
   const idleVerdict = await idleGate('t');
   check('idle-gate-reports-idle-and-never-closure',
@@ -247,6 +250,9 @@ async function main() {
     ['inputIdle', false, 'recent-input'],
     ['writesFinished', false, 'write-batch-not-dispatched'],
     ['pendingCauses', 1, 'pending-bridge-cause'],
+    ['unboundOpenCauses', 1, 'unattributable-open-cause'],
+    ['repoMatchesOwnedGraph', false, 'app-on-another-graph'],
+    ['repoMatchesOwnedGraph', null, 'owned-graph-binding-unknown'],
   ]) {
     const probe = await makeIdleGate(() => ({...idleSignals, [field]: value}))('t');
     check(`idle-gate-refuses-on-${label}`,
@@ -317,6 +323,88 @@ async function main() {
     PI.openGraph(idleCase).sidecar.metadataRevision === 'metadata-2' &&
     PI.readJournal(idleCase).value.state === 'closed',
     {outcome: idleApplied.outcome, calls: idleCalls});
+
+  // ---- a matching pending cause reaches the REAL gate and refuses a REAL write
+  /*
+   * Real anchored helper, real owned case, real gate -- with INJECTED
+   * observation records standing in for the app's stream. This proves the
+   * pending-cause path reaches the applier and refuses BEFORE any mutation.
+   */
+  const OG_REPO = 'logseq_local_/Users/x/Logseq Test/run/graph';
+  const stubPage = (events) => ({
+    evaluate: async (fn, args) => {
+      const previous = global.window;
+      global.window = {[PROBE_API]: {read: () => events}};
+      try { return await fn(args); } finally { global.window = previous; }
+    },
+  });
+  const injectedCause = (id, kind, status) => ({
+    event: `${kind}-${status}`,
+    cause: {'cause-id': id, kind, status, 'graph-id': OG_REPO},
+  });
+
+  const causeCase = {helper, runName, ownerToken,
+    graphDirectory: 'graph-cause', profileDirectory: 'identity-state-cause'};
+  PI.initializeOwnedRun(causeCase);
+  PI.putNoteFixture(causeCase, englishPath, englishSeed);
+  check('cause-case-enrolled', PI.enrollGraph(causeCase, {
+    graphId: `f28-incoming-iso-cause-${crypto.randomBytes(4).toString('hex')}`,
+    replicaId: 'replica-iso-cause', deviceId: 'device-iso-cause',
+    metadataRevision: 'metadata-1',
+    files: [{fileId: 'file-english', path: englishPath, content: englishSeed,
+      acceptedRevision: 'ar-english'}],
+  }).outcome === 'accepted', {});
+  const openedCause = PI.openGraph(causeCase);
+  const causeProposal = IA.buildProposal({
+    accepted: openedCause.sidecar, snapshot: openedCause.snapshot,
+    originReplicaId: 'replica-iso-synthetic-b', targetMetadataRevision: 'metadata-2',
+    changes: [{fileId: 'file-english', path: englishPath, content: englishUpdate}],
+  });
+  const causePreview = IA.planIncoming(causeCase, causeProposal, {mode: 'app-idle'});
+
+  for (const [label, events, expectedFailure] of [
+    ['pending-save', [injectedCause('c1', 'save', 'pending')], 'pending-bridge-cause'],
+    ['failed-save', [injectedCause('c2', 'save', 'failed')], 'failed-local-save'],
+    ['pending-rename', [injectedCause('c3', 'rename', 'pending')], 'pending-bridge-cause'],
+  ]) {
+    const page = stubPage(events);
+    const gate = makeIdleGate(async (stage) => {
+      const causes = await PROBE.pendingLocalCauses(page, OG_REPO);
+      return {stage, editing: false, composing: false, inputIdle: true,
+        writesFinished: true, repoMatchesOwnedGraph: true,
+        pendingCauses: causes.pending, failedCauses: causes.failed,
+        unboundOpenCauses: causes.unboundOpen};
+    });
+    const result = await IA.applyIncoming(causeCase, {
+      proposal: causeProposal, approve: causePreview.preview.previewFingerprint,
+      gate, mode: 'app-idle', reconcile: RECONCILED,
+    });
+    check(`a-real-${label}-cause-refuses-the-write-before-any-mutation`,
+      result.outcome === 'refused' && result.code === 'app-not-idle' &&
+      result.mutated === false &&
+      PI.readJournal(causeCase).value === null &&
+      PI.readNote(causeCase, englishPath) === englishSeed,
+      {label, outcome: result.outcome, code: result.code, expectedFailure,
+       injected: 'the observation records are INJECTED; the helper, owned case and gate are real'});
+  }
+
+  // and the same gate, with a clean stream, does allow the write
+  const cleanPage = stubPage([injectedCause('c9', 'save', 'completed')]);
+  const cleanGate = makeIdleGate(async (stage) => {
+    const causes = await PROBE.pendingLocalCauses(cleanPage, OG_REPO);
+    return {stage, editing: false, composing: false, inputIdle: true,
+      writesFinished: true, repoMatchesOwnedGraph: true,
+      pendingCauses: causes.pending, failedCauses: causes.failed,
+      unboundCauses: causes.unbound};
+  });
+  const allowed = await IA.applyIncoming(causeCase, {
+    proposal: causeProposal, approve: causePreview.preview.previewFingerprint,
+    gate: cleanGate, mode: 'app-idle', reconcile: RECONCILED,
+  });
+  check('a-completed-cause-does-not-block-the-write',
+    allowed.outcome === 'applied' &&
+    PI.openGraph(causeCase).sidecar.metadataRevision === 'metadata-2',
+    {outcome: allowed.outcome, code: allowed.code});
 
   console.log(`\nIsolation check passed: ${passed} checks on scratch run ${runName}`);
   console.log(`Retained scratch run: ${path.join(PI.PROFILE_ROOT, runName, 'identity-state')}`);

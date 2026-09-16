@@ -277,24 +277,72 @@ async function run() {
      * observation is reported alongside as its own field and is never
      * substituted for the missing signal.
      */
-    let currentGraphId = null;
+    /*
+     * THREE DISTINCT IDENTITIES, never conflated:
+     *   sidecarGraphId     our lineage id; appears in no OG state
+     *   ogRepo             OG's repo identifier; this is what a bridge cause's
+     *                      `graph-id` actually holds, because write-file-impl!
+     *                      and rename-file! pass `repo` to the bridge
+     *   canonicalGraphPath the resolved owned directory on disk
+     *
+     * The live gate is only meaningful for the graph OG actually has open, so it
+     * also confirms that the app is on THIS transaction's owned graph before its
+     * state may authorize a write.
+     */
+    let ownedGraph = null;
     const gateReadings = [];
     const readIdleNow = async (stage) => {
       const signals = await PROBE.readIdleSignals(session.page, repo);
-      const causes = await PROBE.pendingLocalCauses(session.page, currentGraphId);
+      const liveRepo = await session.page.evaluate(
+        () => window.frontend?.state?.get_current_repo?.() || null);
+      const causes = ownedGraph
+        ? await PROBE.pendingLocalCauses(session.page, ownedGraph.ogRepo)
+        : {error: 'no-owned-graph-bound'};
+      const usable = causes && !causes.error && causes !== null;
       const reading = {
         stage,
         ...signals,
-        pendingCauses: causes === null ? null : causes.pending,
-        failedCauses: causes === null ? null : causes.failed,
-        causeTotal: causes === null ? null : causes.total,
+        ogRepo: ownedGraph ? ownedGraph.ogRepo : null,
+        sidecarGraphId: ownedGraph ? ownedGraph.sidecarGraphId : null,
+        canonicalGraphPath: ownedGraph ? ownedGraph.canonicalGraphPath : null,
+        liveRepo,
+        repoMatchesOwnedGraph: ownedGraph
+          ? (liveRepo !== null ? liveRepo === ownedGraph.ogRepo : null)
+          : null,
+        pendingCauses: usable ? causes.pending : null,
+        failedCauses: usable ? causes.failed : null,
+        unboundOpenCauses: usable ? causes.unboundOpen : null,
+        causeTotal: usable ? causes.total : null,
+        causeError: causes && causes.error ? causes.error : null,
       };
       gateReadings.push({stage, editing: reading.editing, composing: reading.composing,
         inputIdle: reading.inputIdle, writesFinished: reading.writesFinished,
-        pendingCauses: reading.pendingCauses});
+        pendingCauses: reading.pendingCauses, unboundOpenCauses: reading.unboundOpenCauses,
+        repoMatchesOwnedGraph: reading.repoMatchesOwnedGraph});
       return reading;
     };
     const idleGate = makeIdleGate(readIdleNow);
+
+    /*
+     * An EXPLICITLY SYNTHETIC gate, for owned cases OG does not have open.
+     * The live gate speaks only for the graph the application is actually on;
+     * using it to claim a different synthetic graph is idle would be exactly the
+     * conflation this correction removes. Every verdict it produces is marked
+     * `synthetic: true` and every case using it is classified as synthetic.
+     */
+    const syntheticIdleGate = (overrides = {}) => makeIdleGate(async (stage) => ({
+      stage,
+      synthetic: true,
+      editing: false, composing: false, inputIdle: true, writesFinished: true,
+      pendingCauses: 0, failedCauses: 0, unboundOpenCauses: 0,
+      repoMatchesOwnedGraph: true,
+      ...overrides,
+    }));
+    const SYNTHETIC_IDLE = syntheticIdleGate();
+    /* A synthetic reconciliation verdict, for owned cases OG does not have open
+     * and therefore can never reconcile. Labelled as injected in every record. */
+    const SYNTHETIC_RECONCILE = async () => ({reconciled: true, injected: true,
+      reason: 'synthetic: this owned case is not the graph OG has open'});
 
     // ------------------------------------ CASE 1: idle update + Korean create
     phase('case-1-idle-apply');
@@ -343,7 +391,9 @@ async function run() {
          content: koreanSeed.bytes.toString('utf8'), acceptedRevision: 'ar-korean'},
       ],
     }).outcome === 'accepted', 'enrollment was refused');
-    currentGraphId = graphId;
+    ownedGraph = {sidecarGraphId: graphId, ogRepo: repo,
+      canonicalGraphPath: first.graph};
+    out.ownedGraphIdentities = ownedGraph;
     const accepted1 = PI.openGraph(first.context);
     record('case-1-accepted-local-identity',
       accepted1.outcome === 'accepted' && accepted1.sidecar.metadataRevision === 'metadata-1',
@@ -555,9 +605,7 @@ async function run() {
       return now.preview.previewFingerprint;
     };
 
-    const baseSignals = {...(await readIdleNow('case-2-base')),
-      editing: false, composing: false, inputIdle: true,
-      pendingCauses: 0, failedCauses: 0, writesFinished: true};
+    const liveAtCase2 = await readIdleNow('case-2-live-reference');
     const refusals = [];
     for (const [key, value, label] of [
       ['editing', true, 'editor-buffer-open'],
@@ -568,7 +616,7 @@ async function run() {
       ['pendingCauses', 1, 'pending-bridge-cause'],
       ['failedCauses', 1, 'failed-local-save'],
     ]) {
-      const probeGate = makeIdleGate(async () => ({...baseSignals, [key]: value}));
+      const probeGate = syntheticIdleGate({[key]: value});
       const verdict = await probeGate('case-2');
       const result = await IA.applyIncoming(second.context, {
         proposal: gateProposal, approve: freshApproval(label),
@@ -579,7 +627,14 @@ async function run() {
         notesUnchanged: PI.readNote(second.context, 'pages/Gate Anchor.md') === seedA,
         journalAbsent: PI.readJournal(second.context).value === null});
     }
-    out.cases.case2 = {mode: IA.MODE_APP_IDLE, refusals, staleness,
+    out.cases.case2 = {mode: IA.MODE_APP_IDLE,
+      gate: 'SYNTHETIC — this owned case is not the graph OG has open',
+      liveReferenceReading: {editing: liveAtCase2.editing,
+        composing: liveAtCase2.composing, inputIdle: liveAtCase2.inputIdle,
+        writesFinished: liveAtCase2.writesFinished,
+        pendingCauses: liveAtCase2.pendingCauses,
+        repoMatchesOwnedGraph: liveAtCase2.repoMatchesOwnedGraph},
+      refusals, staleness,
       stalenessNote: staleness.length
         ? 'the owned directory changed between planning and applying; an external agent (the roots are inside iCloud Drive) is not excluded by this design'
         : 'no staleness observed during this case'};
@@ -593,7 +648,7 @@ async function run() {
     const liarGate = async () => ({mode: IA.MODE_APP_IDLE, idle: true, closed: true});
     const liar = await IA.applyIncoming(second.context, {
       proposal: gateProposal, approve: freshApproval('liar-gate'),
-      gate: liarGate, mode: IA.MODE_APP_IDLE, reconcile,
+      gate: liarGate, mode: IA.MODE_APP_IDLE, reconcile: SYNTHETIC_RECONCILE,
     });
     record('case-2-an-idle-gate-claiming-closure-is-refused',
       liar.outcome === 'refused' && liar.code === 'gate-mode-mismatch'
@@ -628,7 +683,7 @@ async function run() {
     };
     const noHook = await IA.applyIncoming(third.context, {
       proposal: hookProposal, approve: hookApproval(),
-      gate: idleGate, mode: IA.MODE_APP_IDLE,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE,
     });
     record('case-3-app-idle-refuses-without-a-reconciliation-hook',
       noHook.outcome === 'refused' && noHook.code === 'reconciliation-hook-missing'
@@ -640,9 +695,9 @@ async function run() {
       reason: 'synthetic: the hook reports OG never took the change'});
     const timedOut = await IA.applyIncoming(third.context, {
       proposal: hookProposal, approve: hookApproval(),
-      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: stalled,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE, reconcile: stalled,
     });
-    out.cases.case3 = {mode: IA.MODE_APP_IDLE, noHook: noHook.code,
+    out.cases.case3 = {mode: IA.MODE_APP_IDLE, gate: 'SYNTHETIC gate; injected stalled verdict', noHook: noHook.code,
       timedOut: {outcome: timedOut.outcome, code: timedOut.code, applied: timedOut.applied},
       injected: 'the stalled verdict is INJECTED, not a naturally observed OG failure'};
     record('case-3-a-stalled-reconciliation-blocks-publication',
@@ -710,7 +765,10 @@ async function run() {
 
     const duringEdit = await readIdleNow('case-4-editing');
     const editVerdict = await idleGate('case-4-editing');
-    out.cases.case4 = {mode: IA.MODE_APP_IDLE, live: true, entered,
+    out.cases.case4 = {mode: IA.MODE_APP_IDLE, live: true,
+      observationIsReal: 'the editor state and composition were read off the running application',
+      applicationGate: 'SYNTHETIC, seeded from that live reading, because this owned case is not the graph OG has open',
+      entered,
       signals: {editing: duringEdit.editing, composing: duringEdit.composing,
         inputIdle: duringEdit.inputIdle},
       verdict: {idle: editVerdict.idle, failing: editVerdict.failing}};
@@ -769,9 +827,19 @@ async function run() {
     });
     const editPreview = IA.planIncoming(fourth.context, editProposal,
       {mode: IA.MODE_APP_IDLE});
+    /*
+     * The gate here is SYNTHETIC but SEEDED from the reading just taken off the
+     * live application, because this owned case is not the graph OG has open.
+     * What is real is the observation (a genuine editor was open and OG reported
+     * it); what is synthetic is applying that observation to another graph.
+     */
+    const seededGate = syntheticIdleGate({
+      editing: duringEdit.editing, composing: duringEdit.composing,
+      inputIdle: duringEdit.inputIdle, seededFromLive: true,
+    });
     const refusedWhileEditing = await IA.applyIncoming(fourth.context, {
       proposal: editProposal, approve: editPreview.preview.previewFingerprint,
-      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile,
+      gate: seededGate, mode: IA.MODE_APP_IDLE, reconcile: SYNTHETIC_RECONCILE,
     });
     record('case-4-application-refused-while-a-real-edit-is-open',
       refusedWhileEditing.outcome === 'refused'
@@ -849,9 +917,9 @@ async function run() {
     });
     const wsResult = await IA.applyIncoming(fifth.context, {
       proposal: wsProposal, approve: wsPreview.preview.previewFingerprint,
-      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: wsReconcile,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE, reconcile: wsReconcile,
     });
-    out.cases.case5 = {mode: IA.MODE_APP_IDLE, live: false,
+    out.cases.case5 = {mode: IA.MODE_APP_IDLE, gate: 'SYNTHETIC gate and SYNTHETIC hook verdict', live: false,
       classification: 'SYNTHETIC hook verdict in an owned case OG does not have open',
       outcome: wsResult.outcome, code: wsResult.code, applied: wsResult.applied,
       sourceBasis: 'watcher_handler.cljs compares (string/trim content) with (string/trim db-content)'};
@@ -893,9 +961,9 @@ async function run() {
     };
     const dupResult = await IA.applyIncoming(sixth.context, {
       proposal: dupProposal, approve: dupPreview.preview.previewFingerprint,
-      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: dupReconcile,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE, reconcile: dupReconcile,
     });
-    out.cases.case6 = {mode: IA.MODE_APP_IDLE, live: false,
+    out.cases.case6 = {mode: IA.MODE_APP_IDLE, gate: 'SYNTHETIC gate; INJECTED reconciliation verdicts', live: false,
       classification: 'INJECTED reconciliation verdicts; no watcher event was fabricated',
       outcome: dupResult.outcome, code: dupResult.code, calls: dupCalls};
     record('case-6-a-delayed-older-payload-blocks-publication-at-the-boundary',
@@ -936,7 +1004,7 @@ async function run() {
     // INJECTED interruption after the first file's write and reconciliation
     const rsInterrupted = await IA.applyIncoming(seventh.context, {
       proposal: rsProposal, approve: rsPreview.preview.previewFingerprint,
-      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: rsOk,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE, reconcile: rsOk,
       failAt: `before-file:${rsOrder[1]}`,
     });
     const afterInterrupt = {
@@ -945,14 +1013,14 @@ async function run() {
     };
     const rsReconciled = [];
     const rsRestart = await IA.recoverIncoming(seventh.context, {
-      gate: idleGate, mode: IA.MODE_APP_IDLE,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE,
       reconcile: async (fileId) => { rsReconciled.push(fileId); return {reconciled: true, injected: true}; },
     });
     const afterRestart = {
       [rsOrder[0]]: IA.stableRead(seventh.context,
         rsPreview.preview.files.find(f => f.fileId === rsOrder[0]).path).hash,
     };
-    out.cases.case7 = {mode: IA.MODE_APP_IDLE, live: false,
+    out.cases.case7 = {mode: IA.MODE_APP_IDLE, gate: 'SYNTHETIC gate; INJECTED interruption and verdicts', live: false,
       classification: 'INJECTED interruption and INJECTED reconciliation verdicts',
       interrupted: {outcome: rsInterrupted.outcome, applied: rsInterrupted.applied},
       restart: {outcome: rsRestart.outcome, mode: rsRestart.mode,
@@ -1007,9 +1075,9 @@ async function run() {
     };
     const brResult = await IA.applyIncoming(eighth.context, {
       proposal: brProposal, approve: brPreview.preview.previewFingerprint,
-      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile: brReconcile,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE, reconcile: brReconcile,
     });
-    out.cases.case8 = {mode: IA.MODE_APP_IDLE, live: false,
+    out.cases.case8 = {mode: IA.MODE_APP_IDLE, gate: 'SYNTHETIC gate; SYNTHETIC id:: write', live: false,
       classification: 'SYNTHETIC id:: write into an unrelated page, in the shape set-missing-block-ids! produces',
       outcome: brResult.outcome, code: brResult.code,
       sourceBasis: 'watcher_handler.cljs set-missing-block-ids! -> editor/property batch-set-block-property! -> outliner transact -> updated-page-hook -> sync-to-file'};
@@ -1046,7 +1114,7 @@ async function run() {
     PI.putNoteFixture(ninth.context, 'pages/Pre Anchor.md', localEdit);
     const pcResult = await IA.applyIncoming(ninth.context, {
       proposal: pcProposal, approve: pcPreview.preview.previewFingerprint,
-      gate: idleGate, mode: IA.MODE_APP_IDLE, reconcile,
+      gate: SYNTHETIC_IDLE, mode: IA.MODE_APP_IDLE, reconcile: SYNTHETIC_RECONCILE,
     });
     // and the helper's own precondition refuses a stale-based write directly
     let helperRefusal = null;
@@ -1054,7 +1122,7 @@ async function run() {
       PI.putNoteExpecting(ninth.context, 'pages/Pre Anchor.md',
         Buffer.from('- forced\n', 'utf8'), sha256(pcSeed));
     } catch (error) { helperRefusal = error.code; }
-    out.cases.case9 = {mode: IA.MODE_APP_IDLE, live: false,
+    out.cases.case9 = {mode: IA.MODE_APP_IDLE, gate: 'SYNTHETIC gate; SYNTHETIC local edit', live: false,
       classification: 'SYNTHETIC local edit through the fixture writer',
       applier: {outcome: pcResult.outcome, code: pcResult.code},
       helperRefusal};
