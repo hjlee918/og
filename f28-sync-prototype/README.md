@@ -18,20 +18,27 @@ findings, and independently ran the memory-only probe checks. The complete live
 observation matrix is **not** accepted as finished, and concurrent-edit safety
 remains unverified and unclaimed.
 
-[EDITING_PAUSE_DESIGN.md](./EDITING_PAUSE_DESIGN.md) is a **proposal only**,
-now at revision 2: it designs that document's deferred option B — a short,
-explicit "Apply pending changes" pause. Revision 1 was reviewed and found to
-leave its central guarantee unresolved; revision 2 replaces the quiet-window
-drain with explicit ownership tracking, refuses application while any unsaved
-buffer exists rather than replaying stale state, splits timeout and crash
-handling into pre-write and post-write regimes, and corrects the protection
-claims. The honest scope is **twelve** application seams, three of them in the
-path every save takes, so **revision 2 recommends retaining the accepted
-app-closed path for the next prototype**. Nothing in it is approved or
-implemented. It does not design continuous concurrent editing or a general
-synchronization service.
+[EDITING_PAUSE_DESIGN.md](./EDITING_PAUSE_DESIGN.md) is **closed as deferred**.
+It designed that document's option B — a short, explicit "Apply pending changes"
+pause. The supervisor accepted its recommendation to defer the pause and retain
+the accepted app-closed path. It is **not safety-complete** and must not be
+cited as such: its §0.2 records six unresolved findings — no helper
+expiry/termination contract, a §5.2/§5.4 contradiction, incompatible mandatory
+live cases, incomplete ledger ownership, editor transactions the gates do not
+cover, and a durable marker with no approved schema, target, lifecycle or
+restart-ordering contract. They are recorded, not redesigned, and §0.2 also
+records the corrections made to two of the findings' own source claims. Nothing in it is approved or implemented, and
+nothing in it is to be implemented.
 
-Korean progress summary: [PROJECT_ROADMAP_KO.md](../PROJECT_ROADMAP_KO.md).
+The accepted app-closed application path
+([INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md)) remains the
+foundation for the next step.
+
+Korean summaries: this experiment's summary is
+[F28_ROADMAP_SUMMARY_KO.md](../F28_ROADMAP_SUMMARY_KO.md). The **authoritative**
+comprehensive roadmap is the user's own
+`project-notes/PROJECT_ROADMAP_KO.md`, outside this repository; where the two
+differ, that one governs.
 
 Run the incoming-application suite with the identity helper, in fresh owned
 children of one fresh run:

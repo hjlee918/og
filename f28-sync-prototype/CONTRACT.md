@@ -817,9 +817,14 @@ data enrollment and daily use remain separate future approvals.
 
 ## Idle-app incoming observation contract (2026-09-16)
 
-Awaiting supervisor review; not accepted. It extends the incoming contract above
-without weakening any of it. Results are in `RESULTS.md`, section "Idle-app
-incoming observation experiment".
+**Partially accepted, 2026-09-16.** The supervisor accepted the graph-binding
+correction and the **limited** observation findings, and independently ran the
+memory-only probe checks (15/15). The focused live result (14/14) remains
+coder-reported evidence. The **complete live observation matrix is NOT accepted
+as finished**, and **concurrent-edit safety is unverified and unclaimed**. The
+terms below hold only within that scope; nothing here is a whole-matrix pass.
+It extends the incoming contract above without weakening any of it. Results are
+in `RESULTS.md`, section "Idle-app incoming observation experiment".
 
 - **Three graph identities are named and never conflated.** `sidecarGraphId` is
   our lineage and appears in no OG state; `ogRepo` is OG's repo identifier and is

@@ -1,13 +1,23 @@
 # A controlled editing/save pause for applying one incoming change
 
-Status: **proposal only, revision 2**, 2026-09-16. Nothing here is implemented,
-approved or run. Written from source and documentation review; no graph,
-profile, helper or application was touched.
+Status: **CLOSED AS DEFERRED**, 2026-09-16. Nothing here is implemented,
+approved or run, and **nothing here is to be implemented**. Written from source
+and documentation review; no graph, profile, helper or application was touched.
 
-Revision 1 (`63e4625f5`) was reviewed and found to leave its central guarantee
-unresolved. This revision resolves it, and the resolution changes the
-recommendation. **Revision 2 recommends retaining the accepted app-closed path
-for the next prototype** — see "Recommendation".
+The supervisor accepted revision 2's recommendation to defer this design and
+retain the accepted app-closed path. **Revision 2 is not safety-complete**, and
+must not be labelled or cited as such: the review recorded six unresolved
+findings, listed in §0.2, which invalidate specific mechanisms described below.
+They are **recorded, not redesigned** — resolving them is out of scope for a
+deferred proposal.
+
+Revision history, preserved: revision 1 (`63e4625f5`) was reviewed and found to
+leave its central guarantee unresolved; revision 2 (`1fed5b3ef`) replaced the
+quiet-window drain with ownership tracking, refused application while any
+unsaved buffer exists, split timeout and crash handling into two regimes,
+corrected the protection claims, and reversed the recommendation. This revision
+adds §0 only; §1–§9 are left as revision 2 wrote them, with a marker on each
+section a finding invalidates.
 
 ## Revision 2: claims withdrawn from revision 1
 
@@ -34,6 +44,214 @@ are accepted; the supervisor independently ran the memory-only probe checks
 **concurrent-edit safety remains unverified and unclaimed**, including after
 this design, which is a proposal.
 
+## 0. Supervisor disposition and unresolved findings
+
+### 0.1 Disposition
+
+The recommendation in §9 — defer the pause, retain the accepted app-closed path
+for the next prototype — is **accepted**. This proposal is closed. The approval
+items formerly listed at the end of this document are **withdrawn**; they are
+retained below for the record and are not open decisions. Any future attempt at
+an in-application barrier requires a new scope decision and would start from
+§0.2, not from §1–§8.
+
+### 0.2 Unresolved findings
+
+Each finding is blocking. Each names the section it invalidates. **None is
+resolved here**, and none may be read as a design.
+
+#### F1 — Authorization expiry does not terminate an admitted helper operation
+
+§5.2 step 2 offers "the authorization's own expiry has passed by more than the
+allowed clock skew" as a way to establish writer termination. The helper
+protocol has no such contract and cannot acquire one by being described.
+
+Source: `f28-sync-prototype/native/identity_store_helper.c`. The request parser
+(`parse`, `:~236`) accepts a fixed field set — `MAGIC`, `COMMAND`, `GRAPHROOTHEX`,
+`EXPECT`, `DATAHEX`, `END` and the run/owner/target fields — and there is **no
+expiry, deadline, lease or nonce field anywhere in it**. The command set is
+exactly nine (`:221-223`): `init`, `put-note`, `read-note`, `hash-graph`,
+`read-records`, `write-record`, `clear-intent`, `write-journal`, `read-journal`.
+**There is no termination, revocation, abort or cancel command.** Each
+invocation is a one-shot process that dispatches and returns (`return 0` per
+command, `:784`, `:807`, `:827`, `:859`, `:887`, `:905`, `:912`, `:924`). The
+only serialization is a cooperative `LOCK` in the owned profile (`acquire_lock`,
+`:374-378`), which orders participating helper invocations and nothing else.
+
+Consequence: once `put-note` has been started it runs to completion or the
+process dies. An expiry the helper never reads cannot stop it, and the
+coordinator holds no handle that revokes it. §5.2's step 2 second branch is
+fiction as specified.
+
+#### F2 — §5.4 contradicts §5.2, and "resume anyway" is a risk override
+
+§5.2 requires **both** writer termination **and** per-path reconciliation before
+affected writes resume. §5.4 says that once the recorded expiry has passed "the
+block lapses to an advisory notice naming the files to verify" — which reopens
+writes having established neither. The two cannot both hold.
+
+Separately, §5.3's confirmed **"Resume editing these files anyway"** action is an
+**unapproved risk override**, not evidence of safety. Revision 2 presented it as
+the resolution of the lockout problem. It is a decision to proceed without the
+guarantee, taken by a user who cannot observe the helper either. It is recorded
+here as an open risk-acceptance question, not as a mechanism.
+
+#### F3 — §3.1 and live case 5 are incompatible as specified
+
+§3.1 requires, as a precondition for closing admission, that the ledger be empty
+and that no bridge cause be `pending` — it refuses `local-work-pending` and
+`unfinished-local-write` otherwise. Live case 5 (§8.4) requires "admission
+closed with one write already dispatched" and asserts the drain waits for it.
+
+Under §3.1 that state is refused before admission ever closes, so case 5 cannot
+be constructed. Either the precondition admits some in-flight work, or the case
+is unreachable. Revision 2 specified both and reconciled neither. Case 4 and
+case 5 were both marked mandatory, so this is not a cosmetic conflict: the two
+mandatory cases contradict each other.
+
+#### F4 — A synchronous listener does not prove exact ledger ownership
+
+§2.1's synchrony argument is correct as far as it goes — admission happens
+before `transact!` returns — but §2.2 and §2.3 draw a stronger conclusion from
+it than it supports. Three specific ways exact ownership fails:
+
+1. **Deduped admissions.** `write-files!` iterates
+   `(set (map #(take 3 %) pages))` (`outliner/file.cljs:76`), dropping the epoch,
+   so admissions differing only in time collapse into **one** `do-write-file!`
+   call. Which admissions that one call retires is undefined, and admissions
+   arriving into the next batch must not be retired by it.
+2. **No admission-to-bytes correspondence.** The tree is read once at dispatch
+   (`do-write-file!`, `outliner/file.cljs:60-70`) and `save-tree-aux!`
+   (`modules/file/core.cljs:146`) re-pulls the page (`:148`) before rendering it
+   (`tree->file-content`, `:157`). The bytes written reflect the database **as of
+   dispatch**, covering every mutation accumulated since — not any one admitted
+   mutation.
+3. **Terminal paths below `do-write-file!` that end before a cause exists.**
+   §2.2 places retirement at `do-write-file!`'s three branches, but a dispatched
+   write can still end without any cause opening: `save-tree-aux!` publishes a
+   `:capture-error` and writes nothing for blank content
+   (`modules/file/core.cljs:158-161`), and logs and writes nothing when the file
+   path is invalid (`:165-166`). Such an entry never retires, so the drain cannot
+   complete and refuses at `drain-timeout` — a false refusal, and evidence that
+   the retirement set is incomplete.
+
+**Withdrawn from this finding.** An earlier draft of F4 asserted a fourth item —
+that dispatch creates a new admission re-entrantly, via `save-tree!`'s no-file
+branch calling `transact-file-tx-if-not-exists!` (`modules/file/core.cljs:115`)
+and its `db/transact!` (`:141`). **The cited chain does not establish it.**
+`invoke-hooks` calls `updated-page-hook` only for entries in `:pages`
+(`outliner/pipeline.cljs:109-111`), and `get-blocks-and-pages`
+(`modules/datascript_report/core.cljs:24-52`) collects `:pages` only from a
+changed entity's `:block/page` reference (`:33-35`) or from explicit
+`:from-page`/`:target-page` in `tx-meta` (`:45-47`). That transaction changes a
+file entity (`{:file/path …}`) and a page entity
+(`{:block/name … :block/file …}`); neither carries `:block/page`, and it passes
+no `tx-meta`. So `:pages` is empty, `updated-page-hook` is not called, and
+`sync-to-file` does not run. Calling `d/transact!` alone does not imply an
+admission. The claim is withdrawn rather than restated more weakly.
+
+Consequence: the ledger as specified is not an exact ownership record. It may be
+sound enough to **refuse** on, but §2.4's claim that the drain passes on
+positive facts about tracked objects is not established.
+
+#### F5 — G1/G2 do not cover all editor transactions
+
+§1.1 places G2 at `save-current-block!` (`editor.cljs:1322`) and G1 at
+`set-editing!` (`state.cljs:1921`), and §3.4 concludes that during the pause
+"no editor-originated database mutation occurs at all". That conclusion does not
+hold.
+
+**Two concrete bypasses establish it.** `cycle-todos!` (`editor.cljs:745`) and
+`delete-blocks!` (`editor.cljs:871`) each call `outliner-tx/transact!` directly,
+and each operates on `get-selected-blocks` (`editor.cljs:732`), which reads
+`state/get-selection-blocks` — **selected** blocks, not an editing block. They
+therefore run with **no block in edit mode at all**, which is precisely the state
+§3.1 requires before admission closes. G1 does not apply (nothing calls
+`set-editing!`), G2 is not on the path (nothing calls `save-current-block!`), and
+G3 sees the result only **after** the database has been mutated — reintroducing
+the stale-in-memory-state problem revision 2 claimed to eliminate. Either example
+alone refutes §3.4's invariant.
+
+For context only, and **not as a coverage metric**: `outliner-tx/transact!`
+appears at 23 direct call sites across five files — `handler/editor.cljs` (19),
+`handler/editor/property.cljs:82`, `handler/block.cljs:78`,
+`handler/dnd.cljs:43`, `util/page_property.cljs:86`. A raw call-site count does
+not measure gate coverage: some of those sites are reached only through paths the
+gates do cover, and others are not editor-initiated at all. The census indicates
+where to look; the two bypasses above are the evidence.
+
+Also unresolved: §4.3 refuses block-reference payloads so that
+`set-missing-block-ids!` transacts nothing, but the design never states the
+general rule that distinguishes a **prohibited local mutation** from a
+**required reconciliation mutation** at G3. Both arrive at `sync-to-file`
+identically. Without that rule G3 either deadlocks reconciliation or admits
+local edits.
+
+#### F6 — The durable marker has no approved schema, target or lifecycle
+
+§5.4's per-path marker is described only by what it must achieve. Its schema,
+its target, its publication/read/clearing lifecycle and its restart ordering are
+undesigned, and revision 2 implied existing helper support was sufficient
+without saying what that support would be.
+
+**Correction to an earlier draft of this finding.** That draft claimed
+`put-note` is the only graph-writing command and that `write-record` targets the
+profile only, concluding that a new helper command is necessarily required.
+**Both claims are wrong.** `write-record` with `target: sidecar`
+(`identity_store_helper.c:865-872`) opens the **graph** anchor and publishes
+through `open_sidecar_directory` (`:693-702`) into the graph-local
+`logseq/.og-sync` directory, with the same staged-write, destination recheck,
+rename publication and entry re-verification as every other record. `hash_tree`
+already **excludes** `logseq/.og-sync` (`:548`, `:588`), so a file there is not
+counted as a note. That draft also cited `valid_note_path` at `:~700`; it is at
+`:172`.
+
+So an anchored, owner-verified, graph-local write path **already exists**, and
+whether a future design would extend an existing command, add a target, or add a
+command is **open** — this document prescribes none of them.
+
+What does not exist, and is what makes H11 undesigned:
+
+- **No approved marker schema.** Nothing defines the bytes, their versioning, or
+  how a torn or partial marker is distinguished from a valid one.
+- **No dedicated target.** `request.target` is an enumerated set — `none`,
+  `sidecar`, `device`, `intent`, `evidence` (`:229`) — and each is already bound
+  to an identity or recovery record. `sidecar` holds `identity-v1.json`
+  (`SIDECAR_NAME`, `:35`), so writing a marker through it would **overwrite the
+  identity record**. Identity records must **not** be repurposed to carry a
+  marker, and this document does not propose doing so.
+- **No lifecycle contract.** Who clears the marker if recovery never runs is
+  unanswered; note that there is deliberately no `clear-journal` command
+  (`:895-898`), so "retained forever" is the existing house pattern and a marker
+  would need its own answer.
+- **No restart-ordering contract.** The marker's write is not ordered against the
+  note write it is meant to protect, and nothing says what happens when the
+  marker and the journal disagree.
+- **No OG-side read contract.** How OG reads a graph-local marker before the
+  graph is bound is not specified. (Reading an ordinary graph file needs no new
+  permission; the ordering does need a contract.)
+
+### 0.3 Sections these findings invalidate
+
+| Finding | Sections not sound as specified |
+|---|---|
+| F1 | §5.2 step 2, §5.4 expiry row |
+| F2 | §5.3, §5.4 |
+| F3 | §3.1 precondition set, §8.4 cases 4 and 5 |
+| F4 | §2.1 conclusion, §2.2, §2.3, §2.4 |
+| F5 | §1.1 G1/G2, §3.4, §4.3 |
+| F6 | §5.4 marker, §7 H11 |
+
+**§6 is partly affected.** Its "Controlled" row attributes coverage to
+"G1/G2/G3 + the ledger + causes" — the very mechanisms F4 and F5 show are not
+established. **That row's coverage claim is unestablished** and must not be
+cited as a guarantee. The "inert in the synthetic setup" row (which rests on
+build and containment facts, asserted at run start) and the "outside the
+guarantee" row (external writers, a second OG window, main-process and asset
+writes) remain valid, as does §6's statement that the barrier excludes nothing.
+
+§9 (recommendation) is unaffected.
+
 ## Non-goals
 
 - Not continuous concurrent editing, not a synchronization service, not a
@@ -57,6 +275,8 @@ relative to anything applied afterwards. Admission must close **before**
 `outliner-tx/transact!`.
 
 ### 1.1 The layers, and where the gates go
+
+> **Superseded — see §0.2 F5.** Selected-block operations — `cycle-todos!` and `delete-blocks!` — transact directly with no block in edit mode, bypassing both gates. Recorded, not redesigned; not to be implemented.
 
 | # | Layer | Source | Gate |
 |---|---|---|---|
@@ -116,6 +336,8 @@ of recent activity.
 
 ### 2.1 Why a ledger at layer 3 is complete for outliner-originated writes
 
+> **Superseded — see §0.2 F4.** Synchrony holds; the ownership conclusion drawn from it does not. Recorded, not redesigned; not to be implemented.
+
 The database listener chain is **synchronous**:
 
 ```
@@ -141,6 +363,8 @@ reconciliation's own database write raises no admission. `set-missing-block-ids!
 does, because `batch-set-block-property!` transacts without that flag; see §4.4.)
 
 ### 2.2 The ledger: admission → retirement
+
+> **Superseded — see §0.2 F4.** The retirement set is incomplete and dedupe leaves ownership undefined. Recorded, not redesigned; not to be implemented.
 
 Entry key `[repo page-db-id]`, each entry carrying an admission id and a
 re-queue count.
@@ -172,6 +396,8 @@ looping.
 
 ### 2.3 Ownership transfer, and the one gap that is closed by construction
 
+> **Superseded — see §0.2 F4.** Ownership across the transfer is not established: deduped admissions leave retirement undefined, and a dispatched write can settle on a pre-cause terminal path without any cause opening, so the entry never retires. Recorded, not redesigned; not to be implemented.
+
 After `save-tree!` the path is synchronous — `save-tree-aux!`
 (`modules/file/core.cljs:145`), `db/pull`, `tree->file-content`,
 `alter-files-handler!` (`handler/file.cljs:203`) — until `write-file-f`'s
@@ -201,6 +427,8 @@ of which a payload-threaded token would force.
 
 ### 2.4 The drain condition
 
+> **Superseded — see §0.2 F4.** The drain does not pass on established positive facts. Recorded, not redesigned; not to be implemented.
+
 Admission closed (G1, G2, G3) → flush-now → wait until **all three** hold:
 
 1. the ledger has no unretired admission for the owned repo;
@@ -225,6 +453,8 @@ A quiet timer bounds the wait. **On expiry the drain refuses**
 ## 3. Unsaved buffers and pending database changes
 
 ### 3.1 Policy: refuse, do not defer-and-replay
+
+> **Superseded — see §0.2 F3.** This precondition set makes mandatory live case 5 unconstructible. Recorded, not redesigned; not to be implemented.
 
 The pause may close admission only over a state with nothing unsaved and nothing
 admitted. Preconditions, all of which must hold at the moment admission closes:
@@ -277,6 +507,8 @@ interrupted and nothing was written. Composition ending settles layer 1 only, so
 `deferred` transitions to the §3.1 precondition check, never to `applying`.
 
 ### 3.4 During the pause
+
+> **Superseded — see §0.2 F5.** The no-mutation invariant does not hold; selected-block operations bypass G1/G2. Recorded, not redesigned; not to be implemented.
 
 G1 refuses entry to edit mode, so no new buffer can be created on any page,
 including the transaction's own pages. Together with §3.1's precondition that no
@@ -332,6 +564,8 @@ cannot cross modes.
 
 ### 4.3 Deadlock: reconciliation writes into the channel G3 closes
 
+> **Superseded — see §0.2 F5.** No rule distinguishes a prohibited local mutation from a required reconciliation one at G3. Recorded, not redesigned; not to be implemented.
+
 ```
 reconcile-from-disk!            watcher_handler.cljs:45
   → set-missing-block-ids!      watcher_handler.cljs:29
@@ -362,6 +596,8 @@ proof about an external process, because there is nothing external to prove.
 
 ### 5.2 Post-write uncertainty (`authorizing`, `applying`, `reconciling`, `verifying`)
 
+> **Superseded — see §0.2 F1.** Step 2's expiry branch has no counterpart in the helper protocol. Recorded, not redesigned; not to be implemented.
+
 From the moment authorization is issued, a helper write may be in progress. A
 renderer timeout **cannot** release admission here: the renderer has no way to
 observe the helper, and the retained journal constrains the coordinator, not OG's
@@ -390,6 +626,8 @@ revision 1's all-or-nothing release.
 
 ### 5.3 `held-unresolved`: a bounded escape, not a lockout and not a silent release
 
+> **Superseded — see §0.2 F2.** The escape is an unapproved risk override, not evidence of safety. Recorded, not redesigned; not to be implemented.
+
 If the coordinator is silent past the derived bound and the authorization has
 **not** provably expired, the renderer cannot establish termination. It must not
 guess in either direction, so it does neither:
@@ -407,6 +645,8 @@ So: no unexplained permanent lockout, no silent release during an unresolved
 application, and no dependence on the renderer proving something it cannot.
 
 ### 5.4 Process kill
+
+> **Superseded — see §0.2 F1, F2, F6.** The expiry lapse contradicts §5.2, and the marker has no approved schema, no dedicated target, no lifecycle and no restart-ordering contract. Recorded, not redesigned; not to be implemented.
 
 **A renderer kill destroys any unsaved DOM buffer.** Revision 1 implied
 otherwise; that is withdrawn. The pause neither improves nor worsens OG's
@@ -439,6 +679,10 @@ and is inventoried explicitly (§6, §8). It is new, and it is an approval item.
 
 ## 6. What is controlled, what is inert, what is outside
 
+> **Partly superseded — see §0.2 F4, F5.** The "Controlled" row's coverage is
+> **unestablished**. The inert and outside rows, and the cooperative-barrier
+> statement, stand.
+
 The review is right that `EXPECT` plus publication checks do not reliably detect
 the paths in §1.2. `revalidateIntendedState` (`incoming-application.js:1066`)
 iterates only `approved.files` and `approved.unchanged` — an enumerated set — and
@@ -450,7 +694,7 @@ intermediate state. These are mitigations with known race gaps, not detection.
 
 | | Mechanism | Coverage |
 |---|---|---|
-| **Controlled** | G1/G2/G3 + the ledger + causes | outliner-originated writes to `pages/*.md` and `journals/*.md` in this renderer, for this repo |
+| **Controlled — UNESTABLISHED, see §0.2 F4 and F5** | G1/G2/G3 + the ledger + causes | claimed: outliner-originated writes to `pages/*.md` and `journals/*.md` in this renderer, for this repo. The gates do not cover direct outliner transactions and the ledger is not an exact ownership record, so this coverage is **not established** and is not a guarantee |
 | **Inert in the synthetic setup — asserted, not assumed** | plugins: no native plugin loaded, marketplace and installation refused (`f28-origin/NETWORK_CONTROL.md`); file-sync: network and Electron `net` refused, no account enrolled; PDF assets, drawings, whiteboards, global/plugin config: not exercised by the experiment | each asserted at run start: plugin count zero, sync inactive, and an inventory showing no writes under these paths |
 | **Outside the guarantee — mitigated only, with known race gaps** | asset IPC (`handler/editor.cljs:1451`); main-process backups and version files; `unlink`/`copyFile`; a second OG window via `dbsync` (`db.cljs:127-141`); Finder, cloud agents, external editors, `git`, a second instance | helper `EXPECT` recheck before `renameat`; per-file hash revalidation for enumerated notes only; an explicit inventory of every extra `.md` |
 
@@ -480,7 +724,7 @@ twelve, and this is stated rather than minimized.
 | H8 | open the cause under `enabled?`, not only `observation-only?`; accept the token | `fs.cljs:93-101` | **universal save path** |
 | H9 | `:flush-now-ch` into the existing `<ratelimit` | `outliner/file.cljs:101`; `util.cljc:1174`, `:1190-1194` | machinery already exists |
 | H10 | request channel: a **write** call on an API that is currently read-only (`og_sync_bridge.cljs:140`, `:250-265`) | new `ENABLE-OG-BRIDGE-BARRIER` define | real new authority |
-| H11 | durable per-path marker: written by the coordinator through the helper, read by OG at graph load, cleared by recovery | new graph artifact + read at load | new artifact |
+| H11 | durable per-path marker: written by the coordinator through the helper, read by OG at graph load, cleared by recovery | new graph artifact + read at load | **F6: undesigned.** An anchored graph-local write path already exists (`write-record` with `target: sidecar` publishes into `logseq/.og-sync`), so the obstacle is not the absence of a write path. What is missing is an approved marker schema, a dedicated target (the existing ones are bound to identity/recovery records and must not be repurposed), a lifecycle, and a restart-ordering contract. Whether a future design extends a command, adds a target or adds a command is **open** |
 | H12 | `held-unresolved` presentation and the confirmed user escape | new UI | new UI |
 
 All are behind the existing `ENABLE-OG-SYNC-BRIDGE` define
@@ -539,6 +783,8 @@ regeneration; and each of §5.1, §5.2 and §5.3 reaching its required outcome.
 
 ### 8.4 Live cases — one Intel host, synthetic, each mutating case on its own owned run
 
+> **Superseded — see §0.2 F3.** Mandatory cases 4 and 5 contradict each other. Recorded, not redesigned; not to be implemented.
+
 | # | Case | Mandatory assertion |
 |---|---|---|
 | 1 | Unsaved text present at request | **refuses `unsaved-buffer-present`; nothing written; buffer intact.** (Revision 1's version of this case is withdrawn as unsafe.) |
@@ -566,7 +812,7 @@ be the H11 marker.
 ## 9. Recommendation
 
 **Retain the accepted app-closed path for the next prototype. Do not build the
-pause yet.**
+pause yet.** — **Accepted by the supervisor, 2026-09-16 (§0.1).**
 
 | | App-closed (accepted) | Pause, with §1–§7 resolved |
 |---|---|---|
@@ -590,13 +836,15 @@ is reaching for, and delivers it more strongly.
 
 The completion tracking is worth building **on its own**, before any barrier:
 
-- **M1 — the ledger and cause coverage (H4, H5, H6, H7, H8, H9).** No barrier, no
-  pause, no new authority, no new UI. This alone closes the gap the accepted
-  results record as open: *"genuine pending-save capture is not established"*. It
-  turns that from a race to be caught into a tracked object to be read, and it is
-  independently verifiable with §8.2's tests plus a live case that asserts the
-  ledger's transitions against a real save. If M1 cannot be made sound, the pause
-  cannot be either, and this is found out before any authority is taken.
+- **M1 — the ledger and cause coverage (H4, H5, H6, H7, H8, H9).** Note: §0.2 F4
+  shows the ledger as specified is not an exact ownership record, so M1 is a
+  direction, not a ready design. No barrier, no pause, no new authority, no new
+  UI. It is aimed at the gap the accepted results record as open — *"genuine
+  pending-save capture is not established"* — by replacing a race to be caught
+  with an object to be read. Whether it closes that gap depends on first
+  resolving F4; it is not claimed to close it as specified. If M1 cannot be made
+  sound, the pause cannot be either, and that is found out before any authority
+  is taken.
 - **M2 — the gates and the state machine (H1, H2, H3, H10).**
 - **M3 — durable restart semantics and the escape (H11, H12).**
 
@@ -624,7 +872,13 @@ repeating it changes nothing about that.
    passing, it would establish safety for a short, explicit, user-initiated pause
    under the §6 setup assumptions — not for continuous concurrent editing.
 
-## Acceptance criteria
+## Acceptance criteria — NOT IN FORCE
+
+> **Recorded, not in force.** These were revision 2's proposed criteria. Criteria
+> 4, 5 and 6 depend on mechanisms that §0.2 F1, F3 and F4 show are not sound as
+> specified. Nothing below was run, and nothing below may be cited as a
+> verification plan for an approved slice.
+
 
 1. Live cases 1–15 pass, each mutating case on its own fresh owned run.
 2. No editor buffer is lost, cleared or force-saved in any branch, and no Korean
@@ -642,7 +896,13 @@ repeating it changes nothing about that.
    `app-closed` or `app-idle` terms in either direction.
 10. Results state plainly that concurrent-edit safety in general is not claimed.
 
-## Decisions requiring user approval
+## Decisions requiring user approval — WITHDRAWN
+
+> **This list is closed.** The supervisor accepted deferral (§0.1), so none of
+> the items below is an open decision. They are retained as the record of what
+> a pause would have required. A future in-application barrier needs a new scope
+> decision that begins from the §0.2 findings.
+
 
 1. **Whether to proceed at all**, given §9's recommendation to retain app-closed.
 2. If proceeding: **the M1/M2/M3 ordering**, and whether M1 may be approved alone.
@@ -657,7 +917,11 @@ repeating it changes nothing about that.
    some harmless payloads are refused to make the deadlock unreachable.
 8. **The `app-paused` runtime mode** as a third persisted, approval-bound value.
 
-Implementation requires approval. Nothing in this design is started.
+**This proposal is closed as deferred (§0.1).** Nothing in it is started, and
+nothing in it is to be implemented. A future in-application barrier requires a
+new scope decision beginning from the §0.2 findings.
 
-한국어 진행 요약은 [`PROJECT_ROADMAP_KO.md`](../PROJECT_ROADMAP_KO.md)에
-있습니다.
+한국어 실험 요약은
+[`F28_ROADMAP_SUMMARY_KO.md`](../F28_ROADMAP_SUMMARY_KO.md)에 있습니다.
+프로젝트 전체의 권위 있는 로드맵은 저장소 바깥의 사용자 문서
+`project-notes/PROJECT_ROADMAP_KO.md`입니다.

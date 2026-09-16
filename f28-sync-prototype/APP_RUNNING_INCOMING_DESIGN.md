@@ -1,8 +1,21 @@
 # Applying an incoming change while the isolated OG test app is running
 
-Status: **proposal only**, corrected after supervisor review, 2026-09-16.
-Nothing here is implemented, approved or run. Written from documentation and
-source review; no graph, profile, helper or application was touched.
+Status: **option A implemented and run; findings partially accepted**,
+2026-09-16. This status line supersedes the "proposal only / nothing
+implemented, approved or run" wording this document carried while it was a
+proposal; that wording was correct when written and is no longer true.
+
+The supervisor accepted the graph-binding correction and the **limited**
+observation findings, and independently ran the memory-only probe checks
+(15/15). The focused live result (14/14) remains coder-reported evidence. The
+**complete live observation matrix is NOT accepted as finished**, and
+**concurrent-edit safety is unverified and unclaimed**. The historical test
+reports in `RESULTS.md` are preserved as written and are not re-labelled as
+newly verified evidence.
+
+Option **B** — the real editing/save barrier this document deferred — was
+designed in [EDITING_PAUSE_DESIGN.md](./EDITING_PAUSE_DESIGN.md) and is now
+**closed as deferred**, with six unresolved findings recorded in its §0.2.
 
 It designs the next experiment after the **accepted** app-closed slice
 ([INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md), results in
