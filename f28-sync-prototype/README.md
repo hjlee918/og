@@ -9,6 +9,10 @@ slice is implemented in `src/incoming-application.js` and verified in
 [RESULTS.md](./RESULTS.md); creates and updates only, one host, synthetic data,
 with the test application closed during application.
 
+[APP_RUNNING_INCOMING_DESIGN.md](./APP_RUNNING_INCOMING_DESIGN.md) is a proposal
+only: it designs the next experiment, applying an incoming change while the
+isolated test app is running. Nothing in it is implemented, approved or run.
+
 Run its focused suite with the identity helper, in fresh owned children of one
 fresh run:
 
