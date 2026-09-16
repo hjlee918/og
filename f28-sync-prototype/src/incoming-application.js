@@ -669,13 +669,7 @@ function planIncoming(context, input, options = {}) {
           acceptedRevision: file.acceptedRevision,
         };
       }),
-      limits: [
-        'per-file application: an interruption leaves a mixed state; this is not whole-graph atomicity',
-        'the helper rechecks the destination immediately before its rename, but recheck and rename are two operations',
-        'the cooperative lock serializes participating helper invocations only; Finder, cloud agents and external editors are not excluded',
-        'the app-closed gate proves only that the owned experimental build has exited',
-        'injected failures establish recovery classification, not power-loss durability',
-      ],
+      limits: PREVIEW_LIMITS,
     };
     const previewFingerprint = `sha256:${digest(stableStringify(previewBody))}`;
     return {
@@ -683,6 +677,11 @@ function planIncoming(context, input, options = {}) {
       mutated: false,
       preview: { ...previewBody, previewFingerprint },
       internal: { proposal, sidecar, snapshot, comparison, execution, files, acceptedFiles },
+      approvedInputs: {
+        originReplicaId: proposal.originReplicaId,
+        graphNotes,
+        planProjectedSnapshotFingerprint: comparison.plan.projectedSnapshotFingerprint,
+      },
     };
   } catch (error) {
     if (error instanceof IncomingError) return refuse(error.code, error.message, error.detail);
@@ -691,6 +690,96 @@ function planIncoming(context, input, options = {}) {
 }
 
 // ------------------------------------------------------------------ journal
+
+const PREVIEW_LIMITS = [
+  'per-file application: an interruption leaves a mixed state; this is not whole-graph atomicity',
+  'the helper rechecks the destination immediately before its rename, but recheck and rename are two operations',
+  'the cooperative lock serializes participating helper invocations only; Finder, cloud agents and external editors are not excluded',
+  'the app-closed gate proves only that the owned experimental build has exited',
+  'injected failures establish recovery classification, not power-loss durability',
+];
+
+/*
+ * The canonical preview body, rebuilt from the approved inputs alone. `planIncoming`
+ * builds it from live values and recovery rebuilds it from the journal, so the
+ * approval fingerprint can be RECOMPUTED after a restart instead of taken on
+ * faith. Everything it needs is therefore in `approved`.
+ */
+function previewBodyFrom(approved) {
+  return {
+    schema: PREVIEW_SCHEMA,
+    proposalId: approved.proposalId,
+    planId: approved.planId,
+    projectedSnapshotFingerprint: approved.planProjectedSnapshotFingerprint,
+    graphId: approved.graphId,
+    base: approved.base,
+    target: approved.target,
+    unchanged: approved.unchanged,
+    graphNotes: approved.graphNotes,
+    applyOrder: approved.applyOrder,
+    files: approved.applyOrder.map((fileId) => {
+      const file = approved.files[fileId];
+      return {
+        fileId,
+        kind: file.kind,
+        path: file.path,
+        precondition: file.precondition,
+        oldContentHash: file.beforeImage.contentHash,
+        oldLength: file.beforeImage.contentHex ? file.beforeImage.contentHex.length / 2 : 0,
+        newContentHash: file.targetContentHash,
+        newLength: Buffer.from(file.targetContentHex, 'hex').length,
+        acceptedRevision: file.acceptedRevision,
+      };
+    }),
+    limits: PREVIEW_LIMITS,
+  };
+}
+
+/* The canonical proposal body, rebuilt from the approved inputs alone. */
+function proposalBodyFrom(approved) {
+  return {
+    schema: PROPOSAL_SCHEMA,
+    graphId: approved.graphId,
+    base: approved.base,
+    target: { metadataRevision: approved.target.metadataRevision },
+    originReplicaId: approved.originReplicaId,
+    planId: approved.planId,
+    files: approved.applyOrder.map((fileId) => {
+      const file = approved.files[fileId];
+      return {
+        fileId,
+        kind: file.kind,
+        path: file.path,
+        baseContentHash: file.kind === 'create' ? null : file.beforeImage.contentHash,
+        targetContentHex: file.targetContentHex,
+      };
+    }).sort((a, b) => Buffer.from(a.fileId).compare(Buffer.from(b.fileId))),
+  };
+}
+
+/*
+ * `approvedHash` only proves the approved half was not edited after it was
+ * written. It says nothing about whether those values are the ones the operator
+ * actually approved, so the proposal identity and the approval fingerprint are
+ * RECOMPUTED from the retained inputs and must match what the journal claims.
+ * A journal whose recorded values do not reconstruct its own proposal and
+ * preview has no authority, however internally consistent it looks.
+ */
+function validateApprovalLinkage(approved) {
+  const proposalId = digest(stableStringify(proposalBodyFrom(approved)));
+  if (proposalId !== approved.proposalId) {
+    return { code: 'journal-proposal-mismatch',
+      reason: 'the retained inputs do not reconstruct the proposal identity the journal names',
+      detail: { recomputed: proposalId, claimed: approved.proposalId } };
+  }
+  const previewFingerprint = `sha256:${digest(stableStringify(previewBodyFrom(approved)))}`;
+  if (previewFingerprint !== approved.previewFingerprint) {
+    return { code: 'journal-approval-mismatch',
+      reason: 'the retained inputs do not reconstruct the approval fingerprint the journal names',
+      detail: { recomputed: previewFingerprint, claimed: approved.previewFingerprint } };
+  }
+  return { ok: true };
+}
 
 function journalBody(approved, progress) {
   const body = {
@@ -708,6 +797,7 @@ function journalBody(approved, progress) {
 }
 
 const APPROVED_KEYS = ['proposalId', 'planId', 'previewFingerprint', 'graphId',
+  'originReplicaId', 'graphNotes', 'planProjectedSnapshotFingerprint',
   'graphBinding', 'profileBinding', 'base', 'target', 'applyOrder', 'files', 'unchanged'];
 const APPROVED_FILE_KEYS = ['kind', 'path', 'precondition', 'beforeImage',
   'targetContentHash', 'targetContentHex', 'acceptedRevision'];
@@ -761,6 +851,16 @@ function validateJournal(context, journal, records) {
   if (!isHash(approved.proposalId)) {
     throw new IncomingError('malformed-record', 'journal proposalId is invalid');
   }
+  requireText(approved.graphId, 'journal.approved.graphId');
+  requireText(approved.originReplicaId, 'journal.approved.originReplicaId');
+  if (typeof approved.planId !== 'string' || !/^plan-[0-9a-f]{32}$/.test(approved.planId)) {
+    throw new IncomingError('malformed-record', 'journal planId is not a well-formed plan identity');
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(String(approved.previewFingerprint))
+      || !/^sha256:[0-9a-f]{64}$/.test(String(approved.planProjectedSnapshotFingerprint))) {
+    throw new IncomingError('malformed-record', 'journal approval fingerprints are malformed');
+  }
+  exactKeys(approved.graphNotes, ['hash', 'count', 'extra'], 'journal.approved.graphNotes');
   exactKeys(approved.base,
     ['metadataRevision', 'snapshotFingerprint', 'acceptedTransactionId'], 'journal.approved.base');
   exactKeys(approved.target, TARGET_KEYS, 'journal.approved.target');
@@ -1058,6 +1158,9 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, record
     planId: planned.preview.planId,
     previewFingerprint: planned.preview.previewFingerprint,
     graphId: planned.preview.graphId,
+    originReplicaId: planned.approvedInputs.originReplicaId,
+    graphNotes: planned.approvedInputs.graphNotes,
+    planProjectedSnapshotFingerprint: planned.approvedInputs.planProjectedSnapshotFingerprint,
     graphBinding: records.graphBinding,
     profileBinding: records.profileBinding,
     base: planned.preview.base,
@@ -1198,7 +1301,7 @@ function applyIncoming(context, { proposal, approve, gate, failAt = null, record
  * untouched files on disk, then recompute the plan and require it to reproduce
  * the journal's planId exactly.
  */
-function recomputePlan(context, sidecar, approved) {
+function recomputePlan(context, sidecar, approved, records) {
   const entries = Object.entries(sidecar.identity.files)
     .map(([fileId, entry]) => ({ fileId, path: entry.path,
       acceptedRevision: entry.acceptedRevision,
@@ -1277,7 +1380,104 @@ function recomputePlan(context, sidecar, approved) {
       reason: 'the journal names a plan the comparison module does not reproduce',
       detail: { recomputed: comparison.plan.planId, claimed: approved.planId } };
   }
-  return { ok: true, planId: comparison.plan.planId };
+  if (comparison.plan.projectedSnapshotFingerprint !== approved.planProjectedSnapshotFingerprint) {
+    return { code: 'journal-plan-mismatch',
+      reason: 'the recomputed plan does not project the snapshot the journal names',
+      detail: { recomputed: comparison.plan.projectedSnapshotFingerprint,
+        claimed: approved.planProjectedSnapshotFingerprint } };
+  }
+
+  /*
+   * The authoritative revisions come from the executed plan, exactly as at plan
+   * time. A journal naming any other revision has no authority to write.
+   */
+  const plannedRevision = new Map(comparison.plan.actions
+    .map((action) => [action.operation.fileId, action.operation.revisionId]));
+  for (const fileId of approved.applyOrder) {
+    const derived = plannedRevision.get(fileId);
+    if (!derived) {
+      return { code: 'journal-plan-mismatch',
+        reason: `the recomputed plan contains no action for ${fileId}`, detail: { fileId } };
+    }
+    if (derived !== approved.files[fileId].acceptedRevision) {
+      return { code: 'journal-revision-mismatch',
+        reason: `${fileId} names a revision the plan does not assign`,
+        detail: { fileId, recomputed: derived, claimed: approved.files[fileId].acceptedRevision } };
+    }
+  }
+  for (const [fileId, entry] of Object.entries(approved.unchanged)) {
+    const expected = plannedRevision.get(fileId)
+      || entries.find((item) => item.fileId === fileId)?.acceptedRevision;
+    if (expected !== entry.acceptedRevision) {
+      return { code: 'journal-revision-mismatch',
+        reason: `${fileId} is outside the transaction but names a different revision`,
+        detail: { fileId, expected, claimed: entry.acceptedRevision } };
+    }
+    if (entry.contentHash !== entries.find((item) => item.fileId === fileId)?.acceptedContentHash) {
+      return { code: 'journal-base-mismatch',
+        reason: `${fileId} is outside the transaction but names different accepted content`,
+        detail: { fileId } };
+    }
+  }
+
+  /*
+   * The complete intended projection, rebuilt from the validated base, the
+   * before-images, the targets and the unchanged files -- then the binding the
+   * approval carries. All of this must hold BEFORE a single note is written:
+   * invalid recovery authority is rejected before any recovery note mutation,
+   * not discovered afterwards by the record step.
+   */
+  const projectedFiles = [
+    ...Object.entries(approved.unchanged).map(([fileId, entry]) => ({
+      fileId, path: entry.path, acceptedRevision: entry.acceptedRevision,
+      content: materialized.find((item) => item.path === entry.path).content,
+    })),
+    ...approved.applyOrder.map((fileId) => {
+      const file = approved.files[fileId];
+      return { fileId, path: file.path, acceptedRevision: file.acceptedRevision,
+        content: Buffer.from(file.targetContentHex, 'hex').toString('utf8') };
+    }),
+  ];
+  let projectedSnapshot;
+  let derivedUpdate;
+  try {
+    projectedSnapshot = PI.snapshotFromFiles(sidecar.graphId, projectedFiles);
+    derivedUpdate = PI.deriveUpdate({
+      accepted: sidecar,
+      probe: records,
+      request: {
+        metadataRevision: approved.target.metadataRevision,
+        files: projectedFiles.map((file) => ({
+          fileId: file.fileId, path: file.path, content: file.content,
+          acceptedRevision: file.acceptedRevision,
+        })),
+      },
+      snapshot: projectedSnapshot,
+    });
+  } catch (error) {
+    return { code: 'projection-failed',
+      reason: `the intended projection could not be rebuilt: ${error.message}` };
+  }
+  const bindingMismatch = [];
+  if (projectedSnapshot.snapshotFingerprint !== approved.target.snapshotFingerprint) {
+    bindingMismatch.push('snapshotFingerprint');
+  }
+  if (derivedUpdate.transactionId !== approved.target.transactionId) bindingMismatch.push('transactionId');
+  if (PI.bytesHash(derivedUpdate.sidecarBytes) !== approved.target.sidecarHash) bindingMismatch.push('sidecarHash');
+  if (PI.bytesHash(derivedUpdate.deviceBytes) !== approved.target.deviceHash) bindingMismatch.push('deviceHash');
+  if (bindingMismatch.length) {
+    return { code: 'journal-target-mismatch',
+      reason: 'the retained inputs do not produce the transaction, snapshot and records the journal binds',
+      detail: { bindingMismatch,
+        recomputed: { snapshotFingerprint: projectedSnapshot.snapshotFingerprint,
+          transactionId: derivedUpdate.transactionId,
+          sidecarHash: PI.bytesHash(derivedUpdate.sidecarBytes),
+          deviceHash: PI.bytesHash(derivedUpdate.deviceBytes) },
+        claimed: approved.target } };
+  }
+  return { ok: true, planId: comparison.plan.planId,
+    snapshotFingerprint: projectedSnapshot.snapshotFingerprint,
+    transactionId: derivedUpdate.transactionId };
 }
 
 /*
@@ -1304,6 +1504,15 @@ function recoverIncoming(context, { gate } = {}) {
   }
 
   const approved = value.approved;
+
+  /*
+   * Before anything else, and certainly before any write: the retained inputs
+   * must reconstruct the proposal identity and the approval fingerprint the
+   * journal names. `approvedHash` alone only shows the half was not edited
+   * afterwards; it is not evidence that these values are the approved ones.
+   */
+  const linkage = validateApprovalLinkage(approved);
+  if (linkage.code) return refuse(linkage.code, linkage.reason, linkage.detail || {});
 
   /*
    * A closed journal still has to prove itself. If the records it claims are not
@@ -1399,32 +1608,52 @@ function recoverIncoming(context, { gate } = {}) {
     (item.state === 'applied') !== value.progress.applied.includes(item.fileId));
 
   /*
-   * The plan is RECOMPUTED, never echoed. A partially applied graph cannot
-   * rebuild the base snapshot from disk, so the base is rebuilt from the
-   * journal's own before-images -- each of which is first checked against the
-   * accepted sidecar's content hash, so a journal cannot smuggle in a base the
-   * records never accepted. Files outside the transaction must still be at
-   * their accepted bytes on disk.
+   * The plan is RECOMPUTED, never echoed, and the COMPLETE target binding is
+   * validated here -- before the write loop below, not after it by the record
+   * step. A partially applied graph cannot rebuild the base snapshot from disk,
+   * so the base is rebuilt from the journal's own before-images, each first
+   * checked against the accepted sidecar's content hash, so a journal cannot
+   * smuggle in a base the records never accepted. Files outside the transaction
+   * must still be at their accepted bytes on disk.
+   *
+   * This runs only when the records are at the base, which is also the only
+   * state in which a recovery note write is permitted: when the records are
+   * already accepted or a transaction is outstanding, any pending file refuses
+   * below instead. An old base is never rebuilt from a newer sidecar.
    */
+  const pending = classified.filter((item) => item.state === 'pending');
+
+  /*
+   * Everything that could refuse a pending file refuses BEFORE the write loop,
+   * keeping its specific code. An old base is never rebuilt from a newer
+   * sidecar: where the records have moved past the base, the intended
+   * projection cannot be revalidated from retained evidence, so the ambiguity
+   * is refused rather than guessed at.
+   */
+  if (pending.length) {
+    if (recordsAlreadyAccepted) {
+      return refuse('journal-base-mismatch',
+        'the records are already accepted at the target while files remain unapplied; this needs review, not a roll-forward',
+        { classified });
+    }
+    if (outstanding.length) {
+      return refuse('outstanding-transaction-with-unapplied-files',
+        'an identity transaction is outstanding while files remain unapplied; this needs review',
+        { classified, outstanding });
+    }
+    if (!atBase) {
+      return refuse('journal-base-mismatch',
+        'files are unapplied but the records are not at this journal\'s base, so the intended projection cannot be revalidated from retained evidence',
+        { classified });
+    }
+  }
   if (atBase) {
-    const verdict = recomputePlan(context, sidecar, approved);
+    const verdict = recomputePlan(context, sidecar, approved, records);
     if (verdict.code) return refuse(verdict.code, verdict.reason, verdict.detail || {});
   }
-
-  const pending = classified.filter((item) => item.state === 'pending');
   const wrote = [];
   try {
     if (pending.length) {
-      if (recordsAlreadyAccepted) {
-        return refuse('journal-base-mismatch',
-          'the records are already accepted at the target while files remain unapplied; this needs review, not a roll-forward',
-          { classified });
-      }
-      if (outstanding.length) {
-        return refuse('outstanding-transaction-with-unapplied-files',
-          'an identity transaction is outstanding while files remain unapplied; this needs review',
-          { classified, outstanding });
-      }
       assertAppClosed(gate, 'recovery-note-writes');
       for (const item of pending) {
         assertAppClosed(gate, `recovery-note-write:${item.fileId}`);
@@ -1552,10 +1781,13 @@ module.exports = {
   encodeNote,
   journalBody,
   planIncoming,
+  previewBodyFrom,
   proposalBody,
+  proposalBodyFrom,
   proveRecordsAccepted,
   recomputePlan,
   recoverIncoming,
+  validateApprovalLinkage,
   revalidateIntendedState,
   stableRead,
   validateJournal,

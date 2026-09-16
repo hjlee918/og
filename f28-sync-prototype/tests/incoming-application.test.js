@@ -127,6 +127,15 @@ function journalValue(context) {
   return { journal, value: journal.value };
 }
 
+/* Re-seal every integrity field, so a case reaches the specific check it is
+ * about instead of stopping at the approval-linkage check that now runs first. */
+function resealJournal(value) {
+  value.approved.proposalId = sha256(stableStringify(IA.proposalBodyFrom(value.approved)));
+  value.approved.previewFingerprint =
+    `sha256:${sha256(stableStringify(IA.previewBodyFrom(value.approved)))}`;
+  value.approvedHash = `sha256:${sha256(stableStringify(value.approved))}`;
+}
+
 function rewriteJournal(context, mutate) {
   const journal = PI.readJournal(context);
   const value = JSON.parse(JSON.stringify(journal.value));
@@ -446,6 +455,8 @@ test('a malformed, tampered or substituted journal never earns the right to writ
     (v) => { v.approved.applyOrder = ['file-english', 'file-english']; },
     (v) => { v.approved.applyOrder = ['file-english', 'file-new-korean', 'file-ghost']; },
   ]) {
+    // applyOrder validity is structural and is checked by validateJournal, which
+    // runs before the approval linkage, so only approvedHash needs re-sealing.
     rewriteJournal(context, (v) => {
       mutate(v);
       v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
@@ -459,7 +470,7 @@ test('a malformed, tampered or substituted journal never earns the right to writ
   // a journal that parses but is bound to another owned run
   rewriteJournal(context, (v) => {
     v.approved.graphBinding.graphInode += 1;
-    v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
+    resealJournal(v);
   });
   let result = IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-binding-mismatch');
@@ -468,37 +479,53 @@ test('a malformed, tampered or substituted journal never earns the right to writ
 
   rewriteJournal(context, (v) => {
     v.approved.profileBinding.profileDirectory = 'p-somewhere-else';
-    v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
+    resealJournal(v);
   });
   result = IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-binding-mismatch');
   restore();
 
-  // a journal naming a different graph lineage
+  // A graph-lineage change is now caught earlier, by the approval linkage,
+  // because graphId is part of the proposal body.
   rewriteJournal(context, (v) => {
     v.approved.graphId = 'graph-some-other-lineage';
     v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
   });
   result = IA.recoverIncoming(context, { gate: CLOSED });
-  assert.equal(result.code, 'journal-graph-mismatch');
+  assert.equal(result.code, 'journal-proposal-mismatch', result.reason);
+  restore();
+
+  // Re-sealing the proposal identity and the approval fingerprint makes the
+  // journal fully self-consistent for a DIFFERENT lineage, which is what the
+  // lineage check itself is for.
+  rewriteJournal(context, (v) => {
+    v.approved.graphId = 'graph-some-other-lineage';
+    resealJournal(v);
+  });
+  result = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(result.code, 'journal-graph-mismatch', result.reason);
+  assert.equal(result.mutated, false);
+  assert.equal(PI.readNote(context, 'pages/Incoming Anchor.md'), NOTES[0].content);
   restore();
 
   // a journal whose plan the modules do not reproduce
   rewriteJournal(context, (v) => {
     v.approved.planId = 'plan-ffffffffffffffffffffffffffffffff';
-    v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
+    resealJournal(v);
   });
   result = IA.recoverIncoming(context, { gate: CLOSED });
   assert.equal(result.code, 'journal-plan-mismatch', result.reason);
+  assert.equal(result.mutated, false);
   restore();
 
   // a stale journal whose base no longer matches the accepted records
   rewriteJournal(context, (v) => {
     v.approved.base.metadataRevision = 'metadata-0';
-    v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
+    resealJournal(v);
   });
   result = IA.recoverIncoming(context, { gate: CLOSED });
-  assert.equal(result.code, 'journal-base-mismatch');
+  assert.equal(result.code, 'journal-base-mismatch', result.reason);
+  assert.equal(result.mutated, false);
   restore();
 
   // unparseable bytes are retained as evidence, not destroyed
@@ -920,60 +947,289 @@ test('a transaction file that no longer holds its approved target is target-dive
   assert.equal(verdict.detail.drift[0].fileId, applied);
 });
 
-test('the journal binds the exact intended transaction, snapshot and record bytes', () => {
-  const { context, opened } = enrolled('bound-target');
+/*
+ * Invalid recovery authority must be rejected BEFORE any recovery note
+ * mutation. The earlier version of this test asserted only that metadata did
+ * not advance, which the implementation satisfied while still writing every
+ * pending note first and refusing afterwards at the record step. Each case here
+ * therefore gets its own fresh owned case, is stopped before the FIRST note
+ * write, and asserts the notes themselves.
+ */
+
+/* Rewrite the journal, recomputing whichever integrity fields the case keeps
+ * consistent. `hashes: 'approved'` keeps only approvedHash valid; 'approval'
+ * additionally re-seals the approval fingerprint, so the case reaches the
+ * deeper binding check instead of stopping at the linkage check. */
+function forgeJournal(context, mutate, hashes = 'approved') {
+  const journal = PI.readJournal(context);
+  const value = JSON.parse(JSON.stringify(journal.value));
+  mutate(value);
+  if (hashes === 'approval') {
+    value.approved.previewFingerprint =
+      `sha256:${sha256(stableStringify(IA.previewBodyFrom(value.approved)))}`;
+  }
+  value.approvedHash = `sha256:${sha256(stableStringify(value.approved))}`;
+  PI.writeJournal(context, Buffer.from(`${stableStringify(value)}\n`, 'utf8'),
+    journal.hash.replace(/^sha256:/, ''));
+  return PI.readJournal(context).hash;
+}
+
+const WATCHED = ['pages/Incoming Anchor.md', 'pages/수신 기준 문서.md',
+  'pages/수신 새 문서.md', 'journals/2026_09_15.md'];
+
+function noteState(context) {
+  return Object.fromEntries(WATCHED.map((path) => [path, PI.readNote(context, path)]));
+}
+
+/* One fresh case, stopped before the first note write, with nothing applied. */
+function stoppedBeforeFirstWrite(caseName) {
+  const { context, opened } = enrolled(caseName);
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  assert.equal(preview.outcome, 'preview');
+  const run = IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    failAt: `before-file:${preview.preview.applyOrder[0]}`,
+  });
+  assert.equal(run.outcome, 'interrupted');
+  assert.deepEqual(run.applied, [], 'nothing was applied');
+  return { context, opened, preview, notes: noteState(context),
+    records: PI.readRecords(context) };
+}
+
+function assertNothingMutated(state, journalHash, label) {
+  const { context, notes, records } = state;
+  const after = noteState(context);
+  for (const path of WATCHED) {
+    assert.equal(after[path], notes[path], `${label}: ${path} must be byte-identical`);
+  }
+  assert.equal(after['pages/수신 새 문서.md'], null,
+    `${label}: the create target must remain absent`);
+  assert.equal(PI.readJournal(context).hash, journalHash,
+    `${label}: the journal bytes must be unchanged`);
+  const now = PI.readRecords(context);
+  assert.equal(now.sidecar.metadataRevision, records.sidecar.metadataRevision,
+    `${label}: metadata must not advance`);
+  assert.equal(now.sidecarHash, records.sidecarHash, `${label}: sidecar bytes unchanged`);
+  assert.equal(now.deviceHash, records.deviceHash, `${label}: device bytes unchanged`);
+  assert.equal(now.outstandingIntents.length, 0, `${label}: no intent may be created`);
+  assert.equal(journalValue(context).value.state, 'open', `${label}: the journal stays open`);
+}
+
+test('a substituted target transaction is refused before any note is written', () => {
+  const state = stoppedBeforeFirstWrite('sub-transaction');
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.target.transactionId = 'f'.repeat(64); }, 'approval');
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'journal-target-mismatch', result.reason);
+  assert.deepEqual(result.bindingMismatch, ['transactionId']);
+  assertNothingMutated(state, hash, 'substituted transactionId');
+});
+
+test('a substituted target snapshot is refused before any note is written', () => {
+  const state = stoppedBeforeFirstWrite('sub-snapshot');
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.target.snapshotFingerprint = `sha256:${'e'.repeat(64)}`; }, 'approval');
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'journal-target-mismatch', result.reason);
+  assert.ok(result.bindingMismatch.includes('snapshotFingerprint'));
+  assertNothingMutated(state, hash, 'substituted snapshotFingerprint');
+});
+
+test('a substituted sidecar record hash is refused before any note is written', () => {
+  const state = stoppedBeforeFirstWrite('sub-sidecar');
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.target.sidecarHash = `sha256:${'d'.repeat(64)}`; }, 'approval');
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.code, 'journal-target-mismatch', result.reason);
+  assert.deepEqual(result.bindingMismatch, ['sidecarHash']);
+  assertNothingMutated(state, hash, 'substituted sidecarHash');
+});
+
+test('a substituted device record hash is refused before any note is written', () => {
+  const state = stoppedBeforeFirstWrite('sub-device');
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.target.deviceHash = `sha256:${'c'.repeat(64)}`; }, 'approval');
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.code, 'journal-target-mismatch', result.reason);
+  assert.deepEqual(result.bindingMismatch, ['deviceHash']);
+  assertNothingMutated(state, hash, 'substituted deviceHash');
+});
+
+test('a substituted stored revision is refused before any note is written', () => {
+  const state = stoppedBeforeFirstWrite('sub-revision');
+  const target = state.preview.preview.applyOrder[0];
+  const hash = forgeJournal(state.context, (v) => {
+    v.approved.files[target].acceptedRevision = 'compare-revision-00000000000000000000000000000000';
+  }, 'approval');
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'journal-revision-mismatch', result.reason);
+  assert.equal(result.fileId, target);
+  assertNothingMutated(state, hash, 'substituted stored revision');
+});
+
+test('a substituted revision for a file outside the transaction is refused', () => {
+  const state = stoppedBeforeFirstWrite('sub-unchanged-revision');
+  const outside = Object.keys(journalValue(state.context).value.approved.unchanged)[0];
+  const hash = forgeJournal(state.context, (v) => {
+    v.approved.unchanged[outside].acceptedRevision = 'accepted-revision-somewhere-else';
+  }, 'approval');
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.code, 'journal-revision-mismatch', result.reason);
+  assertNothingMutated(state, hash, 'substituted unchanged revision');
+});
+
+test('a plausible approval fingerprint is not proof of the approved proposal', () => {
+  // originReplicaId is part of the PROPOSAL body but not the preview body, so
+  // re-sealing the approval fingerprint leaves it looking entirely consistent.
+  const state = stoppedBeforeFirstWrite('linkage-proposal');
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.originReplicaId = 'replica-somewhere-else'; }, 'approval');
+  const journal = journalValue(state.context).value;
+  assert.equal(journal.approvedHash,
+    `sha256:${sha256(stableStringify(journal.approved))}`, 'approvedHash is self-consistent');
+  assert.equal(journal.approved.previewFingerprint,
+    `sha256:${sha256(stableStringify(IA.previewBodyFrom(journal.approved)))}`,
+    'the approval fingerprint reconstructs');
+
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'journal-proposal-mismatch', result.reason);
+  assertNothingMutated(state, hash, 'substituted originReplicaId');
+});
+
+test('a self-consistent approvedHash is not proof of the approved values', () => {
+  const state = stoppedBeforeFirstWrite('linkage-approval');
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.target.transactionId = 'a'.repeat(64); }, 'approved');
+  const journal = journalValue(state.context).value;
+  assert.equal(journal.approvedHash, `sha256:${sha256(stableStringify(journal.approved))}`);
+
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'journal-approval-mismatch', result.reason);
+  assertNothingMutated(state, hash, 'approvedHash alone');
+});
+
+test('a substituted plan projection is refused before any note is written', () => {
+  const state = stoppedBeforeFirstWrite('sub-plan-projection');
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.planProjectedSnapshotFingerprint = `sha256:${'b'.repeat(64)}`; }, 'approval');
+  const result = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(result.code, 'journal-plan-mismatch', result.reason);
+  assertNothingMutated(state, hash, 'substituted plan projection');
+});
+
+test('an untampered journal still rolls the remaining files forward', () => {
+  // The valid partial-recovery case: the first file landed, the second did not.
+  const { context, opened } = enrolled('valid-partial');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const order = preview.preview.applyOrder;
+  const run = IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    failAt: `after-file:${order[0]}`,
+  });
+  assert.equal(run.outcome, 'interrupted');
+  assert.deepEqual(run.applied, [order[0]]);
+
+  const recovered = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
+  assert.deepEqual(recovered.wrote, [order[1]], 'only the remaining file was written');
+  assert.equal(recovered.transactionId, preview.preview.target.transactionId);
+
+  const accepted = PI.openGraph(context);
+  assert.equal(accepted.outcome, 'accepted');
+  assert.equal(accepted.sidecar.metadataRevision, 'metadata-2');
+  assert.equal(accepted.sidecar.acceptedTransactionId, preview.preview.target.transactionId);
+  assert.equal(accepted.sidecar.acceptedSnapshotFingerprint,
+    preview.preview.target.snapshotFingerprint);
+  assert.equal(journalValue(context).value.state, 'closed');
+});
+
+test('a forged journal that is later restored recovers normally', () => {
+  const state = stoppedBeforeFirstWrite('forge-then-restore');
+  const pristine = PI.readJournal(state.context);
+  const hash = forgeJournal(state.context,
+    (v) => { v.approved.target.transactionId = 'f'.repeat(64); }, 'approval');
+  assert.equal(IA.recoverIncoming(state.context, { gate: CLOSED }).code,
+    'journal-target-mismatch');
+  assertNothingMutated(state, hash, 'before restore');
+
+  PI.writeJournal(state.context, pristine.bytes,
+    PI.readJournal(state.context).hash.replace(/^sha256:/, ''));
+  const recovered = IA.recoverIncoming(state.context, { gate: CLOSED });
+  assert.equal(recovered.outcome, 'recovered', recovered.reason || '');
+  assert.deepEqual(recovered.wrote, state.preview.preview.applyOrder,
+    'both files rolled forward once the journal was honest again');
+  assert.equal(PI.openGraph(state.context).sidecar.acceptedTransactionId,
+    state.preview.preview.target.transactionId);
+});
+
+test('an outstanding transaction with unapplied files refuses before any write', () => {
+  const { context, opened } = enrolled('outstanding-pending');
   const proposal = standardProposal(opened);
   const preview = IA.planIncoming(context, proposal);
   const run = IA.applyIncoming(context, {
     proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
-    failAt: 'before-file:file-english',
+    failAt: `before-file:${preview.preview.applyOrder[0]}`,
   });
   assert.equal(run.outcome, 'interrupted');
   assert.deepEqual(run.applied, []);
-  const target = journalValue(context).value.approved.target;
-  assert.deepEqual(Object.keys(target).sort(),
-    ['deviceHash', 'metadataRevision', 'sidecarHash', 'snapshotFingerprint', 'transactionId']);
-  assert.equal(target.transactionId, preview.preview.target.transactionId);
+  const notes = noteState(context);
+  const journalHash = PI.readJournal(context).hash;
 
-  const pristine = PI.readJournal(context);
-  const restore = () => PI.writeJournal(context, pristine.bytes,
-    PI.readJournal(context).hash.replace(/^sha256:/, ''));
+  // an unrelated identity transaction becomes outstanding while files are pending
+  const files = Object.entries(PI.readRecords(context).sidecar.identity.files)
+    .map(([fileId, entry]) => ({ fileId, path: entry.path,
+      content: PI.readNote(context, entry.path), acceptedRevision: entry.acceptedRevision }));
+  assert.equal(PI.updateIdentity(context, {
+    expectedMetadataRevision: 'metadata-1', metadataRevision: 'metadata-55', files, tombstones: [],
+  }, { ordering: 'graph-first', failure: { step: 'device', point: 'after-stage' } }).outcome,
+  'uncertain-write');
 
-  // A substituted recovery target must be refused BEFORE anything is published.
-  for (const [label, mutate] of [
-    ['transactionId', (v) => { v.approved.target.transactionId = 'f'.repeat(64); }],
-    ['sidecarHash', (v) => { v.approved.target.sidecarHash = `sha256:${'d'.repeat(64)}`; }],
-    ['deviceHash', (v) => { v.approved.target.deviceHash = `sha256:${'c'.repeat(64)}`; }],
-  ]) {
-    rewriteJournal(context, (v) => {
-      mutate(v);
-      v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
-    });
-    const result = IA.recoverIncoming(context, { gate: CLOSED });
-    assert.equal(result.outcome, 'refused', label);
-    assert.equal(result.code, 'records-refused', `${label}: ${result.code}`);
-    assert.equal(result.storeCode, 'transaction-mismatch', label);
-    assert.equal(PI.readRecords(context).sidecar.metadataRevision, 'metadata-1',
-      `${label}: nothing was published`);
-    assert.equal(PI.readRecords(context).outstandingIntents.length, 0, label);
-    assert.equal(journalValue(context).value.state, 'open', label);
-    restore();
-  }
+  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  // the unrelated intent is caught first and named for what it is
+  assert.equal(result.code, 'unrelated-outstanding-transaction', result.reason);
+  assert.equal(result.mutated, false);
+  const after = noteState(context);
+  for (const path of WATCHED) assert.equal(after[path], notes[path], `${path} unchanged`);
+  assert.equal(PI.readJournal(context).hash, journalHash);
+  assert.equal(PI.readRecords(context).outstandingIntents.length, 1,
+    'the unrelated transaction is left exactly as it was');
+});
 
-  // A substituted projected snapshot is refused at the state revalidation.
-  rewriteJournal(context, (v) => {
-    v.approved.target.snapshotFingerprint = `sha256:${'e'.repeat(64)}`;
-    v.approvedHash = `sha256:${sha256(stableStringify(v.approved))}`;
-  });
-  const snapshotResult = IA.recoverIncoming(context, { gate: CLOSED });
-  assert.equal(snapshotResult.outcome, 'refused');
-  assert.equal(snapshotResult.storeCode, 'projection-mismatch', snapshotResult.reason);
-  assert.equal(PI.readRecords(context).sidecar.metadataRevision, 'metadata-1');
-  restore();
+test('records accepted at the target with files still pending refuses before any write', () => {
+  const { context, opened } = enrolled('accepted-pending');
+  const proposal = standardProposal(opened);
+  const preview = IA.planIncoming(context, proposal);
+  const order = preview.preview.applyOrder;
+  // apply everything and accept the records, then put one file back to its
+  // before-image so recovery sees an accepted target with a pending file
+  assert.equal(IA.applyIncoming(context, {
+    proposal, approve: preview.preview.previewFingerprint, gate: CLOSED,
+    failAt: 'after-records',
+  }).outcome, 'interrupted');
+  assert.equal(PI.openGraph(context).sidecar.metadataRevision, 'metadata-2');
 
-  // The pristine journal still completes normally.
-  const good = IA.recoverIncoming(context, { gate: CLOSED });
-  assert.equal(good.outcome, 'recovered', good.reason || '');
-  assert.equal(good.transactionId, target.transactionId);
-  assert.equal(PI.openGraph(context).sidecar.acceptedTransactionId, target.transactionId);
+  const approved = journalValue(context).value.approved;
+  const revert = approved.files[order[0]];
+  PI.putNoteFixture(context, revert.path,
+    Buffer.from(revert.beforeImage.contentHex, 'hex').toString('utf8'));
+  const notes = noteState(context);
+  const journalHash = PI.readJournal(context).hash;
+  const records = PI.readRecords(context);
+
+  const result = IA.recoverIncoming(context, { gate: CLOSED });
+  assert.equal(result.outcome, 'refused');
+  assert.equal(result.code, 'journal-base-mismatch', result.reason);
+  assert.equal(result.mutated, false);
+  const after = noteState(context);
+  for (const path of WATCHED) assert.equal(after[path], notes[path], `${path} unchanged`);
+  assert.equal(PI.readJournal(context).hash, journalHash);
+  assert.equal(PI.readRecords(context).sidecarHash, records.sidecarHash);
 });

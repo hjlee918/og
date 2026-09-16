@@ -751,6 +751,19 @@ contract without weakening any of it.
   **consistency, not authenticity**: a forger with write access to the owned
   profile directory can produce a self-consistent journal and nothing here
   detects it.
+- **Invalid recovery authority is rejected before any recovery note mutation.**
+  Before the write loop, recovery reconstructs the proposal and preview bodies
+  from the retained inputs and requires the recomputed proposal identity and
+  approval fingerprint to match (`journal-proposal-mismatch`,
+  `journal-approval-mismatch`); takes the authoritative revisions from the
+  recomputed plan and requires the journal's to match
+  (`journal-revision-mismatch`); and rebuilds the complete intended projection to
+  re-derive the transaction, sidecar bytes and device bytes, refusing
+  `journal-target-mismatch` with no note mutated. `approvedHash` shows only that
+  the approved half was not edited afterwards and is never treated as proof that
+  those are the approved values. Post-write verification is retained in full.
+  This is ordering, not cryptographic authenticity: a writer with access to the
+  owned profile directory can still produce a self-consistent journal.
 - **A revision label is never acceptance, and a `closed` label is never proof.**
   The approval binds the exact intended transaction ID, projected snapshot
   fingerprint, sidecar bytes hash and device bytes hash, all derived before the

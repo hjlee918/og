@@ -1,6 +1,6 @@
 # Incoming change application design
 
-Status: **approved, implemented, and corrected after supervisor review**,
+Status: **approved, implemented, and corrected twice after supervisor review**,
 2026-09-16. Three findings from that review are fixed and the contracts they
 touched are restated below; see "Supervisor review corrections" at the end and
 RESULTS.md for what was actually reproduced and verified.
@@ -255,6 +255,8 @@ schema        "f28-incoming-journal/1"
 state         "open" | "closed"
 approved      IMMUTABLE after creation — the approved inputs
   proposalId, planId, previewFingerprint
+  originReplicaId, graphNotes, planProjectedSnapshotFingerprint
+                 (so the proposal and preview bodies are fully reconstructible)
   graphId
   graphBinding    { runName, graphDirectory, graphDevice, graphInode }
   profileBinding  { runName, profileDirectory, profileDevice, profileInode }
@@ -376,7 +378,13 @@ hold, and any failure refuses with a typed code and mutates nothing:
    the exact key set and well-formed 64-hex hashes; every `contentHex` decodes,
    is valid UTF-8, round-trips, and hashes to its stated hash.
 3. `approvedHash` equals the recomputed hash of `approved`. A mismatch is
-   `journal-approved-tampered`.
+   `journal-approved-tampered`. This shows only that the approved half was not
+   edited after it was written — it is **not** evidence that these are the
+   approved values, so it is never treated as such.
+3a. The retained inputs **reconstruct** the proposal body and the preview body,
+   and the recomputed proposal identity and approval fingerprint equal what the
+   journal claims (`journal-proposal-mismatch`, `journal-approval-mismatch`).
+   This runs before every other branch, including before any classification.
 4. `approved.graphBinding` and `approved.profileBinding` equal the bindings the
    store reports **now** — run name, directory name, device and inode for both
    trees. A journal from another run, another graph directory, another profile,
@@ -411,6 +419,27 @@ access. No cryptographic authenticity is claimed and none is implemented.
 
 Recovery classifies **every** file in `applyOrder` before applying **any** of
 them. It never walks the order applying as it goes.
+
+**And every authority check completes before the write loop.** Before a single
+recovery note write, recovery rebuilds the complete intended projection from the
+validated base, the before-images, the targets and the unchanged files;
+recomputes the comparison and takes the authoritative revisions from it; and
+re-derives the transaction, sidecar bytes and device bytes through the same pure
+`snapshotFromFiles` and `deriveUpdate` the applier uses. A journal whose stored
+revisions, projected snapshot, transaction or record hashes do not match refuses
+(`journal-revision-mismatch`, `journal-target-mismatch`) with **no note
+mutated**. Every refusal that concerns a pending file — records already accepted
+at the target, an outstanding transaction, or records at neither base nor target
+— also precedes the loop, each keeping its own code.
+
+An old base is never rebuilt from a newer sidecar. Where the records have moved
+past the base, the intended projection cannot be revalidated from retained
+evidence, so the ambiguity is refused rather than guessed at.
+
+Post-write verification is retained in full: the complete intended state is
+revalidated and the binding re-derived before publication, and both records are
+reopened and proven before the journal closes. Early validation narrows what can
+be attempted; it does not replace checking what actually landed.
 
 | Disk hash for a file | Classification |
 |---|---|
@@ -888,3 +917,28 @@ is removed. **The limitation this leaves is explicit: one incoming transaction
 per owned run.** A second experiment uses a fresh owned run. Durable archival
 would need additional native command or path authority; that is not approved, not
 requested here, and not implemented.
+
+
+## Supervisor review correction — recovery-preflight ordering (2026-09-16)
+
+A fourth finding, after the three above were in place: target validation still
+ran *after* recovery note writes. `validateJournal` checked structure and
+`approvedHash`, `recomputePlan` checked the base and `planId`, pending files were
+written, and only then did `acceptRecords` validate the intended snapshot and the
+re-derived transaction and record hashes.
+
+Reproduced on a fresh owned case stopped before the first note write, with only
+`target.transactionId` substituted: recovery wrote **both** pending notes and
+then refused `records-refused` / `transaction-mismatch`. The metadata was
+untouched, which is exactly why the previous test — which asserted only that
+metadata did not advance — passed.
+
+Corrected as described in "Recovery authority" item 3a and "Whole-transaction
+recovery preflight": the approval linkage is recomputed from the retained inputs
+before every branch, and the complete target binding is validated before the
+write loop. `approved` retains the three extra inputs that make the proposal and
+preview bodies reconstructible.
+
+This is an **ordering** correction. It is not a claim of cryptographic
+authenticity against a malicious owner of the profile directory: such a writer
+can still produce a fully self-consistent journal, and nothing here detects that.

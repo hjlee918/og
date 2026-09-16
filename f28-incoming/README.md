@@ -85,8 +85,9 @@ copy of its transaction's before-images and this slice has no approved way to
 archive that durably. Another experiment uses a fresh owned run.
 
 **Not every recovery case has a regression.** The graph-first device-step
-boundary, an unrelated outstanding transaction, a falsely-closed journal and a
-substituted binding are covered. The uncertain-clear branch, `profile-first`
+boundary, an unrelated outstanding transaction, a falsely-closed journal, a
+substituted binding and the pre-write ordering (no note is mutated before
+invalid recovery authority is rejected) are covered. The uncertain-clear branch, `profile-first`
 ordering, an intent-step failure and a failure during recovery's own roll-forward
 write are handled by the same typed refusals but have no test of their own.
 

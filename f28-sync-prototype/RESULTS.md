@@ -1933,8 +1933,14 @@ eight strict-type and plan-identity refusals; a retained journal refused at both
 phases with byte-identical preservation; an unparseable retained journal refused;
 an unrelated local change classified rather than adopted; a transaction file
 diverged from its target classified as `target-divergence`; and a substituted
-recovery target — transaction, sidecar hash or device hash — refused **before**
-anything is published, with the records still at base and the journal open.
+recovery target — transaction, sidecar hash or device hash — refused with the
+records still at base and the journal open.
+
+**Correction (2026-09-16):** that last claim said "refused **before** anything is
+published". That was true of the **metadata** and false of the **notes**. The
+test asserted only that metadata did not advance, and the implementation
+satisfied it while writing every pending note first and refusing afterwards at
+the record step. See the next section.
 
 Three pre-existing tests began failing when proposal identity became
 recomputed, because they mutated a proposal body without re-sealing it. They now
@@ -1975,8 +1981,13 @@ processes. Neither shared root was listed. One unrelated experimental app
 
 Verified by the regressions above: the graph-first device-step boundary; an
 unrelated outstanding transaction; a falsely-closed journal; a substituted
-binding refused before publication; drift inside and outside the transaction;
-proposal identity and strict typing; journal-slot refusal in all three states.
+binding refused before the **metadata** was published; drift inside and outside
+the transaction; proposal identity and strict typing; journal-slot refusal in all
+three states.
+
+**Superseded (2026-09-16):** a substituted binding was refused before metadata
+publication but *after* the pending notes had already been written. Corrected in
+the next section.
 
 **Not verified, and not claimed:**
 
@@ -1997,3 +2008,145 @@ proposal identity and strict typing; journal-slot refusal in all three states.
 - No whole-graph atomicity, no cross-process serialization, no transport, no
   second device. Creates and updates only.
 - One incoming transaction per owned run — the retention limitation above.
+
+## Incoming change application — recovery-preflight ordering correction (2026-09-16)
+
+One focused correction. The slice remains **not accepted**; this records the fix
+for review.
+
+### The finding, reproduced
+
+The three earlier corrections were present, but target validation still ran
+*after* recovery note writes. `validateJournal` checked structure and
+`approvedHash`; `recomputePlan` checked the base and `planId`; pending files were
+then written by `applyOneFile`; and only `acceptRecords` — reached afterwards —
+validated the intended snapshot and the re-derived transaction, sidecar and
+device hashes.
+
+The previous test "the journal binds the exact intended transaction, snapshot and
+record bytes" set this up correctly but asserted only that metadata did not
+advance, and its loop reused one case, so later iterations ran against
+already-changed notes and masked the ordering.
+
+Reproduced against the real anchored helper on a fresh owned case, stopped before
+the **first** note write, with only `target.transactionId` substituted and
+`approvedHash` recomputed:
+
+```
+recover: refused records-refused | storeCode: transaction-mismatch
+         wrote: ["file-a","file-new"]
+pages/A.md unchanged: false   -> "- a updated\n"
+pages/새 문서.md still absent: false -> "- 새 문서\n"
+metadata unchanged: true | intents: 0
+```
+
+Both notes were written — one updated, one created — and only then was the
+transaction refused. This violated the rule that invalid recovery authority must
+be rejected **before any recovery note mutation**.
+
+### What changed
+
+- **The approval linkage is recomputed, not assumed.** `approved` now also
+  retains `originReplicaId`, `graphNotes` and `planProjectedSnapshotFingerprint`,
+  which makes the preview body and the proposal body fully reconstructible from
+  the journal alone. `previewBodyFrom` and `proposalBodyFrom` are pure functions
+  shared by `planIncoming` and recovery, so `validateApprovalLinkage` recomputes
+  both the proposal identity (`journal-proposal-mismatch`) and the approval
+  fingerprint (`journal-approval-mismatch`) and refuses a mismatch. This runs
+  **first**, before any branch. `approvedHash` only ever showed that the approved
+  half was not edited after it was written; it was never evidence that those
+  values are the approved ones, and it is no longer treated as such.
+- **The complete target binding is validated before the write loop.**
+  `recomputePlan` now also checks the plan's projected snapshot
+  (`journal-plan-mismatch`), derives the authoritative revisions from the
+  executed plan and requires the journal's stored revisions to match for both
+  changed and unchanged files (`journal-revision-mismatch`), rebuilds the
+  complete intended projection from the validated base, before-images, targets
+  and unchanged files, and re-derives the transaction, sidecar and device hashes
+  through the existing pure `snapshotFromFiles` and `deriveUpdate` — refusing
+  `journal-target-mismatch` before a single note is written. No part of the
+  identity engine is duplicated.
+- **Every refusal for a pending file now precedes the write loop** while keeping
+  its specific code: `journal-base-mismatch` when the records are already
+  accepted at the target, `outstanding-transaction-with-unapplied-files` when a
+  transaction is outstanding, and `journal-base-mismatch` when the records are
+  neither at the base nor provably at the target. An old base is never rebuilt
+  from a newer sidecar; the ambiguity is refused.
+- **Post-write verification is unchanged.** `acceptRecords` still revalidates the
+  complete intended state and re-derives the binding before publishing, and
+  `proveRecordsAccepted` still reopens and proves both records before the journal
+  closes. Early validation narrows what can be attempted; it does not replace
+  checking what actually landed.
+
+### Tests actually run
+
+Real anchored helper, real modules, fresh owned synthetic cases, Intel
+(x86_64, macOS 14.8.3).
+
+| Suite | Result |
+|---|---|
+| `tests/incoming-application.test.js` | **46/46** (34 before, 12 added) |
+| `f28-incoming/checks/isolation-check.js` | 22/22 |
+| `tests/persistent-identity.test.js` | 51/51 |
+| pure: core, planner, executor, identity-capture, snapshot-comparison, read-response | 75/75 |
+| `tests/persistence.test.js` | 8/8 |
+| `tests/filesystem-application.test.js` | 23/23 |
+| `tests/compare-workflow.test.js` | 7/7 |
+| `tests/read-selected.test.js` | 5/5 |
+| `tests/stable-working-tree.test.js` | 12/12 |
+| `f28-identity-capture/checks/isolation-check.js` | 22/22 |
+
+Each substituted-target case now has its **own fresh owned case**, is stopped
+before the **first** note write, and asserts — on refusal — that every watched
+note is byte-identical, that the create target is still absent, that the journal
+bytes are unchanged, and that the metadata revision, both record byte hashes and
+the intent count are unchanged. The added cases are: substituted target
+transaction, snapshot, sidecar hash, device hash, stored revision for a changed
+file, stored revision for a file outside the transaction, and plan projection;
+a plausible approval fingerprint that is not proof of the approved proposal
+(`originReplicaId` changed, with the approval fingerprint re-sealed so the
+journal looks entirely consistent); a self-consistent `approvedHash` that is not
+proof of the approved values; an outstanding unrelated transaction with files
+still pending; records accepted at the target with a file still pending; and a
+forged journal that, once restored, recovers normally.
+
+The valid partial-recovery case is kept: with the first file applied and the
+second not, recovery writes only the remaining file, publishes the bound
+transaction and closes.
+
+Several pre-existing sub-cases in the combined tampering test had to re-seal the
+proposal identity and approval fingerprint to keep reaching the specific check
+they are about, since `graphId`, `planId` and `base` all sit in the proposal body
+and are now caught by the linkage check first. The apply-order sub-cases keep a
+plain `approvedHash` re-seal, because `validateJournal` rejects them structurally
+before the linkage check runs.
+
+### No live rerun
+
+Integration behaviour is unchanged: the application is not involved in recovery,
+and the coordinator's call sites and assertions are untouched. The previous
+**39/39** live result stands as historical evidence of that run, and is
+explicitly **not** coverage of this newly identified ordering case, which is
+covered by the filesystem regressions above.
+
+### Remaining limitations
+
+Unchanged from the previous section, and still true:
+
+- **Not all recovery cases are covered.** The uncertain-clear branch, a
+  `profile-first` ordering failure, an injected failure at the intent step, a
+  failure during recovery's own roll-forward write, and a store `recover`
+  returning `post-recovery-refusal` still have no regression of their own.
+- Injected failures establish recovery classification, **not** power-loss
+  durability.
+- The journal's validations establish **consistency, not authenticity**. This
+  correction is about ordering — rejecting invalid authority before mutating
+  notes — and is explicitly **not** cryptographic authenticity against a
+  malicious owner of the profile directory, who can still produce a fully
+  self-consistent journal.
+- Pre-write validation narrows what can be attempted; it does **not** close the
+  race against writers outside the cooperative lock. Recheck-then-rename is still
+  not a compare-and-swap.
+- One incoming transaction per owned run; creates and updates only; no
+  whole-graph atomicity, no cross-process serialization, no transport, no second
+  device.
