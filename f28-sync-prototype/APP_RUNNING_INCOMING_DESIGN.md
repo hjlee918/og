@@ -1,415 +1,410 @@
 # Applying an incoming change while the isolated OG test app is running
 
-Status: **proposal only**, 2026-09-16. Nothing here is implemented, approved or
-run. Written from documentation and source review; no graph, profile or helper
-was touched in producing it.
+Status: **proposal only**, corrected after supervisor review, 2026-09-16.
+Nothing here is implemented, approved or run. Written from documentation and
+source review; no graph, profile, helper or application was touched.
 
-It designs the smallest useful next experiment after the accepted app-closed
-slice ([INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md), results in
-[RESULTS.md](./RESULTS.md)). It reuses the existing modules and adds no second
-synchronization engine.
+It designs the next experiment after the **accepted** app-closed slice
+([INCOMING_CHANGE_DESIGN.md](./INCOMING_CHANGE_DESIGN.md), results in
+[RESULTS.md](./RESULTS.md)). That milestone stands within its documented limits
+and nothing here weakens it.
 
-## The decisive source finding
+## Retractions from the first draft of this design
 
-**OG already reconciles an externally changed file, and already refuses to do it
-twice.** `handle-changed!` (`src/main/frontend/fs/watcher_handler.cljs:59`) only
-reconciles when the bytes on disk differ from what the database holds:
+The first draft (`769338420`) made four claims that source does not support.
+They are withdrawn here and replaced by what the code actually does.
 
-```clojure
-(and (= "change" type) (= dir repo-dir)
-     (not= (string/trim content) (string/trim db-content))
-     ...)
-```
-
-and `reconcile-from-disk!` (`watcher_handler.cljs:45`) calls
-`file-handler/alter-file` with `:from-disk? true`. In `alter-file`
-(`src/main/frontend/handler/file.cljs:144`) the file write is guarded by
-`(when-not from-disk? (write-file-aux! ...))`, so reconciliation updates the
-database and re-renders but **writes no file**.
-
-Three consequences shape this whole design:
-
-1. There is no echo *write*. The only filesystem event the incoming write
-   produces is the one our own write produced.
-2. A duplicate or delayed watcher event for the same bytes finds
-   `content = db-content` and reconciles nothing. Double-indexing is prevented
-   by content comparison, not by a timer.
-3. **The first slice needs no application change at all.** The accepted
-   observation-only package already reaches this path, because it is OG's
-   ordinary "someone edited the file outside the app" behaviour.
-
-That last point is what makes a bounded first experiment possible inside current
-authority.
+| Withdrawn claim | What source shows |
+|---|---|
+| "two independent preconditions make lost updates reliably detectable and refused" | Both preconditions are check-then-write with a gap. They can both pass against the same old state. See §2. |
+| "cannot be applied or indexed twice"; "one database revision" | `handle-changed!` compares trimmed strings and `reconcile-from-disk!` awaits a backup before touching the database, so overlapping events can both pass the same stale comparison. See §3. |
+| "the only filesystem event the incoming write produces is the one our own write produced" | `set-missing-block-ids!` can transact `id::` properties into **other** pages, which OG then saves as real file writes. See §3. |
+| "the first slice needs no application change at all" / "reuse `incoming-application.js` unchanged" | The application is unchanged, but the **applier** is not: `applyIncoming` is wholly synchronous and has no awaited per-file reconciliation hook. See §4 and §7. |
 
 ---
 
 ## 1. Not overwriting an unsaved buffer, queued save, pending rename or failed save
 
-**The bridge is not sufficient, and must not be treated as sufficient.**
-`unfinished-local-write?` (`og_sync_bridge.cljs:348`) only knows about causes
-registered by `save-pending!`, which is called inside `write-file-impl!`
-(`src/main/frontend/fs/node.cljs:22`) — that is, *after* the edit has already
-travelled through the editor, the database, the outliner queue and the
-rate limiter. An edit can exist in at least four earlier states with **no bridge
-cause at all**:
+**The bridge's pending-cause view is not sufficient.** `unfinished-local-write?`
+(`og_sync_bridge.cljs:348`) only knows causes registered by `save-pending!`,
+which runs inside `write-file-impl!` (`fs/node.cljs:22`) — after the editor, the
+database, the outliner queue and the rate limiter. An edit can exist in at least
+four earlier states with no cause at all:
 
 | State | Where it lives | Source |
 |---|---|---|
-| Keystrokes in the editing block | `:editor/content` + the DOM input value | `state.cljs:930` `get-edit-input-id`, `editor.cljs:1322` reads `(gobj/get elem "value")` |
-| Mid-IME composition (Korean) | composition in progress; `save-current-block!` **returns without saving** | `editor.cljs:1322` guard on `state/editor-in-composition?` (`state.cljs:1710`) |
-| Committed to the database, queued | `state/get-file-write-chan`, flushed on a 1000 ms rate limit | `outliner/file.cljs:17` `batch-write-interval`, `:103` `<ratelimit-file-writes!` |
-| Flushed, writing, not yet at the IPC call | between `write-files!` and `save-pending!` | `outliner/file.cljs:73`, `node.cljs:22` |
+| Keystrokes in the editing block | `:editor/content` and the DOM input value | `state.cljs:930`; `editor.cljs:1322` reads `(gobj/get elem "value")` |
+| Mid-IME composition (Korean) | `save-current-block!` **returns without saving** | `editor.cljs:1322` guard on `state/editor-in-composition?` (`state.cljs:1710`) |
+| Committed, queued | `state/get-file-write-chan`, flushed on a 1000 ms rate limit | `outliner/file.cljs:17`, `:103` |
+| Flushed, dispatched, still writing | between `write-files!` and the IPC call | `outliner/file.cljs:73`; `node.cljs:22` |
 
-A **failed** local save closes its cause with `:failed` (`og_sync_bridge.cljs`
-`save-failed!`), which is not "pending" — so a failed save would pass a naive
-pending check while the file on disk is whatever the failure left. Disk state,
-not cause state, must decide.
+A **failed** save closes its cause as `:failed`, not `:pending`, so a naive
+pending check passes while the file on disk is whatever the failure left.
 
-**Quiescence proof for the experiment** — all of these, re-checked immediately
-before the write, and any failure refuses:
+### The signals, and exactly what each one does not prove
 
-1. `state/get-edit-input-id` is `nil` (no block is in edit mode).
-2. `state/editor-in-composition?` is false.
-3. `state/input-idle?` for the repo with an explicit `:diff` at least
-   `batch-write-interval` (1000 ms), so the rate limiter cannot still be holding
-   a batch.
-4. `outliner-file/*writes-finished?` for the repo is `{:value true}`.
-5. No bridge cause for that graph is `:pending` for either `:save` or `:rename`
-   (`unfinished-local-write?` semantics, but as one signal among several).
-6. The stable two-read disk check of the accepted slice still matches the
-   accepted sidecar (`INCOMING_CHANGE_DESIGN.md` §2b), which is the only check
-   that speaks about the bytes rather than about intentions.
+- **`state/get-edit-input-id` nil** — no block is in edit mode *now*. It says
+  nothing about the next keystroke.
+- **`state/editor-in-composition?` false** — no IME composition *now*.
+- **`state/input-idle?`** (`state.cljs:1745`) — **not a quiet-period proof.** It
+  returns true if the elapsed time since the last input exceeds `:diff`
+  **or** simply `(not (get-edit-input-id))`. With no block in edit mode it
+  returns true regardless of how recently anything happened.
+- **`outliner-file/*writes-finished?`** (`outliner/file.cljs:99`) — **dispatch,
+  not completion.** The flush function calls `write-files!` and then marks
+  `{:value true}`, but `write-files!` → `do-write-file!` → `save-tree!` →
+  `alter-files-handler!` (`modules/file/core.cljs:164`, `handler/file.cljs:203`)
+  returns a promise that nobody awaits. So `true` means "the batch was
+  dispatched", while the IPC writes may still be in flight. Its absence for a
+  repo is `nil`, not `true`.
 
-(1)–(5) are read through the harness's existing automation channel, the same
-channel the accepted coordinator already uses for `create_page`, `insert_block`
-and `flushPageThroughOg`. It adds no application permission, and it is a
-**test-harness affordance, not a product mechanism** — a real user's app exposes
-none of this.
+Together these are **evidence of an idle app, not proof that no save is in
+flight**. The design must not claim otherwise. The only statement about bytes is
+the accepted slice's stable two-read disk check against the accepted sidecar.
 
-**A pending rename** is the one case the design does not attempt: incoming
-rename and delete are out of scope, and an outstanding *local* rename cause for
-either the source or destination path refuses the whole proposal, exactly as
-`unfinished-local-write?` already specifies.
+### Settling an edit changes the base
 
-## 2. Ordering, the window, and what the mechanism actually controls
+If an unsaved edit is settled first, that commit flows to disk and **changes the
+accepted base**. An incoming proposal computed against the previous base is then
+stale by construction. The correct sequence is therefore:
 
-Ordering for one file: **settle → prove quiescent → write through the anchored
-helper with an exact precondition → observe OG reconcile → verify → publish
-records**.
+1. settle the edit and let it reach disk;
+2. **capture** it through the existing capture path so the records advance;
+3. **recompute the proposal and the preview against the new accepted base**;
+4. obtain a fresh approval.
 
-The window between checking local state and writing is real and is not closed:
+Applying a previously approved proposal after settling an edit is forbidden, and
+the accepted slice already enforces it: the base no longer matches and
+`planIncoming` refuses `unknown-base`.
 
-- The quiescence proof of §1 **observes**; it controls nothing. OG can begin a
-  save in the instant after it passes.
-- The helper's cooperative lock serializes **participating helper invocations
-  only**. OG, Finder, iCloud and external editors do not honour it.
-- The helper's `EXPECT` recheck happens immediately before `renameat`, under
-  that lock, but recheck and rename are two operations.
+## 2. Ordering and the window — what is *not* guaranteed
 
-What actually protects each direction is a precondition, and there is one for
-each:
+**Withdrawn:** the claim that the two preconditions reliably detect a lost
+update. Both are check-then-write:
 
-- **Us overwriting OG:** if OG wrote in the window, the destination content hash
-  no longer equals `EXPECT`, and the helper refuses
-  (`destination-precondition-failed`). Detection, not exclusion.
-- **OG overwriting us:** OG's own save path reads the file back and compares it
-  with `(or old-content (db/get-file repo rpath) "")` before writing. On a
-  mismatch it publishes `[:file/not-matched-from-disk ...]` and **does not
-  write** (`node.cljs:22`, the `contents-matched?` branch). The event handler
-  (`src/main/frontend/handler/events.cljs:374`) clears editing and opens a diff
-  modal. So an un-reconciled incoming change makes OG stop and ask, rather than
-  clobber; once reconciliation has run, `old-content` is the new content, disk
-  matches, and OG saves normally. Note `skip-compare? true` bypasses the compare
-  entirely, but the note-saving path does not use it: `save-tree!` reaches
-  `alter-files-handler!` (`handler/file.cljs:203`), which passes only
-  `{:old-content ...}`. Only the global-config, plugin-config and persist-var
-  writers pass `skip-compare?`.
+- OG's save path reads the file **asynchronously**
+  (`p/let [disk-content (ipc/ipc "readFile" ...)]`) and only later calls
+  `ipc/ipc "writeFile"` (`fs/node.cljs:22`). The compare and the write are
+  separated by at least one IPC round trip.
+- The helper rechecks `EXPECT` immediately before `renameat`, under its
+  cooperative lock, but recheck and rename are still two operations.
 
-Neither is a lock, and the experiment must claim neither. The honest statement
-is: two independent preconditions make a lost update *detectable and refused*,
-in a window nothing serializes.
+So both checks can pass against the same old state before either write lands,
+and the later write wins silently. What is true is narrower:
 
-## 3. How OG notices and indexes the change, once
+- a sequence where one write *completes* before the other's check still refuses;
+- OG's `contents-matched?` branch, when it does fire, publishes
+  `[:file/not-matched-from-disk ...]` and does not write
+  (`handler/events.cljs:374` clears editing and opens a diff modal);
+- once reconciliation has run, OG's `old-content` is the new content, disk
+  matches, and OG saves normally.
 
-The chosen path is the **existing** one, unmodified:
+**The honest statement is: interleaving is neither prevented nor reliably
+detected.** The cooperative lock serializes participating helper invocations
+only. Nothing serializes OG against the helper. This is the central reason the
+recommendation below avoids concurrent editing entirely.
+
+## 3. How OG notices the change — and why it is not exactly-once
+
+The path is OG's ordinary external-change path:
 
 ```
 helper write → chokidar "change" (awaitWriteFinish, fs_watcher.cljs:88)
-  → publish-file-event! → handle-changed! (watcher_handler.cljs:59)
-    → content ≠ db-content ?  → reconcile-from-disk! (watcher_handler.cljs:45)
-        → alter-file :from-disk? true  → DB + re-render, NO file write
+  → publish-file-event!* reads content AT EVENT TIME (fs_watcher.cljs:~60)
+    → handle-changed! (watcher_handler.cljs:59)
+      → trimmed content ≠ trimmed db-content ?
+        → reconcile-from-disk! (watcher_handler.cljs:45)
 ```
 
-It cannot be applied or indexed twice because:
+Four source facts that the first draft got wrong or omitted:
 
-- the content guard in `handle-changed!` makes a repeat event with identical
-  bytes a no-op;
-- `:from-disk? true` suppresses the write-back in `alter-file`, so no second
-  filesystem event is generated;
-- no competing path is enabled. The bridge's own incoming machinery
-  (`register-incoming-cause!`, `og_sync_bridge.cljs:360`, and
-  `reconcile-incoming!`) is **not** used in this slice; in the accepted package
-  its ports are absent, so `observe-watcher!` (`:633`) resolves
-  `complete-state!` to `nil`, matches nothing and returns `{:status :ordinary}`.
-  It records; it does not act.
+1. **The guard is a trimmed-string comparison**, not a byte comparison:
+   `(not= (string/trim content) (string/trim db-content))`. A change that is
+   **whitespace-only at the edges** — a trailing newline added or removed — is
+   therefore **invisible to OG**. It is written to disk, but never reconciled and
+   never indexed. This is a supported incoming change that OG will silently not
+   show.
+2. **Reconciliation is not serialized.** `reconcile-from-disk!` awaits
+   `backup-file!` before calling `alter-file`. Two watcher events arriving close
+   together both read the same `db-content` in `handle-changed!`, both pass the
+   guard, and both proceed — producing two backups and two `alter-file` calls.
+   There is no lock, no queue and no dedupe key.
+3. **A delayed event carries the content read at its own event time**, which may
+   be older than what is now on disk. If that older payload differs from
+   `db-content` after trimming, it reconciles the database **backwards** to the
+   older content.
+4. **Reconciliation is not free of graph writes.** Besides the backup,
+   `reconcile-from-disk!` calls `set-missing-block-ids!`
+   (`watcher_handler.cljs:29`). For every `((uuid))` block reference in the
+   incoming content whose target block exists but lacks a matching `id::`
+   property, it calls `editor-property/batch-set-block-property!`
+   (`handler/editor/property.cljs:76`), which runs `outliner-tx/transact!` with
+   `:outliner-op :save-block`. That reaches `updated-page-hook`
+   (`outliner/pipeline.cljs:12`) → `sync-to-file` → the write queue → real file
+   writes **to other pages**, each with its own bridge save cause and its own
+   watcher event.
 
-**Two OG-side side effects the experiment must expect rather than flag as
-tampering:**
+### Classified side effects of reconciling one incoming file
 
-- For an **update**, `reconcile-from-disk!` passes `backup? true`, so OG writes
-  `logseq/bak/<page>/<ISO timestamp>.Desktop.md`
-  (`src/electron/electron/backup_file.cljs:7`, `:36`). That file ends in `.md`,
-  and `hash_tree` in the anchored helper counts every `.md`/`.org` outside
-  `logseq/.og-sync`, so **the whole-graph note hash and note count will change**.
-  Per-file assertions stay exact; the whole-graph hash must be asserted
-  differently (see the test plan).
-- For a **create**, `db-content` is blank, so `backup?` is false and no bak file
-  is written.
-- `truncate-old-versioned-files!` keeps only the newest six backups, so OG also
-  deletes inside the graph over repeated runs.
+| Effect | When | Where |
+|---|---|---|
+| Database update and re-render | content differs after trimming | in memory |
+| Backup file | update only (`db-content` non-blank) | `logseq/bak/<page>/<ISO>.Desktop.md` — a `.md` the helper's `hash_tree` counts |
+| Backup pruning | more than six versions | deletes inside `logseq/bak` (`backup_file.cljs:27`) |
+| **`id::` property writes to other pages** | incoming content contains block refs to blocks lacking `id::` | ordinary note files anywhere in the graph |
+| Nothing at all | whitespace-only edge change | — |
+
+The first draft's "backup exception" is **not** broadened to cover the `id::`
+writes. They are a separate, larger effect: they mutate note files that are not
+part of the transaction, under the accepted sidecar, and would make those files
+diverge from their accepted content hashes. The first experiment must therefore
+**use content with no block references**, and must assert that no file outside
+the transaction changed — an assertion that would fail, correctly, if block refs
+were present.
 
 ## 4. Telling our own change from a genuine new edit
 
-Not by time. The evidence is exact and already available:
+Evidence is exact — graph, path, content hash, and the approved transaction —
+never elapsed time:
 
-- **Graph:** the observation event carries the repo the watcher event resolved
-  to (`handle-changed!` passes it to `observe-watcher!`). Global-directory
-  events are bound to OG's `local` placeholder and are **unbound** — they must
-  never be attributed to the graph.
-- **Path:** the exact UTF-8 relative path, compared byte-for-byte.
-- **Content:** the watcher event's `content` hashed and compared with the exact
-  `targetContentHash` the approval bound.
-- **Transaction:** that target hash comes from `approved.target`/`approved.files`
-  in the retained journal, which the accepted slice already binds to the
-  approved proposal and preview.
+- **Graph:** the repo `handle-changed!` resolved. Global-directory events bind to
+  OG's `local` placeholder and are **unbound**; never attribute them to the graph.
+- **Path and content:** exact UTF-8 path; `sha256(content)` compared with the
+  `targetContentHash` the approval bound in the retained journal.
+- **Transaction:** that hash comes from `approved.files`, already bound to the
+  approved proposal and preview by the accepted slice.
 
-Classification for one observation:
-`graph matches AND path matches AND sha256(content) == the approved target hash
-for that path AND that file's journal entry is not yet marked reconciled`
-⇒ **our change**. Anything else — a different hash at the same path, a path not
-in `approved.applyOrder`, an unbound global event — is a **genuine observation**
-and must be recorded as such, never suppressed. A second observation with our
-exact target hash after reconciliation is a duplicate and is idempotent by §3.
+A real edit on top of applied content produces a different hash at the same path,
+so it is never mistaken for ours. But two limits must be stated:
 
-The asymmetry that matters: a real user edit *on top of* our applied content
-produces a different hash at the same path, so it is never mistaken for an echo.
+- **Duplicates are not suppressed by us and not prevented by OG.** Our
+  classification can mark a second identical observation as a duplicate *of our
+  cause*; it cannot stop OG from reconciling twice (§3.2). "Exactly once" is not
+  claimed.
+- **Reconciliation-induced writes to other pages** (§3.4) appear as genuine local
+  save causes on files we did not target. They are real OG edits, not echoes, and
+  must be reported as such.
 
 ## 5. When each stage is finished — disk success is not visible-app success
 
-Four distinct completions, asserted separately and never conflated:
-
 | Stage | Done when | Evidence |
 |---|---|---|
-| Note write | the helper's staged write, precondition recheck and rename landed and the file reads back twice identically with the approved hash | anchored helper only; no app involvement |
-| UI reconciliation | OG's database holds the new bytes for that path **and** the page renders them | `db/get-file repo path` equals the content; the rendered text contains it; `db/set-file-last-modified-at!` advanced |
-| Identity publication | the accepted slice's binding is proven: no outstanding intent, `openGraph` accepted, transaction, snapshot and both record byte hashes equal the approval | unchanged from the accepted slice |
-| Transaction complete | all three above, then the journal closes | unchanged |
+| Note write | staged write, `EXPECT` recheck, rename landed; file reads back twice identically with the approved hash | helper only |
+| UI reconciliation | OG's database holds the new bytes for that path **and** the page renders them | `db/get-file repo path`; rendered text; `set-file-last-modified-at!` advanced |
+| Identity publication | the accepted binding proven: no outstanding intent, `openGraph` accepted, transaction, snapshot and both record byte hashes equal the approval | unchanged |
+| Transaction complete | all three, then the journal closes | unchanged |
 
-`reconcile-from-disk!` is asynchronous (`p/let`, with `re-render-root?`), so
-reconciliation must be **polled with a bounded timeout**. A timeout is not
-success: it is `reconciliation-timeout`, the journal stays open, and identity is
-not published. Disk success with no reconciliation is a real and reportable
-state — it is exactly what the app-closed slice produces on purpose — and the
-experiment must be able to say so rather than round it up.
+Reconciliation is asynchronous, so it must be **polled with a bounded timeout**.
+A timeout is `reconciliation-timeout`: the journal stays open, identity is not
+published, and it is reported as a real state — not rounded up. For a
+whitespace-only change (§3.1) reconciliation will **never** arrive; that input is
+excluded from the first experiment rather than being allowed to time out
+misleadingly.
 
 ## 6. Failure midway
 
-Every protection from the accepted slice is preserved unchanged: pre-write
-authority validation before any note mutation, retained before-images, the
-whole-transaction preflight, roll-forward-only recovery, the bound
-transaction/snapshot/record-hash proof, and the rule that a missing record is
-never success.
+Every accepted protection is preserved unchanged: pre-write authority validation
+before any note mutation, retained before-images, the whole-transaction
+preflight, roll-forward-only recovery, the bound transaction/snapshot/record
+proof, and "a missing record is never success."
 
-What is new is that OG may be partway through *indexing*:
+New states this slice introduces:
 
-- **Coordinator dies after the note write, before reconciliation.** Disk is
-  ahead of the database. OG's next graph load re-reads files, and the content
-  guard reconciles it then. Recovery classifies from disk exactly as today; the
-  journal stays open until the records are proven.
-- **Coordinator dies after reconciliation, before identity publication.** The
-  accepted "disk ahead of the sidecar" state. `openGraph` refuses
-  `snapshot-mismatch`; the journal distinguishes it from an uncaptured local
-  edit. Unchanged.
-- **The app dies mid-reconciliation.** Reconciliation is database-only and
-  content-guarded, so the next load re-derives from the file. Nothing on disk is
-  half-written by OG.
-- **Reconciliation fails or never arrives.** `reconciliation-timeout`; nothing is
-  reported complete; the journal, before-images and records are retained. The
-  operator may quit the app and fall back to the accepted app-closed recovery,
-  which is already verified.
-- **The app writes during the window.** The helper's `EXPECT` refuses; or, if OG
-  wrote after our rename, OG's own compare raises the diff modal and refuses.
-  Both are recorded; neither is resolved automatically.
+- **Written, not reconciled.** Disk ahead of the database. OG re-reads at the
+  next graph load. The journal stays open until the records are proven.
+- **Reconciled, identity not published.** The accepted "disk ahead of the
+  sidecar" state; `openGraph` refuses `snapshot-mismatch`.
+- **Reconciled twice.** Two backups, possibly two database revisions. Detected by
+  counting reconciliations and backups, reported, not prevented.
+- **Reconciled backwards by a delayed payload.** The database holds older content
+  than disk. Detected by comparing the database against the approved target
+  after the poll window; reported as `reconciliation-regressed`, never as success.
+- **Other pages written by `set-missing-block-ids!`.** Files outside the
+  transaction diverge from their accepted hashes. The accepted applier already
+  refuses this at publication as `unrelated-local-change` — correctly — so the
+  transaction cannot complete. Excluded by construction in the first experiment.
+- **App dies mid-reconciliation.** Reconciliation is database-only; the next load
+  re-derives from the file.
 
-**A missing reconciliation record is never turned into success.** The one new
-failure mode with no equivalent today is a reconciliation that *appears* to
-succeed while the database disagrees, which is why §5 asserts the database
-contents rather than the absence of an error.
+## 7. What must change — application versus applier
 
-## 7. Application hooks and permissions
+**The application package needs no change** for the recommended step: the
+accepted observation-only `Logseq OG F28 IdentityCapture` build is reused
+byte-identically, and the watcher path is OG's ordinary behaviour, present in
+every build. No new IPC, no process-launch exception, no network permission; the
+guards in `f28-origin/NETWORK_CONTROL.md` are untouched.
 
-**Option B as recommended below requires none.** The accepted
-`Logseq OG F28 IdentityCapture` package is reused unmodified: observation-only
-runtime, no persistence port, no synchronization port, no helper execution, no
-new IPC, no process-launch exception, no network permission. The watcher path it
-exercises is OG's ordinary behaviour, present in every build.
+**The applier does need a small, explicit change.** `applyIncoming` is wholly
+synchronous — it contains no `await`, no `async` and no promise — and it writes
+notes, publishes identity and closes the journal in one pass. It has no place to
+wait for a real reconciliation. The **smallest** orchestration change is:
 
-**Option A would require a real in-app incoming runtime**, and that is a large
-authority change. `reconcile-incoming!` (`og_sync_bridge.cljs:491`) needs three
-injected ports that the observation runtime does not have
-(`make-observation-runtime`, `:190`): `:complete-state!` must read the
-filesystem from the renderer, `:reconcile!` must call
-`watcher-handler/reconcile-from-disk!`, and `:record-reconciliation-progress!`
-must persist progress. Supplying them means enabling persistence and
-synchronization ports inside the application — precisely what the current
-package's manifest asserts are absent, and what every result so far has relied
-on. It is not in scope here and is not requested.
+1. Make `applyIncoming` `async`, and add one optional injected port
+   `reconcile!(fileId, approvedFile)` returning a promise. When absent, behaviour
+   is exactly today's (this preserves the accepted app-closed path unchanged).
+2. After each file's read-back verifies and its progress entry is written, if the
+   port is present, `await` it. A rejection or timeout throws
+   `reconciliation-timeout`, which lands in the existing `interrupted` path: the
+   journal stays open, identity is **not** published, before-images are retained.
+3. Publish identity only after every file's reconciliation resolved.
+4. On restart, `recoverIncoming` treats a file as `applied` from disk exactly as
+   today, and — because reconciliation leaves no durable marker we control — it
+   **re-runs the reconciliation wait** for every file before publication rather
+   than assuming an earlier run reconciled. No new journal field is trusted for
+   this.
 
-Nothing in this design relaxes the network or process guards described in
-`f28-origin/NETWORK_CONTROL.md`.
+**The gate must not be faked.** `assertAppClosed` (`incoming-application.js:191`)
+requires `verdict.closed === true` and is the accepted contract. A quiescence
+check must **not** return `closed: true` to slip past it. Instead the gate
+becomes mode-aware with two explicit modes, and the applier passes its mode:
+
+- `mode: 'app-closed'` — today's contract, unchanged, still the only mode the
+  accepted results describe;
+- `mode: 'app-idle'` — the new, weaker mode; the verdict carries
+  `{ mode: 'app-idle', idle: true }` and never `closed: true`.
+
+Results, evidence and documentation must name the mode, so no app-idle run can
+ever be read as an app-closed result.
+
+**Option "real editing barrier" would need more.** To hold OG still rather than
+observe that it is still, there is no existing switch: `state/clear-edit!` and
+`escape-editing` end the current edit but prevent nothing, and the outliner queue
+has no pause. It would need new application hooks — a guarded "suspend writes"
+flag consulted by `<ratelimit-file-writes!` and by the editor's save path — plus
+a way for the coordinator to set it, which the observation-only package
+deliberately has no channel for. That is new in-app authority and is not
+requested here.
 
 ---
 
-## The two options
+## The two options, named accurately
 
-### A. Apply while editing continues, with demonstrated coordination
+### A. Idle-app external-change observation experiment
 
-Requires the in-app incoming runtime of §7, plus a real answer to §1's window
-while the user is actively typing — including mid-IME composition, where OG
-itself will not save. The coordination would have to be demonstrated, not
-assumed, and the failure surface (partial reconciliation during an active edit,
-a save racing an incoming write on the same block) is the hardest part of the
-problem.
+The app is **open and idle**. The harness does not type; it *asserts* the idle
+signals of §1 and accepts that they are evidence, not proof. One incoming file is
+written and OG's ordinary external-change path is observed end to end.
 
-### B. A short explicit "apply pending changes" pause
+This proves: OG indexes an externally applied change while running, how many
+reconciliations and backups result, and whether the database converges on the
+approved target. It explicitly proves **nothing about concurrent-edit safety**.
 
-Settle local edits, prove the app is quiescent, hold still, apply, reconcile,
-verify, resume. No application change; uses OG's existing external-change path;
-every new assertion is an observation of state OG already maintains.
+### B. Real temporary editing/save barrier
 
-## Recommendation: **B**, and B first
+Actually suspend editing and the write queue for the window. Requires the new
+in-app hooks and the channel to set them described in §7 — new application
+authority, in the package whose whole value so far has been that it has none.
 
-**In everyday language:** the app stays open the whole time. When an incoming
-change is ready, the experiment first makes sure you are not in the middle of
-typing — it finishes saving whatever is in the block you were editing, waits for
-the app's one-second save batch to flush, and checks that nothing is still
-queued. Then, in that quiet moment, it writes the file. The app notices the file
-changed — the same way it would if you had edited the file in another editor —
-and updates itself on screen. Then the experiment checks that what is on screen
-and in the app's index really matches what was written, and only then records the
-change as accepted.
+## Recommendation
 
-**Why B and not A:** B needs no new application authority at all, which means the
-first app-running result can be obtained on the *already-accepted* package with
-no new trust placed in the app. It also isolates one question — "does OG index an
-externally applied change correctly and exactly once, while running?" — from the
-much harder question of concurrent editing. A remains possible later; B is the
-evidence A would need anyway.
+**Do A, and call it what it is: an observation experiment, not an integration.**
 
-**What B does not do:** it does not prevent anyone from typing. "Temporarily
-prevents new edits" is, in this synthetic experiment, the harness simply not
-typing and then *asserting* that no input arrived (the editor's last-input time
-and the write-queue state are unchanged across the window). There is no OG
-read-only mode being engaged, and a real user could type at any moment. The
-window is short, and the preconditions of §2 are what make that safe to detect —
-not safe to prevent.
+It is the smallest step that produces evidence, it reuses the accepted package
+byte-identically, and its only code change is the one injected `reconcile!` port
+and the mode-aware gate. Crucially, the questions §2 and §3 raise — interleaving
+is not reliably detectable, reconciliation is not exactly-once, reconciliation
+writes to other pages — are exactly the questions A is designed to *measure*
+rather than assume away.
 
-## Smallest first slice
+**In everyday language:** we leave the app open but do not touch it. We write one
+file from outside, then watch carefully: does the app notice, how many times does
+it react, does it make backup copies, does it end up showing exactly what we
+wrote? We learn how the app really behaves. We are **not** yet claiming it is
+safe to do this while you are typing — that is a separate, larger question, and
+this experiment is what would tell us whether it is worth asking.
 
-One host, Intel, one fresh owned synthetic graph, the accepted package reused
-unmodified, app **running** throughout, creates and updates only, one incoming
-transaction per owned run.
+**Separating the two claims, plainly:**
 
-1. Reuse `incoming-application.js` unchanged for proposal, preview, approval,
-   per-file application, journal and recovery.
-2. Replace the app-closed gate with a **quiescence gate** implementing §1, and
-   keep the gate's existing contract: re-evaluated before every write, an
-   unreadable state is uncertain and refuses, and it is never cached.
-3. Add a **reconciliation observer** in the coordinator: after each file's
-   read-back verifies, poll OG's database for that path until it matches or a
-   bounded timeout expires, using the automation channel.
-4. Publish identity only after every file's reconciliation is confirmed.
-5. Record the observation stream for the whole window as evidence.
-
-No new native command, no new root, no new IPC, no new permission.
+- *We can observe normal OG behaviour* — A delivers this.
+- *We can safely integrate incoming writes with active editing* — A does **not**
+  deliver this, and nothing in this document claims it. B, or something like it,
+  would be required, and its cost is new in-app authority.
 
 ## Test plan — one Intel machine, synthetic, no transport
 
-| # | Case | Required outcome |
-|---|---|---|
-| 1 | Idle app, one update + one Korean create | both files written; OG reconciles both; database and rendered page show the new bytes; identity accepted at the bound transaction |
-| 2 | Unsaved edit in the target block | the gate refuses `app-not-quiescent`; **no note written**; the buffer is still in the editor; the edit is not lost |
-| 3 | Unsaved edit settled first, then apply | `save-current-block!` commits, the batch flushes, `*writes-finished?` turns true, the gate passes, application proceeds |
-| 4 | Queued save (edit committed, within the 1 s batch) | the gate refuses until the queue flushes; nothing written meanwhile |
-| 5 | Korean mid-IME composition | the gate refuses while `editor-in-composition?` is true; no write; no data loss |
-| 6 | Pending local rename touching either path | refused `unfinished-local-write`; nothing written |
-| 7 | Duplicate and delayed watcher events for our exact bytes | exactly one reconciliation; the repeats are no-ops by the content guard; one database revision |
-| 8 | A real local edit on top of the applied content | classified as a genuine observation, never an echo; OG reconciles or refuses on its own terms; the incoming transaction does not claim it |
-| 9 | Reconciliation never arrives (timeout) | `reconciliation-timeout`; identity **not** published; journal open; before-images retained; safe quit and app-closed recovery completes it |
-| 10 | Coordinator killed after the note write, before reconciliation | on restart, recovery classifies from disk, does not double-write, and does not report success |
-| 11 | Korean content and Korean paths throughout | exact UTF-8 bytes preserved; rendered text matches; NFC/NFD and case collisions still refused |
-| 12 | Feature off | with the coordinator not running, normal OG editing, saving, renaming and reopening behave exactly as before; the observation runtime records but changes nothing |
-| 13 | OG's own backup writes | after an update, `logseq/bak/**.md` exists and the whole-graph note **count and hash change**; this is expected, is attributed to OG, and per-file hashes remain exact |
+**Layout constraint, corrected.** The accepted slice permits **one incoming
+transaction per owned run**, and a retained journal refuses a second proposal.
+So each scenario that mutates or fails gets its **own fresh owned run** — a fresh
+graph directory and profile directory under the existing approved roots — not one
+shared graph. Read-only refusal cases that never write may share a run, and are
+marked so.
 
-Case 13 is the reason the whole-graph note hash cannot be asserted as unchanged
-in this slice, as it was in the app-closed slice. The correct assertion is: every
-file named by the accepted sidecar has its exact expected hash, and every extra
-`.md` that appeared is under `logseq/bak/`.
+| # | Case | Own run? | Required outcome |
+|---|---|---|---|
+| 1 | Idle app, one English update, no block refs | yes | written; reconciled; database and rendered page match; identity accepted at the bound transaction |
+| 2 | Idle app, one Korean create, Korean path | yes | as above, exact UTF-8 preserved |
+| 3 | Unsaved edit present in any block | shared (no write) | gate refuses `app-not-idle`; **nothing written**; the buffer survives |
+| 4 | Mid-IME Korean composition | shared (no write) | refuses while `editor-in-composition?`; nothing written |
+| 5 | Queued save inside the 1000 ms batch | shared (no write) | refuses; nothing written |
+| 6 | Pending local rename touching either path | shared (no write) | refuses `unfinished-local-write` |
+| 7 | Settle an unsaved edit, then apply | yes | the edit is captured, records advance, the old proposal refuses `unknown-base`, a **recomputed** proposal and fresh approval succeed |
+| 8 | Duplicate / delayed watcher events | yes | **count** reconciliations and backups; assert the database converges on the approved target; no exactly-once claim |
+| 9 | Delayed older payload | yes | if the database regresses, report `reconciliation-regressed`; never publish identity |
+| 10 | Whitespace-only edge change | yes | OG does **not** reconcile; the experiment reports `not-reconcilable-by-og` rather than timing out silently; identity not published |
+| 11 | A real local edit on top of applied content | yes | classified as a genuine observation, never an echo; the transaction does not claim it |
+| 12 | Reconciliation timeout | yes | `reconciliation-timeout`; identity not published; journal open; app-closed recovery then completes it |
+| 13 | Coordinator killed after the note write | yes | restart re-runs the reconciliation wait; no double write; no success reported |
+| 14 | Incoming content **containing** a block ref | yes | `set-missing-block-ids!` writes other pages; publication refuses `unrelated-local-change`; the divergence is reported, not absorbed |
+| 15 | Feature off | shared | with no coordinator running, editing, saving, renaming and reopening behave exactly as before |
 
-### Untested recovery branches
+Case 14 exists to *demonstrate* the §3.4 effect rather than hide it, and is why
+cases 1 and 2 use content with no block references.
 
-**Critical for this slice — must be covered before it can be accepted:**
+Whole-graph note hash cannot be asserted unchanged in any case that reconciles an
+update: backups are `.md` and are counted. The assertion is per-file exact hashes
+for every accepted file, plus an explicit inventory of every extra `.md`, each of
+which must be under `logseq/bak/`.
 
-- reconciliation timeout with the journal left open (case 9);
-- coordinator death between note write and reconciliation (case 10);
-- a local save racing the write window and tripping `EXPECT`
-  (`destination-precondition-failed`) with the file preserved;
-- OG's `:file/not-matched-from-disk` path being reached, and the experiment
-  reporting it rather than absorbing it.
+### Recovery branches: critical here versus deferred
 
-**Explicitly deferred, unchanged from the accepted slice:**
+**Critical — must be covered before this slice can be accepted:** reconciliation
+timeout (12); coordinator death before reconciliation (13); a local save tripping
+`EXPECT` with the file preserved; OG's `:file/not-matched-from-disk` path being
+reached and reported; and the two non-exactly-once behaviours (8, 9).
 
-- the uncertain-clear branch of the record store;
-- `profile-first` publication ordering;
-- an injected failure at the intent step;
-- a failure during recovery's own roll-forward write;
-- a store `recover` returning `post-recovery-refusal`;
-- power-loss durability, cross-process serialization, second-host behaviour.
+**Explicitly deferred, unchanged:** the record store's uncertain-clear branch;
+`profile-first` ordering; an injected failure at the intent step; a failure
+during recovery's own roll-forward write; a store `recover` returning
+`post-recovery-refusal`; power-loss durability; cross-process serialization;
+second-host behaviour.
 
 ## Bounded acceptance criteria
 
-The slice is acceptable if, and only if:
-
-1. Cases 1–13 pass on one fresh owned synthetic graph, Intel, app running.
-2. No note is written while the quiescence gate is unsatisfied, in any case.
-3. Every reconciliation is confirmed against OG's database before identity is
-   published, and a timeout blocks publication.
-4. Exactly one database revision results from each applied file, across
-   duplicate and delayed watcher events.
+1. Cases 1–15 pass, each mutating case on its own fresh owned run.
+2. No note is written while the idle gate is unsatisfied.
+3. Identity is published only after reconciliation is confirmed against OG's
+   database; timeout, regression and non-reconcilable inputs all block it.
+4. Reconciliation and backup **counts** are recorded. No exactly-once claim is
+   made anywhere in the results.
 5. A genuine local edit is never classified as an echo.
-6. The application package is byte-identical to the accepted one, and its
-   manifest still asserts observation-only with persistence and synchronization
-   ports absent.
-7. Every claim distinguishes disk success from visible-app success.
+6. The application package is byte-identical to the accepted one and its manifest
+   still asserts observation-only with persistence and synchronization ports
+   absent.
+7. Every result names its gate mode, and no `app-idle` run is described in
+   app-closed terms.
+8. Results state plainly that concurrent-edit safety was not tested.
 
 ## Decisions requiring user approval
 
-1. **Run an incoming application while the owned test app is open.** Every
-   accepted result so far required it closed. This is the substance of the
-   request.
-2. **The harness may drive OG's own editor and query its state through the
-   existing automation channel** to settle edits and prove quiescence — the same
-   channel already used for page creation and flushing, adding no application
-   permission, but doing so in order to authorise a write rather than only to
-   observe.
-3. **Accept that the whole-graph note hash will change** because OG writes
-   `logseq/bak/**.md` during reconciliation, and that per-file hashes plus a
-   bak-scoped exception replace it as the assertion.
-4. **Accept a short quiet window that is asserted, not enforced.** Nothing
-   prevents typing; the experiment detects and refuses rather than excludes.
-5. **Confirm Option B before Option A**, deferring the in-app incoming runtime —
-   and with it any enabling of persistence or synchronization ports inside the
-   application — to a separate, later request.
+1. **Run an incoming application while the owned test app is open and idle**,
+   understanding that idleness is asserted from signals that are evidence, not
+   proof, and that interleaving is neither prevented nor reliably detected.
+2. **Add the one injected `reconcile!` port and make `applyIncoming` async**, with
+   the app-closed path unchanged when the port is absent.
+3. **Make the gate mode-aware** with an explicit `app-idle` mode that never
+   returns `closed: true`, so the accepted app-closed contract is preserved and
+   distinguishable.
+4. **Accept that reconciliation is not exactly-once**, and that the experiment
+   measures and reports reconciliation and backup counts instead of guaranteeing
+   one.
+5. **Accept the graph-write side effects**: `logseq/bak/**.md` from backups, and
+   — demonstrated deliberately in case 14 — `id::` property writes to other pages
+   via `set-missing-block-ids!`.
+6. **Allow the harness to read app state and settle edits through the existing
+   automation channel**, adding no application permission, while noting this is a
+   test affordance a real user's app does not have.
+7. **Defer option B** (a real editing/save barrier) and the new in-app hooks it
+   requires to a separate, later request.
 
 Incoming rename and delete, real transport, a second device, personal-data
 enrollment and daily use remain out of scope and unrequested.

@@ -10,8 +10,10 @@ slice is implemented in `src/incoming-application.js` and verified in
 with the test application closed during application.
 
 [APP_RUNNING_INCOMING_DESIGN.md](./APP_RUNNING_INCOMING_DESIGN.md) is a proposal
-only: it designs the next experiment, applying an incoming change while the
-isolated test app is running. Nothing in it is implemented, approved or run.
+only: it designs an **idle-app observation experiment** — writing one incoming
+file while the isolated test app is open but untouched, and measuring how OG's
+ordinary external-change path behaves. It explicitly does not address
+concurrent-edit safety. Nothing in it is implemented, approved or run.
 
 Run its focused suite with the identity helper, in fresh owned children of one
 fresh run:
